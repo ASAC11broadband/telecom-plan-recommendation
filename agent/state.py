@@ -1,23 +1,72 @@
-"""파이프라인 전역 상태 — 각 단계가 무엇을 읽고 쓰는지의 계약."""
+# -*- coding: utf-8 -*-
+"""파이프라인 전역 상태 + LLM 팩토리.
+
+- PipelineState: 각 단계가 무엇을 읽고 쓰는지의 계약. 새로 합류하면 여기부터 읽는다.
+- get_llm / get_eval_llm: 모델을 바꾸려면 이 파일만 고치면 된다.
+"""
 
 from __future__ import annotations
 
 import operator
+import os
 from typing import Annotated, Optional, TypedDict
 
-from langchain_core.messages import AnyMessage
+from dotenv import load_dotenv
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AnyMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_openai import ChatOpenAI
 from langgraph.graph.message import add_messages
 
 from .schemas import Evaluation, ScoredPlan, UserProfile
+
+# ─────────────────────────── 상태 ───────────────────────────
 
 
 class PipelineState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
 
     profile: Optional[UserProfile]      # 1단계가 write
-    ranked: list[ScoredPlan]            # 2단계가 write
+    candidates: list[dict]              # 2단계(a) 하드 필터가 통과시킨 후보 원본
+    recommend_note: str                 # 2단계(a) 조건 완화가 있었으면 그 사실
+    ranked: list[ScoredPlan]            # 2단계(b) LLM 랭킹 결과
     report: str                         # 3단계가 write
     evaluation: Optional[Evaluation]    # 4단계가 write
 
     feedback: Annotated[list[str], operator.add]  # 재시도 피드백 누적
     attempt: int                                  # 리포트를 만든 횟수
+
+
+def user_query(state: PipelineState) -> str:
+    """최초 사용자 발화. 원문을 프롬프트에 넣어야 하는 단계에서 쓴다."""
+    for m in state.get("messages", []):
+        if isinstance(m, HumanMessage):
+            return str(m.content)
+    return ""
+
+
+def feedback_block(state: PipelineState) -> str:
+    """누적된 평가 피드백을 프롬프트에 끼워 넣을 형태로. 없으면 빈 문자열."""
+    fb = state.get("feedback", [])
+    return "[이전 평가 피드백 — 반드시 반영]\n" + "\n".join(fb) + "\n" if fb else ""
+
+
+# ─────────────────────────── LLM ───────────────────────────
+
+load_dotenv()
+
+MODEL = os.getenv("MODEL", "gpt-4o-mini")
+EVAL_MODEL = os.getenv("EVAL_MODEL", "gpt-4o")
+TEMPERATURE = 0.0
+# max_retries: 배치 실행 시 TPM 초과(429)가 잦아 SDK 지수 백오프에 맡긴다
+MAX_RETRIES = 8
+
+
+def get_llm(config: RunnableConfig | None = None) -> BaseChatModel:
+    """OPENAI_API_KEY 환경변수 필요."""
+    return ChatOpenAI(model=MODEL, temperature=TEMPERATURE, max_retries=MAX_RETRIES)
+
+
+def get_eval_llm(config: RunnableConfig | None = None) -> BaseChatModel:
+    """평가 전용. 규칙 준수가 중요해서 상위 모델 (mini 는 판정 지시를 무시하는 경향)."""
+    return ChatOpenAI(model=EVAL_MODEL, temperature=TEMPERATURE, max_retries=MAX_RETRIES)

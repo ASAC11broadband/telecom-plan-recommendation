@@ -12,18 +12,18 @@ from langchain_core.runnables import RunnableConfig
 from ..state import PipelineState
 
 
-def explanation_node(state: PipelineState, config: RunnableConfig) -> dict:
+def report_node(state: PipelineState, config: RunnableConfig) -> dict:
     profile = state.get("profile")
     ranked = state.get("ranked", [])
     feedback = state.get("feedback", [])
 
     # TODO: 구현
     # report = get_llm(config).invoke(
-    #     [SystemMessage(content=EXPLANATION_PROMPT.format(...))]
+    #     [SystemMessage(content=REPORT_PROMPT.format(...))]
     # ).content
-    report = "[explanation] TODO"
+    report = "[report] TODO"
 
     return {
         "report": report,
-        "messages": [AIMessage(content=report, name="explanation")],
+        "messages": [AIMessage(content=report, name="report")],
     }

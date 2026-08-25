@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 """요금제 추천 파이프라인 — 진입점.
 
-    START ──> profiling ──> matching ──> explanation ──> evaluation ──> END
+    START ──> profiling ──> recommend ──> report ──> evaluation ──> END
                  ▲             ▲                              │
                  └─────────────┴──── 재시도 (retry_target) ────┘
 
@@ -13,7 +14,7 @@ from __future__ import annotations
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
-from .agents import evaluation_node, explanation_node, matching_node, profiling_node
+from .agents import evaluation_node, report_node, recommend_node, profiling_node
 from .agents.evaluation import MAX_REVISIONS
 from .state import PipelineState
 
@@ -28,7 +29,7 @@ def route_after_evaluation(state: PipelineState, config: RunnableConfig) -> str:
         return END
     if state.get("attempt", 0) > MAX_REVISIONS:
         return END  # 재시도 예산 소진 — 미달이어도 지금 결과로 종료
-    if ev.retry_target in ("profiling", "matching"):
+    if ev.retry_target in ("profiling", "recommend"):
         return ev.retry_target
     return END
 
@@ -37,18 +38,18 @@ def build_graph(checkpointer=None):
     builder = StateGraph(PipelineState)
 
     builder.add_node("profiling", profiling_node)
-    builder.add_node("matching", matching_node)
-    builder.add_node("explanation", explanation_node)
+    builder.add_node("recommend", recommend_node)
+    builder.add_node("report", report_node)
     builder.add_node("evaluation", evaluation_node)
 
     builder.add_edge(START, "profiling")
-    builder.add_edge("profiling", "matching")
-    builder.add_edge("matching", "explanation")
-    builder.add_edge("explanation", "evaluation")
+    builder.add_edge("profiling", "recommend")
+    builder.add_edge("recommend", "report")
+    builder.add_edge("report", "evaluation")
     builder.add_conditional_edges(
         "evaluation",
         route_after_evaluation,
-        {"profiling": "profiling", "matching": "matching", END: END},
+        {"profiling": "profiling", "recommend": "recommend", END: END},
     )
 
     return builder.compile(name="plan-recommendation", checkpointer=checkpointer)

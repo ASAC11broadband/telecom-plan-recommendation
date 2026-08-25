@@ -13,18 +13,18 @@ from langchain_core.runnables import RunnableConfig
 from ..state import PipelineState
 
 
-def matching_node(state: PipelineState, config: RunnableConfig) -> dict:
+def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
     profile = state.get("profile")
     feedback = state.get("feedback", [])
 
     # TODO: 구현
     # candidates = hard_filter(profile)                       # (a) 데이터 소스 조회 + 규칙 필터
     # llm = get_llm(config).with_structured_output(RankingResult)
-    # result = llm.invoke([SystemMessage(content=MATCHING_PROMPT.format(...))])
+    # result = llm.invoke([SystemMessage(content=RECOMMEND_PROMPT.format(...))])
     # ranked = [p for p in result.plans if p.plan_id in {c["plan_id"] for c in candidates}]
     ranked = []
 
     return {
         "ranked": ranked,
-        "messages": [AIMessage(content="[matching] TODO", name="matching")],
+        "messages": [AIMessage(content="[recommend] TODO", name="recommend")],
     }
