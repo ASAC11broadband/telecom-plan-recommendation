@@ -28,7 +28,7 @@ class PipelineState(TypedDict, total=False):
 
     profile: Optional[UserProfile]      # 1단계가 write
     candidates: list[dict]              # 2단계(a) 하드 필터가 통과시킨 후보 원본
-    recommend_note: str                 # 2단계(a) 조건 완화가 있었으면 그 사실
+    clarification_question: Optional[str]  # 진행 전 사용자에게 확인할 질문
     ranked: list[ScoredPlan]            # 2단계(b) LLM 랭킹 결과
     report: str                         # 3단계가 write
     evaluation: Optional[Evaluation]    # 4단계가 write
@@ -38,11 +38,12 @@ class PipelineState(TypedDict, total=False):
 
 
 def user_query(state: PipelineState) -> str:
-    """최초 사용자 발화. 원문을 프롬프트에 넣어야 하는 단계에서 쓴다."""
-    for m in state.get("messages", []):
-        if isinstance(m, HumanMessage):
-            return str(m.content)
-    return ""
+    """현재까지의 사용자 발화를 시간순으로 합쳐 반환한다."""
+    return "\n".join(
+        str(message.content)
+        for message in state.get("messages", [])
+        if isinstance(message, HumanMessage)
+    )
 
 
 def feedback_block(state: PipelineState) -> str:
