@@ -21,7 +21,7 @@ import math
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from ..data import find_candidate, slim
+from ..data import find_candidate, has_benefit, slim
 from ..schemas import Evaluation, UserProfile
 from ..state import PipelineState, get_eval_llm
 
@@ -29,10 +29,10 @@ MAX_REVISIONS = 2  # 재시도 최대 횟수 (graph.route_after_evaluation 과 �
 
 # 주의: 템플릿에 중괄호를 직접 쓰지 말 것 (.format 이 깨진다).
 PROMPT = """추천 리포트가 후보 데이터와 모순되는 주장(없는 혜택, 틀린 요금·데이터량)을 하는지만 검증해라.
-조건 충족 여부, 중복 추천, 순위 정합성은 이미 별도 코드로 검증됐으니 절대 판단하지 마라.
+조건 충족 여부, 중복 추천, 순위 정합성, 할인가 표기는 이미 별도 코드로 검증됐으니 절대 판단하지 마라.
 용어 정의: '무제한'은 소진 후 속도제한형을 포함한다(모순 아님).
-정상가는 monthly_fee, 할인 후 요금은 discounted_fee 다. 어느 쪽인지 밝혀 쓰면 합격이고,
-두 값 중 어느 것도 아닌 금액을 쓰거나 할인이 영구적이라고 단언할 때만 불합격이다.
+정상가는 monthly_fee, 할인 후 요금은 discounted_fee 다.
+둘 중 어느 것도 아닌 금액을 쓰거나 할인이 영구적이라고 단언할 때만 불합격이다.
 할인 기간이 비어 있다는 이유만으로는 불합격시키지 마라(리포트가 확인을 안내하면 충분하다).
 숫자가 후보 데이터와 일치하면 합격이다.
 불합격이면 retry_target 을 정해라 — 조건 추출 자체가 틀렸으면 profiling,
@@ -52,20 +52,21 @@ CONSTRAINT_CHECKS = {
     "budget_max_won": lambda plan, v: plan["discounted_fee"] <= v,
     # 무제한은 data_gb 가 null 이라 수치 비교가 성립하지 않는다 → 충족으로 본다.
     "min_data_gb": lambda plan, v: plan["data_unlimited"] or (plan.get("data_gb") or 0) >= v,
-    "data_unlimited": lambda plan, v: plan["data_unlimited"] == v,
+    "data_unlimited": lambda plan, v: plan["data_unlimited"] or not v,  # v=False 는 "필수 아님"
     "min_qos_mbps": lambda plan, v: (plan.get("qos_mbps") or 0) >= v,
     "min_tethering_gb": lambda plan, v: (plan.get("tethering_gb") or 0) >= v,
     "min_voice_minutes": lambda plan, v: plan["voice_unlimited"] or (plan.get("voice_minutes") or 0) >= v,
-    "voice_unlimited": lambda plan, v: plan["voice_unlimited"] == v,
-    "sms_unlimited": lambda plan, v: plan["sms_unlimited"] == v,
+    "voice_unlimited": lambda plan, v: plan["voice_unlimited"] or not v,  # v=False 는 "필수 아님"
+    "sms_unlimited": lambda plan, v: plan["sms_unlimited"] or not v,  # v=False 는 "필수 아님"
     "carrier_type": lambda plan, v: plan.get("carrier_type") == v,
     "host_mno": lambda plan, v: plan.get("host_mno") == v,
     "network_gen": lambda plan, v: plan.get("network_gen") == v,
-    "age_condition": lambda plan, v: plan.get("age_condition") == v,
+    # 빈 값은 "가입 조건 없음"(누구나 가입) 이라 조건 위반이 아니다. data.filter_candidates 와 같은 규칙.
+    "age_condition": lambda plan, v: plan.get("age_condition") in ("", None, v),
     "mvno_brand": lambda plan, v: str(plan.get("mvno_brand") or "").strip().casefold()
     == str(v).strip().casefold(),
     "wanted_benefits": lambda plan, v: all(
-        str(benefit).casefold() in _benefit_text(plan).casefold() for benefit in v
+        has_benefit(_benefit_text(plan), benefit) for benefit in v
     ),
     "min_discount_period_months": lambda plan, v: (plan.get("discount_period_months") or 0) >= v,
 }
@@ -89,7 +90,7 @@ def _constraint_errors(profile: UserProfile | None, plan: dict) -> list[str]:
 
 # 우선순위 축별 정렬값. 클수록 좋은 값으로 통일한다.
 PRIORITY_VALUES = {
-    "price": lambda plan: -plan["effective_fee"],
+    "price": lambda plan: -plan["discounted_fee"],
     "data": lambda plan: math.inf if plan["data_unlimited"] else float(plan.get("data_gb") or 0),
     "qos": lambda plan: float(plan.get("qos_mbps") or 0),
     "voice": lambda plan: math.inf if plan["voice_unlimited"] else float(plan.get("voice_minutes") or 0),
@@ -121,7 +122,7 @@ def _ranking_errors(profile: UserProfile | None, ranked: list, rows: list[dict])
     return errors
 
 
-def _report_errors(report: str, ranked: list) -> list[str]:
+def _report_errors(report: str, ranked: list, rows: list[dict]) -> list[str]:
     """리포트가 추천 결과를 실제로 담고 있는지만 본다."""
     errors: list[str] = []
     if "|" not in report:
@@ -129,6 +130,12 @@ def _report_errors(report: str, ranked: list) -> list[str]:
     missing = [plan.plan_name for plan in ranked if plan.plan_name not in report]
     if missing:
         errors.append(f"추천 요금제가 리포트에서 빠짐: {', '.join(missing)}")
+
+    # 예산은 discounted_fee 로 판정된다. 리포트가 monthly_fee 만 쓰면 실납부 2,200원짜리가
+    # 25,520원으로 나가 예산 초과처럼 보인다. 할인가가 본문에 있는지만 확인한다.
+    no_price = [row["plan_name"] for row in rows if f"{row['discounted_fee']:,}" not in report]
+    if no_price:
+        errors.append(f"리포트에 할인가(실납부액)가 없음: {', '.join(no_price)}")
     return errors
 
 
@@ -151,7 +158,7 @@ def _code_checks(state: PipelineState) -> tuple[list[str], list[dict]]:
 
     if len(rows) == len(ranked):  # 환각이 없을 때만 순위·리포트를 볼 의미가 있다
         errors.extend(_ranking_errors(profile, ranked, rows))
-        errors.extend(_report_errors(state.get("report", ""), ranked))
+        errors.extend(_report_errors(state.get("report", ""), ranked, rows))
     return errors, rows
 
 
@@ -212,7 +219,7 @@ if __name__ == "__main__":
         row = {
             "plan_id": plan_id,
             "plan_name": name,
-            "effective_fee": fee,
+            "discounted_fee": fee,
             "monthly_fee": fee,
             "discounted_fee": fee,
             "data_gb": 50.0,
@@ -243,7 +250,7 @@ if __name__ == "__main__":
         ScoredPlan(plan_id="1", plan_name="A", score=90, reason=""),
         ScoredPlan(plan_id="2", plan_name="B", score=80, reason=""),
     ]
-    report = "| 순위 | 요금제 |\n| 1 | A |\n| 2 | B |"
+    report = "| 순위 | 요금제 | 월 요금 |\n| 1 | A | 30,000원 |\n| 2 | B | 35,000원 |"
 
     # 정상: plan_id 로 후보를 찾고 조건도 만족 → 위반 없음
     errors, rows = _code_checks(_state([a, b], ranked, report, ok_profile))
@@ -263,7 +270,7 @@ if __name__ == "__main__":
         ScoredPlan(plan_id="1", plan_name="A", score=90, reason=""),
         ScoredPlan(plan_id="2", plan_name="A", score=80, reason=""),
     ]
-    errors, _ = _code_checks(_state([a, _plan("2", "A")], dup, "| A |", ok_profile))
+    errors, _ = _code_checks(_state([a, _plan("2", "A")], dup, "| A | 30,000원 |", ok_profile))
     assert any("여러 순위" in e for e in errors), errors
 
     # score 역전
@@ -280,8 +287,24 @@ if __name__ == "__main__":
     assert any("최하위" in e for e in errors), errors
 
     # 리포트 누락
-    errors, _ = _code_checks(_state([a, b], ranked, "| 순위 |\n| 1 | A |", ok_profile))
+    errors, _ = _code_checks(
+        _state([a, b], ranked, "| 순위 | 월 요금 |\n| 1 | A | 30,000원 |", ok_profile)
+    )
     assert any("빠짐" in e for e in errors), errors
+
+    # 할인가 누락: 정가만 적힌 리포트 (실납부 2,200원짜리가 25,520원으로 나가던 실제 사고)
+    promo = _plan("2", "B", fee=25520, discounted_fee=2200)
+    promo_ranked = [
+        ScoredPlan(plan_id="1", plan_name="A", score=90, reason=""),
+        ScoredPlan(plan_id="2", plan_name="B", score=80, reason=""),
+    ]
+    regular_only = "| 순위 | 요금제 | 월 요금 |\n| 1 | A | 30,000원 |\n| 2 | B | 25,520원 |"
+    errors, _ = _code_checks(_state([a, promo], promo_ranked, regular_only, UserProfile()))
+    assert any("할인가" in e for e in errors), errors
+
+    with_discounted = regular_only.replace("25,520원", "2,200원 (정가 25,520원)")
+    errors, _ = _code_checks(_state([a, promo], promo_ranked, with_discounted, UserProfile()))
+    assert errors == [], errors
 
     # slim: 필터용 파생 필드는 안 넘어간다
     assert "data_gb" not in slim([a])[0] and slim([a])[0]["plan_name"] == "A"

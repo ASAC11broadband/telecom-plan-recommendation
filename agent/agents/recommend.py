@@ -41,7 +41,7 @@ def _voice_value(plan: dict) -> float:
 
 def _reference_from_profile(profile: UserProfile) -> dict | None:
     values = {
-        "effective_fee": profile.reference_fee_won,
+        "discounted_fee": profile.reference_fee_won,
         "data_gb": profile.reference_data_gb,
         "data_unlimited": profile.reference_data_unlimited,
         "voice_minutes": profile.reference_voice_minutes,
@@ -62,7 +62,7 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
         return matched[0], None
 
     spec_fields = (
-        "effective_fee",
+        "discounted_fee",
         "data_gb",
         "data_unlimited",
         "qos_mbps",
@@ -75,7 +75,7 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
         return matched[0], None
 
     choices = ", ".join(
-        f"{plan['plan_name']}({plan['carrier']}, 월 {plan['effective_fee']:,}원)"
+        f"{plan['plan_name']}({plan['carrier']}, 월 {plan['discounted_fee']:,}원)"
         for plan in matched[:5]
     )
     return None, f"같은 이름으로 스펙이 다른 요금제가 있습니다. 어느 상품인지 알려주세요: {choices}"
@@ -88,8 +88,8 @@ def _apply_comparison(
         return candidates
 
     result = candidates
-    if "cheaper" in goals and reference.get("effective_fee") is not None:
-        result = [p for p in result if p["effective_fee"] < reference["effective_fee"]]
+    if "cheaper" in goals and reference.get("discounted_fee") is not None:
+        result = [p for p in result if p["discounted_fee"] < reference["discounted_fee"]]
     if "more_data" in goals:
         reference_data = _data_value(reference)
         result = [p for p in result if _data_value(p) > reference_data]
@@ -102,8 +102,8 @@ def _apply_comparison(
 
 def _is_pareto_better(candidate: dict, reference: dict) -> bool:
     comparisons: list[tuple[float, float, bool]] = []
-    if reference.get("effective_fee") is not None:
-        comparisons.append((candidate["effective_fee"], reference["effective_fee"], False))
+    if reference.get("discounted_fee") is not None:
+        comparisons.append((candidate["discounted_fee"], reference["discounted_fee"], False))
     if reference.get("data_gb") is not None or reference.get("data_unlimited") is not None:
         comparisons.append((_data_value(candidate), _data_value(reference), True))
     if reference.get("qos_mbps") is not None:
@@ -120,8 +120,8 @@ def _is_pareto_better(candidate: dict, reference: dict) -> bool:
 
 def _similarity_distance(plan: dict, reference: dict) -> float:
     distance = 0.0
-    if reference.get("effective_fee"):
-        distance += abs(plan["effective_fee"] - reference["effective_fee"]) / reference["effective_fee"]
+    if reference.get("discounted_fee"):
+        distance += abs(plan["discounted_fee"] - reference["discounted_fee"]) / reference["discounted_fee"]
     if reference.get("data_unlimited") is not None:
         distance += 1.0 if plan.get("data_unlimited") != reference["data_unlimited"] else 0.0
     if not reference.get("data_unlimited") and reference.get("data_gb"):
@@ -140,7 +140,7 @@ def _dedupe_by_name(candidates: list[dict]) -> list[dict]:
     상위 5개를 전부 채우는 것을 막는다. 같은 이름이면 실납부액이 싼 쪽을 남긴다.
     """
     best: dict[str, dict] = {}
-    for plan in sorted(candidates, key=lambda p: p["effective_fee"]):
+    for plan in sorted(candidates, key=lambda p: p["discounted_fee"]):
         best.setdefault(plan["plan_name"], plan)
     return list(best.values())
 
@@ -156,14 +156,15 @@ def _shortlist(
         return candidates
 
     axes = {
-        "price": lambda p: (p["effective_fee"], -_data_value(p)),
-        "data": lambda p: (-_data_value(p), p["effective_fee"]),
-        "benefit": lambda p: (-len(p.get("included_benefits") or []), p["effective_fee"]),
-        "qos": lambda p: (-(p.get("qos_mbps") or 0), p["effective_fee"]),
-        "voice": lambda p: (-_voice_value(p), -int(p.get("sms_unlimited", False)), p["effective_fee"]),
+        "price": lambda p: (p["discounted_fee"], -_data_value(p)),
+        "data": lambda p: (-_data_value(p), p["discounted_fee"]),
+        "benefit": lambda p: (-len(p.get("included_benefits") or []), p["discounted_fee"]),
+        "qos": lambda p: (-(p.get("qos_mbps") or 0), p["discounted_fee"]),
+        "voice": lambda p: (-_voice_value(p), -int(p.get("sms_unlimited", False)), p["discounted_fee"]),
     }
-    priority_axes = ["benefit" if p == "benefit" else p for p in profile.priorities or []]
-    axis_order = list(dict.fromkeys(priority_axes + ["price", "data", "benefit", "qos", "voice"]))
+    axis_order = list(
+        dict.fromkeys((profile.priorities or []) + ["price", "data", "benefit", "qos", "voice"])
+    )
 
     selected: dict[str, dict] = {}
     for axis in axis_order:
@@ -180,7 +181,7 @@ def _shortlist(
             key=lambda p: (
                 0 if p.get("data_unlimited") or (p.get("data_gb") or 0) >= target else 1,
                 abs((p.get("data_gb") or 0) - target),
-                p["effective_fee"],
+                p["discounted_fee"],
             ),
         )
         for plan in usage_fit[:limit_per_axis]:
@@ -199,6 +200,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
         return {
             "candidates": [],
             "ranked": [],
+            "reference": None,
             "clarification_question": question,
             "messages": [AIMessage(content=question, name="recommend")],
         }
@@ -209,6 +211,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
         return {
             "candidates": [],
             "ranked": [],
+            "reference": reference,
             "clarification_question": None,
             "messages": [AIMessage(content="조건을 만족하는 요금제가 없습니다.", name="recommend")],
         }
@@ -246,6 +249,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
     return {
         "candidates": candidates,
         "ranked": ranked,
+        "reference": reference,
         "clarification_question": None,
         "messages": [
             AIMessage(

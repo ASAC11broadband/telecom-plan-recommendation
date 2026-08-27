@@ -2,10 +2,15 @@
 """요금제 추천 파이프라인 — 진입점.
 
     START ──> profiling ──> recommend ──> report ──> evaluation ──> END
-                    │            │
-                    └─ 재질문 ───┴──────────────────────────────> END
+                                 │
+                        재질문 ──┴──────────────────────────────> END
                  ▲             ▲                              │
                  └─────────────┴──── 재시도 (retry_target) ────┘
+
+profiling 이 추가 질문을 남겨도 대개 멈추지 않는다. 후보를 먼저 보여주고
+질문은 profile.followup_question 으로 함께 내보낸다.
+예외는 데이터·요금 신호가 모두 없는 경우 — 후보를 좁힐 수 없어 추천이 무의미하므로
+recommend 로 가지 않고 질문만 돌려준다.
 
 평가가 미달이면 evaluation 이 retry_target 을 정하고,
 피드백이 누적된 채로 그 단계부터 다시 흐른다. (최대 MAX_REVISIONS 회)
@@ -18,6 +23,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .agents import evaluation_node, report_node, recommend_node, profiling_node
 from .agents.evaluation import MAX_REVISIONS
+from .agents.profiling import core_signal_missing
 from .state import PipelineState
 
 __all__ = [
@@ -30,8 +36,8 @@ __all__ = [
 
 
 def route_after_profiling(state: PipelineState, config: RunnableConfig) -> str:
-    profile = state.get("profile")
-    return END if profile and profile.needs_user_input else "recommend"
+    """데이터·요금을 둘 다 못 잡았으면 LLM 3단계를 태우지 않고 바로 되묻는다."""
+    return END if core_signal_missing(state.get("profile")) else "recommend"
 
 
 def route_after_recommend(state: PipelineState, config: RunnableConfig) -> str:

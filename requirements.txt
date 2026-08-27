@@ -1,0 +1,7 @@
+fastapi>=0.141
+uvicorn[standard]>=0.52
+pandas>=2.3
+langgraph>=1.2
+langchain-core>=1.6
+langchain-openai>=1.6
+python-dotenv>=1.1

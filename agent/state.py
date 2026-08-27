@@ -28,6 +28,7 @@ class PipelineState(TypedDict, total=False):
 
     profile: Optional[UserProfile]      # 1단계가 write
     candidates: list[dict]              # 2단계(a) 하드 필터가 통과시킨 후보 원본
+    reference: Optional[dict]           # 2단계가 DB 에서 확정한 비교 기준 요금제
     clarification_question: Optional[str]  # 진행 전 사용자에게 확인할 질문
     ranked: list[ScoredPlan]            # 2단계(b) LLM 랭킹 결과
     report: str                         # 3단계가 write
