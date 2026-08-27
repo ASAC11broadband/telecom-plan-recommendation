@@ -133,6 +133,18 @@ def _similarity_distance(plan: dict, reference: dict) -> float:
     return distance
 
 
+def _dedupe_by_name(candidates: list[dict]) -> list[dict]:
+    """같은 요금제의 가입조건 변형이 순위를 나눠 먹지 않게 이름당 하나만 남긴다.
+
+    plan_id 는 다르지만 plan_name 이 같은 행(예: age_condition 만 다른 초이스90)이
+    상위 5개를 전부 채우는 것을 막는다. 같은 이름이면 실납부액이 싼 쪽을 남긴다.
+    """
+    best: dict[str, dict] = {}
+    for plan in sorted(candidates, key=lambda p: p["effective_fee"]):
+        best.setdefault(plan["plan_name"], plan)
+    return list(best.values())
+
+
 def _shortlist(
     candidates: list[dict],
     profile: UserProfile,
@@ -201,7 +213,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             "messages": [AIMessage(content="조건을 만족하는 요금제가 없습니다.", name="recommend")],
         }
 
-    shortlist = _shortlist(candidates, profile, reference)
+    shortlist = _shortlist(_dedupe_by_name(candidates), profile, reference)
     prompt = (
         RECOMMEND_PROMPT
         + "\n\n[사용자 원문]\n"
