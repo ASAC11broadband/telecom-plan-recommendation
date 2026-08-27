@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..schemas import UserProfile
-from ..state import PipelineState, feedback_block, get_llm
+from ..state import PipelineState, feedback_block, get_llm, user_query
 from ..usage import estimate_monthly_data_gb
 
 
@@ -39,6 +41,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - 사용자가 다른 선택도 괜찮다고 한 조건은 필터 필드에 넣지 말고 필요하면 notes에 기록한다.
 
 [수치 조건]
+- 금액 단위(원/만원)가 붙은 수치만 예산으로 본다. 요금제명에 붙은 숫자는 금액이 아니다.
+  '초이스90', '너겟59', '스마트 20GB' 의 숫자를 budget 필드로 옮기지 마라.
 - N만원대 → budget_min_won=N0,000, budget_max_won=N9,999
 - N만원 이하/이상 → budget_max_won/budget_min_won
 - N만원 정도·내외·안팎 → N만원 ±5,000원
@@ -65,6 +69,7 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - '나는 20대인데 추천해줘'처럼 나이만 밝히고 청년 상품군을 요청하지 않은 경우에는
   청년 전용 상품만 원한다고 단정하지 말고 age_condition을 설정하지 않는다.
 - OTT·구독·멤버십 등 요구 혜택은 wanted_benefits에 저장한다.
+  혜택 이름만 넣고 '포함/혜택/되는' 같은 수식어는 뺀다. '유튜브 프리미엄 포함된' → '유튜브 프리미엄' 
 - 단순히 넷플릭스·유튜브 등을 시청한다고 말한 것은 혜택 요구가 아니다.
   '포함/혜택/되는 요금제'처럼 상품 혜택을 원할 때만 wanted_benefits에 저장한다.
 
@@ -112,6 +117,27 @@ def _has_value(value: object) -> bool:
     return True
 
 
+# 금액다운 표현: 숫자 뒤에 원/만/천 이 붙은 것만 예산으로 인정한다.
+_MONEY = re.compile(r"[\d,]+\s*(?:원|만|천)")
+
+
+def _drop_phantom_budget(profile: UserProfile, query: str) -> UserProfile:
+    """발화에 금액 표현이 없는데 잡힌 예산은 버린다.
+
+    '초이스90', '너겟59' 처럼 요금제명에 붙은 숫자를 LLM 이 'N만원대' 로 읽어
+    budget_max_won=9,999 같은 값을 지어내고, 그 예산이 Hard Constraint 가 되어
+    후보를 0건으로 만든 적이 있다. 프롬프트 지시만으로는 재발했다.
+
+    ponytail: '예산 30000' 처럼 단위 없는 표기는 같이 버려진다. 후보가 넓어질 뿐
+    깨지지는 않으므로 감수한다. 단위 없는 금액이 흔해지면 파서를 붙인다.
+    """
+    if profile.budget_min_won is None and profile.budget_max_won is None:
+        return profile
+    if _MONEY.search(query or ""):
+        return profile
+    return profile.model_copy(update={"budget_min_won": None, "budget_max_won": None})
+
+
 def _normalize_profile(profile: UserProfile) -> UserProfile:
     """스키마 값으로 Hard Constraint와 재질문 상태를 결정한다."""
     if profile.mvno_brand and profile.carrier_type != "MVNO":
@@ -137,6 +163,39 @@ def _normalize_profile(profile: UserProfile) -> UserProfile:
     )
 
 
+# 데이터와 요금 둘 다 못 잡으면 후보를 좁힐 수 없다. 전체에서 5건을 뽑는 추천은 의미가 없으므로
+# 이 경우에만 추천 전에 되묻는다. (그 외에는 부족해도 일단 추천하고 질문을 함께 낸다)
+CORE_MISSING_QUESTION = (
+    "추천 범위를 좁히려면 두 가지 중 하나는 필요합니다. "
+    "월 데이터 사용량(예: 20GB, 무제한)이나 희망 월 예산(예: 3만원 이하) 중 아시는 대로 알려주세요."
+)
+
+
+def core_signal_missing(profile: UserProfile | None) -> bool:
+    """데이터·요금 신호가 모두 없으면 True."""
+    if profile is None:
+        return True
+    has_data = any(
+        value is not None
+        for value in (
+            profile.min_data_gb,
+            profile.data_unlimited,
+            profile.estimated_monthly_data_gb,
+            profile.daily_video_hours,
+            profile.daily_shortform_hours,
+            profile.daily_game_hours,
+            profile.reference_data_gb,
+        )
+    )
+    has_fee = any(
+        value is not None
+        for value in (profile.budget_max_won, profile.budget_min_won, profile.reference_fee_won)
+    )
+    # 기준 요금제명만 말해도 후보를 좁힐 수 있다. 금액·데이터는 recommend 가 DB 에서 읽는다.
+    has_reference = profile.reference_plan_name is not None
+    return not (has_data or has_fee or has_reference)
+
+
 def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     messages = [
         message
@@ -147,8 +206,20 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     prompt = PROFILING_PROMPT + "\n\n" + feedback_block(state)
     llm = get_llm(config).with_structured_output(UserProfile)
     profile = _normalize_profile(
-        llm.invoke([SystemMessage(content=prompt), *messages])
+        _drop_phantom_budget(
+            llm.invoke([SystemMessage(content=prompt), *messages]), user_query(state)
+        )
     )
+    if core_signal_missing(profile):
+        profile = profile.model_copy(
+            update={
+                "needs_user_input": True,
+                # 이 분기의 원인은 하나(데이터·요금 신호 없음)라 무엇이 필요한지 콕 집어 묻는
+                # 고정 문구가 LLM 이 만든 막연한 질문보다 낫다.
+                "followup_question": CORE_MISSING_QUESTION,
+            }
+        )
+
     content = (
         profile.followup_question
         if profile.needs_user_input and profile.followup_question
@@ -167,3 +238,33 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
             )
         ],
     }
+
+
+if __name__ == "__main__":
+    # 요금제명 숫자에서 나온 예산은 버린다 (실제로 후보를 0건으로 만들던 값)
+    phantom = UserProfile(
+        budget_min_won=0, budget_max_won=9999, reference_plan_name="초이스90"
+    )
+    cleaned = _drop_phantom_budget(phantom, "지금 KT 초이스90 쓰는데 이거보다 싼 걸로 바꾸고 싶어")
+    assert cleaned.budget_min_won is None and cleaned.budget_max_won is None
+    assert cleaned.reference_plan_name == "초이스90"
+
+    # 진짜 예산은 지킨다
+    for text in ("월 3만원 이하로", "예산 30,000원", "5천원짜리 있어?", "3만원대"):
+        kept = _drop_phantom_budget(UserProfile(budget_max_won=30000), text)
+        assert kept.budget_max_won == 30000, text
+
+    # 예산이 없으면 아무것도 하지 않는다
+    assert _drop_phantom_budget(UserProfile(), "초이스90").budget_max_won is None
+
+    # 기준 요금제명만 있어도 후보를 좁힐 수 있으므로 되묻지 않는다
+    assert core_signal_missing(UserProfile()) is True
+    assert core_signal_missing(UserProfile(reference_plan_name="초이스90")) is False
+    assert core_signal_missing(UserProfile(budget_max_won=30000)) is False
+    assert core_signal_missing(UserProfile(data_unlimited=False)) is False
+
+    # hard_constraints 는 값이 있는 필터 필드만
+    normalized = _normalize_profile(UserProfile(budget_max_won=30000, voice_unlimited=True))
+    assert set(normalized.hard_constraints) == {"budget_max_won", "voice_unlimited"}
+
+    print("self-check ok")
