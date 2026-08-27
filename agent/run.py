@@ -24,8 +24,8 @@ def run(query: str) -> PipelineState:
     ev = state.get("evaluation")
     print(f"\n[프로파일] {profile.model_dump(exclude_none=True) if profile else None}")
     print(f"[후보 수] {len(state.get('candidates', []))}")
-    if state.get("recommend_note"):
-        print(f"[추천 노트] {state['recommend_note']}")
+    if state.get("clarification_question"):
+        print(f"[추가 질문] {state['clarification_question']}")
     print(
         f"[평가] passed={ev.passed if ev else None} attempt={state.get('attempt')}"
         + (f" feedback={ev.feedback}" if ev and ev.feedback else "")

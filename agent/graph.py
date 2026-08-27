@@ -2,6 +2,8 @@
 """요금제 추천 파이프라인 — 진입점.
 
     START ──> profiling ──> recommend ──> report ──> evaluation ──> END
+                    │            │
+                    └─ 재질문 ───┴──────────────────────────────> END
                  ▲             ▲                              │
                  └─────────────┴──── 재시도 (retry_target) ────┘
 
@@ -18,7 +20,22 @@ from .agents import evaluation_node, report_node, recommend_node, profiling_node
 from .agents.evaluation import MAX_REVISIONS
 from .state import PipelineState
 
-__all__ = ["build_graph", "graph", "route_after_evaluation"]
+__all__ = [
+    "build_graph",
+    "graph",
+    "route_after_profiling",
+    "route_after_recommend",
+    "route_after_evaluation",
+]
+
+
+def route_after_profiling(state: PipelineState, config: RunnableConfig) -> str:
+    profile = state.get("profile")
+    return END if profile and profile.needs_user_input else "recommend"
+
+
+def route_after_recommend(state: PipelineState, config: RunnableConfig) -> str:
+    return END if state.get("clarification_question") else "report"
 
 
 def route_after_evaluation(state: PipelineState, config: RunnableConfig) -> str:
@@ -43,8 +60,16 @@ def build_graph(checkpointer=None):
     builder.add_node("evaluation", evaluation_node)
 
     builder.add_edge(START, "profiling")
-    builder.add_edge("profiling", "recommend")
-    builder.add_edge("recommend", "report")
+    builder.add_conditional_edges(
+        "profiling",
+        route_after_profiling,
+        {"recommend": "recommend", END: END},
+    )
+    builder.add_conditional_edges(
+        "recommend",
+        route_after_recommend,
+        {"report": "report", END: END},
+    )
     builder.add_edge("report", "evaluation")
     builder.add_conditional_edges(
         "evaluation",

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """단계 사이를 오가는 데이터 계약.
 
-여기를 바꾸면 prompts.py 도 같이 손봐야 한다 (description 이 곧 LLM 지시문이다).
+여기를 바꾸면 Profiling/Recommend 프롬프트도 같이 손봐야 한다.
 """
 
 from __future__ import annotations
@@ -44,6 +44,34 @@ class UserProfile(BaseModel):
         None,
         description="원하는 OTT/구독/부가혜택 목록(예: 넷플릭스, 유튜브 프리미엄). 언급 없으면 null",
     )
+    min_discount_period_months: Optional[int] = Field(
+        None,
+        description="최소 할인·프로모션 유지 기간(개월). 언급 없으면 null",
+    )
+    daily_video_hours: Optional[float] = Field(None, description="하루 일반 영상 시청 시간")
+    daily_shortform_hours: Optional[float] = Field(None, description="하루 숏폼 시청 시간")
+    daily_game_hours: Optional[float] = Field(None, description="하루 모바일 게임 시간")
+    estimated_monthly_data_gb: Optional[float] = Field(
+        None,
+        description="이용 시간으로 코드가 계산한 월 예상 데이터량(GB)",
+    )
+    usage_estimate_notes: list[str] = Field(
+        default_factory=list,
+        description="월 데이터 사용량 추정 근거",
+    )
+    reference_plan_name: Optional[str] = Field(
+        None,
+        description="비교 기준으로 사용자가 언급한 현재·기존 요금제명",
+    )
+    reference_fee_won: Optional[int] = Field(None, description="사용자가 말한 현재 요금(원)")
+    reference_data_gb: Optional[float] = Field(None, description="현재 기본 데이터량(GB)")
+    reference_data_unlimited: Optional[bool] = Field(None, description="현재 데이터 무제한 여부")
+    reference_voice_minutes: Optional[int] = Field(None, description="현재 통화 제공량(분)")
+    reference_voice_unlimited: Optional[bool] = Field(None, description="현재 통화 무제한 여부")
+    reference_qos_mbps: Optional[float] = Field(None, description="현재 소진 후 속도(Mbps)")
+    comparison_goals: Optional[
+        list[Literal["cheaper", "more_data", "faster_qos", "similar", "better"]]
+    ] = Field(None, description="기준 요금제 대비 사용자가 원하는 개선·비교 방향")
     priorities: Optional[list[Literal["price", "data", "qos", "benefit", "voice", "sms", "tethering", "carrier"]]] = Field(
         None,
         description="사용자가 직접 말한 추천 우선순위를 중요도 순으로 저장. 언급 없으면 null",
@@ -57,7 +85,10 @@ class UserProfile(BaseModel):
         description="추천에 중요하지만 사용자 발화에서 확인하지 못한 필드명",
     )
     ambiguous: list[str] = Field(default_factory=list, description="두 가지 이상으로 해석될 수 있는 조건")
-    assumptions: list[str] = Field(default_factory=list, description="가격대 해석이나 사용량 계산에 적용한 가정")
+    assumptions: list[str] = Field(
+        default_factory=list,
+        description="사용자 발화만으로 확정할 수 없어 별도로 적용한 가정",
+    )
     needs_user_input: bool = Field(False, description="추천 전에 사용자에게 반드시 추가 질문해야 하면 true")
     followup_question: Optional[str] = Field(
         None,
@@ -69,8 +100,9 @@ class UserProfile(BaseModel):
 class ScoredPlan(BaseModel):
     """2단계 산출물 — 점수가 매겨진 요금제 하나."""
 
-    plan_name: str = Field("", description="후보 데이터의 plan_name 을 글자 그대로 복사")
-    score: int = Field(0, description="0-100 적합도")
+    plan_id: str = Field(..., description="후보 데이터의 고유 plan_id를 글자 그대로 복사")
+    plan_name: str = Field(..., description="후보 데이터의 plan_name을 글자 그대로 복사")
+    score: int = Field(..., ge=0, le=100, description="후보군 내 사용자 요청 상대 적합도")
     reason: str = Field("", description="선정 이유 1-2문장, 데이터 근거 인용")
 
 
