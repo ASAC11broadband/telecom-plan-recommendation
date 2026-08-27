@@ -117,10 +117,11 @@ class Evaluation(BaseModel):
 
     passed: bool = Field(False, description="리포트가 후보 데이터와 모순되는 주장이 없으면 true")
     feedback: str = Field("", description="모순 내용과 개선 지시. 합격이면 빈 문자열")
-    retry_target: Literal["profiling", "recommend", "none"] = Field(
+    retry_target: Literal["profiling", "recommend", "report", "none"] = Field(
         "none",
         description=(
             "재시도할 단계. 조건 추출 자체가 틀렸으면 profiling, "
-            "후보·랭킹이 문제면 recommend, 합격이면 none"
+            "후보·랭킹이 문제면 recommend, 추천은 맞는데 리포트 서술만 문제면 report, "
+            "합격이거나 재시도로 고칠 수 없으면 none"
         ),
     )

@@ -46,7 +46,7 @@ def route_after_evaluation(state: PipelineState, config: RunnableConfig) -> str:
         return END
     if state.get("attempt", 0) > MAX_REVISIONS:
         return END  # 재시도 예산 소진 — 미달이어도 지금 결과로 종료
-    if ev.retry_target in ("profiling", "recommend"):
+    if ev.retry_target in ("profiling", "recommend", "report"):
         return ev.retry_target
     return END
 
@@ -74,11 +74,11 @@ def build_graph(checkpointer=None):
     builder.add_conditional_edges(
         "evaluation",
         route_after_evaluation,
-        {"profiling": "profiling", "recommend": "recommend", END: END},
+        {"profiling": "profiling", "recommend": "recommend", "report": "report", END: END},
     )
 
     return builder.compile(name="plan-recommendation", checkpointer=checkpointer)
 
 
-# LangGraph CLI / Studio 가 참조하는 객체 (langgraph.json)
+# agent.run 과 외부에서 가져다 쓰는 컴파일된 그래프
 graph = build_graph()

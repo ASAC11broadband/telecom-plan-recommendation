@@ -40,9 +40,9 @@ def load() -> None:
     if _plans is not None:
         return
     _plans = pd.read_csv(PLANS_CSV, dtype={"plan_id": str})
-    _plans["effective_fee"] = _plans["discounted_fee"].where(
-        _plans["discounted_fee"] > 0, _plans["monthly_fee"]
-    )
+    # 예산 판단 기준은 discounted_fee(할인 후 실제 납부액).
+    # 할인이 없는 요금제는 discounted_fee 가 monthly_fee 와 같고, 0원은 실제 0원 프로모션이다.
+    _plans["effective_fee"] = _plans["discounted_fee"]
     _plans["qos_mbps"] = _plans["data_throttle_speed"].map(_speed_to_mbps)
     benefits = pd.read_csv(BENEFITS_CSV, dtype={"plan_id": str})
     benefit_lists = (
@@ -74,7 +74,8 @@ def filter_candidates(profile: dict) -> list[dict]:
         df = df[df["data_unlimited"] == data_unlimited]
 
     if profile.get("min_data_gb") is not None:
-        df = df[df["data_gb"] >= profile["min_data_gb"]]
+        # 무제한은 data_gb 가 비어 있어 수치 비교가 성립하지 않는다 → 최소량 조건은 충족으로 본다.
+        df = df[df["data_unlimited"] | (df["data_gb"] >= profile["min_data_gb"])]
 
     if profile.get("min_qos_mbps") is not None:
         df = df[df["qos_mbps"] >= profile["min_qos_mbps"]]
@@ -185,10 +186,38 @@ def _row_summary(r) -> dict:
     }
 
 
+# LLM 에게 보여줄 필드. 필터용 파생 숫자(data_gb/qos_mbps/voice_minutes 등)는
+# 사람이 읽는 data/voice 와 같은 사실의 중복 표현이라 판정을 헷갈리게 해서 뺀다.
+SLIM_FIELDS = (
+    "plan_id",
+    "plan_name",
+    "carrier",
+    "data",
+    "voice",
+    "monthly_fee",
+    "discounted_fee",
+    "discount_type",
+    "discount_period_months",
+    "ott_options",
+    "included_benefits",
+    "age_condition",
+)
+
+
+def slim(rows: list[dict]) -> list[dict]:
+    """프롬프트에 넣을 필드만 남긴다."""
+    return [{field: row.get(field) for field in SLIM_FIELDS} for row in rows]
+
+
 if __name__ == "__main__":
     c = filter_candidates(
         {"budget_max_won": 50000, "data_unlimited": True}
     )
     assert len(c) > 0
-    assert all(x["effective_fee"] <= 50000 for x in c)
+    assert all(x["discounted_fee"] <= 50000 for x in c)
+
+    # 무제한은 data_gb 가 비어 있어도 최소량 조건에서 탈락하지 않는다
+    assert len(filter_candidates({"data_unlimited": True, "min_data_gb": 30})) > 0
+
+    assert "data_gb" not in slim(c)[0] and slim(c)[0]["plan_name"] == c[0]["plan_name"]
     print(f"self-check ok: {len(c)} candidates")
