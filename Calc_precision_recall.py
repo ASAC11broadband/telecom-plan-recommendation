@@ -21,13 +21,16 @@
     python calc_precision_recall.py
 """
 
+import sys
+
 import openpyxl
 from openpyxl import Workbook
 from collections import defaultdict
 
-ANSWER_KEY_PATH = "test_cases_정답지.xlsx"
-RESULTS_PATH = "chatbot_results_gemini.xlsx"
-OUTPUT_PATH = "precision_recall_results_gemini.xlsx"
+# 인자로 덮어쓸 수 있다: python Calc_precision_recall.py [정답지] [챗봇결과] [출력]
+ANSWER_KEY_PATH = "data/test_cases_정답지 - 복사본.xlsx"
+RESULTS_PATH = "data/recommend_results.xlsx"
+OUTPUT_PATH = "data/precision_recall_results.xlsx"
 SHEET_NAME = "테스트케이스_v2"
 MAX_RANK = 5
 PRICE_TOLERANCE = 1  # 원 단위 오차 허용
@@ -100,8 +103,11 @@ def count_intersection(answer_items: list, chatbot_items: list) -> int:
 
 
 def main():
-    answer_rows = load_wide_rows(ANSWER_KEY_PATH)
-    result_rows = load_wide_rows(RESULTS_PATH)
+    paths = (sys.argv[1:] + [ANSWER_KEY_PATH, RESULTS_PATH, OUTPUT_PATH][len(sys.argv) - 1:])
+    answer_path, results_path, output_path = paths[:3]
+
+    answer_rows = load_wide_rows(answer_path)
+    result_rows = load_wide_rows(results_path)
 
     print(f"정답지 문항 수: {len(answer_rows)}")
     print(f"챗봇 결과 문항 수: {len(result_rows)}")
@@ -211,9 +217,9 @@ def main():
     ws_summary.append(["전체", len(per_question), round(overall_precision, 4),
                         round(overall_recall, 4), overall_empty])
 
-    wb_out.save(OUTPUT_PATH)
+    wb_out.save(output_path)
     print()
-    print(f"완료: {OUTPUT_PATH} 저장됨 (문항별 결과 시트 + 레벨별 요약 시트)")
+    print(f"완료: {output_path} 저장됨 (문항별 결과 시트 + 레벨별 요약 시트)")
 
 
 if __name__ == "__main__":
