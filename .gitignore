@@ -221,3 +221,7 @@ __marimo__/
 # Node / frontend
 node_modules/
 dist/
+
+# crawler
+crawler/data/
+crawler/__pycache__/
