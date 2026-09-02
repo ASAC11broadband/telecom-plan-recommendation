@@ -40,12 +40,16 @@ from schema import BASE_DIR, RAW_CACHE_DIR, final_path  # noqa: E402
 
 
 def _load_key() -> str | None:
-    """.env에서 키를 읽는다. python-dotenv가 있으면 그걸 쓴다."""
+    """.env에서 키를 읽는다. python-dotenv가 있으면 그걸 쓴다.
+
+    .env는 crawler/가 아니라 프로젝트 루트에 있어서 두 곳을 다 본다.
+    """
     if os.environ.get("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"]
     try:
         from dotenv import load_dotenv
-        load_dotenv(BASE_DIR / ".env")
+        for env_path in (BASE_DIR / ".env", BASE_DIR.parent / ".env"):
+            load_dotenv(env_path)
     except ImportError:
         pass
     return os.environ.get("OPENAI_API_KEY")

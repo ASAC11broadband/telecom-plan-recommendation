@@ -10,16 +10,14 @@
   ④ 필터·병합 (merge_plans.build) -> 새 최종 후보 (아직 파일로 안 씀)
   ⑤ 이전 최종본과 plan_id 기준 비교 -> 신규/단종/범위이탈/변경
   ⑥ 이상 징후가 있으면 **최종본을 안 건드리고** 중단, 아니면 저장
-  ⑦ 반영됐으면 일별 가입자 컬럼·패널을 다시 만든다 (fill_subscriber_daily,
-     build_subscriber_panel) - ⑥이 최종 CSV를 덮어쓰면서 날아가기 때문
-  ⑧ data/review/ 에 리포트 2종 기록
-  ⑨ 반영됐으면 data_verify.py로 신규/변경 표본을 원문과 LLM 대조 (⑩ 참고)
+  ⑦ data/review/ 에 리포트 2종 기록
+  ⑧ 반영됐으면 data_verify.py로 신규/변경 표본을 원문과 LLM 대조 (⑨ 참고)
 
 리포트는 사람이 아니라 **에이전트가 읽는다**는 전제다. summary JSON만 보면
 "볼 게 있는지"를 알 수 있고, 있으면 changes CSV의 source_url로 라이브 페이지를
 직접 확인할 수 있다.
 
-⑩ 원문 대조(data_verify)는 LLM 판정이라 오탐이 난다(docs/수정이력.md 15번).
+⑨ 원문 대조(data_verify)는 LLM 판정이라 오탐이 난다(docs/수정이력.md 15번).
 개수 기반인 check_guards()와 성격이 달라 **최종 CSV 반영을 막지 않는다.**
 불일치는 data/review/verify_*.md에 리포트로만 남는다.
 """
@@ -41,8 +39,6 @@ PLAN_OUT = final_path("통신요금제_통합데이터_최종.csv")
 BENEFIT_OUT = final_path("통신요금제_혜택상세_최종.csv")
 
 CRAWLERS = ("crawl_kt", "crawl_skt", "crawl_lguplus", "crawl_moyo")
-# 최종 CSV를 새로 쓴 뒤에만 돌린다. 순서 고정 - 패널은 채워진 컬럼을 전제한다.
-SUBSCRIBER_SCRIPTS = ("fill_subscriber_daily", "build_subscriber_panel")
 DATA_VERIFY_SCRIPT = BASE_DIR / "src" / "agents" / "data_verify.py"
 VERIFY_SAMPLE_SIZE = 10
 
@@ -296,7 +292,6 @@ def main() -> int:
         _write_csv(new, PLAN_COLUMNS, PLAN_OUT)
         _write_csv(benefits, BENEFIT_COLUMNS, BENEFIT_OUT)
         print(f"\n[반영] 요금제 {len(new)}행 / 혜택 {len(benefits)}행 저장")
-        run_subscriber_daily()
 
     changes_path, summary_path = write_reports(
         run_date, status, prev, new, changes, violations)
@@ -311,25 +306,6 @@ def main() -> int:
         run_data_verify()
 
     return 1 if violations else 0
-
-
-def run_subscriber_daily() -> None:
-    """일별 가입자 컬럼과 패널 CSV를 다시 만든다.
-
-    최종 CSV가 PLAN_COLUMNS로 다시 쓰이면서 fill_subscriber_daily가 붙여 둔
-    3컬럼이 갱신 때마다 사라지므로 여기서 이어 돌린다(시드 고정이라 같은 값).
-    가로 표(--wide)는 엑셀용 파생본이라 매일 남기지 않는다.
-
-    실패해도 예외로 죽이지 않는다. 최종 CSV는 이미 저장됐고, 여기서 죽으면
-    data/review 리포트가 안 남아 파이프라인 전체가 조용해진다.
-    """
-    for name in SUBSCRIBER_SCRIPTS:
-        print(f"\n=== {name} ===", flush=True)
-        cmd = [sys.executable, str(Path(__file__).resolve().parent / f"{name}.py")]
-        result = subprocess.run(cmd, cwd=BASE_DIR)
-        if result.returncode != 0:
-            print(f"  {name} 실패 (exit {result.returncode}) - 직접 다시 돌려야 함")
-            return
 
 
 def run_data_verify() -> None:

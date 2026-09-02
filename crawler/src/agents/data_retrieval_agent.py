@@ -51,8 +51,8 @@ def _data_as_of() -> str:
 def validate(plans: list[dict], benefits: list[dict]) -> list[str]:
     """뒤쪽 에이전트가 믿고 쓸 수 있는 데이터인지. 사유 목록을 돌려준다."""
     errors = []
-    # 스키마 컬럼이 다 있는지만 본다. fill_subscriber_daily.py가 최종 CSV에
-    # new_subscribers 계열 3컬럼을 덧붙이므로 정확 일치로 보면 갱신 직후 항상 걸린다.
+    # 스키마 컬럼이 다 있는지만 본다. 예전 파이프라인이 남긴 여분 컬럼이 있는
+    # CSV도 통과시켜야 해서 정확 일치로는 안 본다.
     if not plans:
         errors.append(f"요금제 CSV가 비어 있거나 없음: {PLAN_OUT}")
     elif missing := [c for c in PLAN_COLUMNS if c not in plans[0]]:
