@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -33,25 +34,31 @@ REPORT_PROMPT = """\
 - ranked_recommendations의 요금제는 모두 사용자의 필수 조건을 이미 통과한 후보다.
   하위 순위를 두고 예산 초과·데이터 부족 같은 조건 미달이라고 쓰지 마라. 순위 차이는
   조건 충족 여부가 아니라 제공량·가격·혜택의 우열로 설명한다.
-- 점수와 추천 이유는 제공된 값을 보존하되 자연스러운 한국어로 설명한다.
+- 순위는 그대로 유지하되 앞 단계의 내부 계산 문구는 인용하지 않고 사용자 관점의 이유로 다시 설명한다.
 
 [리포트 작성 규칙]
 1. 한국어 Markdown으로 바로 사용자에게 보여 줄 최종 답변만 작성한다.
-2. 먼저 추천 결론을 1~2문장으로 요약한다.
-3. 최대 5개 요금제를 표로 비교한다. 가능한 열은 순위, 요금제, 통신사/망, 월 요금,
-   정가, 데이터, 통화, 주요 혜택, 적합도다. 데이터에 없는 열은 생략해도 된다.
-   '월 요금' 열에는 discounted_fee 를 넣는다. monthly_fee 는 '정가' 열에만 넣는다.
-4. 상위 요금제의 선정 이유와 사용자의 우선순위 충족 여부, 주의할 트레이드오프를 설명한다.
-   discount_period_months가 있고 monthly_fee가 discounted_fee보다 크면, 할인이 몇 개월 뒤
-   끝나고 그때 요금이 얼마가 되는지를 1순위 설명에 반드시 포함한다.
-5. reference_plan(사용자가 현재 쓰는 요금제)이 있으면 현재 대비 비교를 별도 항목으로 쓴다.
+2. 화면에 요금제 비교표가 별도로 있으므로 표를 만들거나 스펙을 길게 반복하지 않는다.
+3. 반드시 `### 추천 결론` 제목으로 시작하고 전체 결과를 1~2문장으로 요약한다.
+4. ranked_recommendations의 모든 상품을 순위대로 다루며 제목을 반드시
+   `### 1순위 — 요금제명`, `### 2순위 — 요금제명` 형식으로 작성한다.
+   각 상품은 2~3개의 짧은 문장으로 다음 내용을 자연스럽게 설명한다.
+   - 사용자의 조건을 어떻게 만족하는지
+   - 가격·데이터·혜택을 종합했을 때 이 순위로 선정된 이유
+   - 다른 후보와 비교한 장점 또는 주의할 트레이드오프
+   내부 계산 용어인 가중치, 기대순위, 수용도, 점수, 백분율은 절대 쓰지 않는다.
+5. 할인 가격과 정상가가 다르면 해당 상품마다 할인 기간과 종료 후 정상가를 정확히 안내한다.
+   예산 조건은 할인 가격을 기준으로 통과했으므로, 할인 종료 후 정상가가 예산보다 높더라도
+   현재 추천이 예산을 위반했다고 표현하지 말고 향후 요금 변동에 주의하라고 안내한다.
+6. 같은 내용과 표현을 모든 순위에 반복하지 말고 상품별 차이가 드러나게 쓴다.
+7. reference_plan(사용자가 현재 쓰는 요금제)이 있으면 `### 현재 요금제와 비교`에서 별도로 쓴다.
    절감액은 reference_plan의 금액과 추천 요금제의 금액으로만 계산한다. reference_plan이
-   null이거나 금액이 없으면 절감액을 쓰지 마라 — 추천 표의 숫자를 현재 요금으로 쓰면 거짓이다.
+   null이거나 금액이 없으면 해당 제목과 문장을 아예 쓰지 않는다.
    계산 기준이 정상가인지 할인가인지 명시한다.
-6. 마지막에는 할인 기간, 가입 조건, 테더링/소진 후 속도처럼 데이터에서 불명확한 항목을
-   가입 전에 확인하라는 짧은 안내를 넣는다.
-7. prior_feedback이 있으면 사실성 원칙을 해치지 않는 범위에서 모두 반영한다.
-8. 입력 데이터 구조, JSON, 에이전트, 프롬프트 같은 내부 용어는 답변에서 언급하지 않는다.
+8. 마지막에는 `### 가입 전 확인` 제목으로 할인 기간, 가입 조건, 테더링과 소진 후 속도 등
+   불명확한 항목을 두세 줄로 안내한다.
+9. prior_feedback이 있으면 사실성 원칙을 해치지 않는 범위에서 모두 반영한다.
+10. 입력 데이터 구조, JSON, 에이전트, 프롬프트 같은 내부 용어는 답변에서 언급하지 않는다.
 
 <REPORT_DATA>
 {report_data}
@@ -89,6 +96,8 @@ def _ranked_recommendations(state: PipelineState) -> list[dict[str, Any]]:
         if not isinstance(scored, Mapping):
             continue
         scored_row = dict(scored)
+        # 기대순위·수용도 문구는 사용자용 설명을 흐리므로 Report Agent에 넘기지 않는다.
+        scored_row.pop("reason", None)
         matched = by_id.get(str(scored_row.get("plan_id")), {})
         recommendations.append({**matched, **scored_row, "rank": rank})
 
@@ -127,6 +136,43 @@ def _empty_report() -> str:
     )
 
 
+_RANK_HEADING = re.compile(r"^###\s+(\d+)순위\s+[—–-]\s+.*$", re.MULTILINE)
+
+
+def _fallback_reason(plan: dict[str, Any]) -> str:
+    """모델 출력 형식이 흔들려도 카드에 내부 SMAA 수치가 노출되지 않게 한다."""
+    rank = int(plan.get("rank") or 0)
+    name = str(plan.get("plan_name") or "추천 요금제")
+    fee = int(plan.get("discounted_fee") or 0)
+    data = "무제한" if plan.get("data_unlimited") else f"{float(plan.get('data_gb') or 0):g}GB"
+    benefits = list(plan.get("included_benefits") or [])
+    benefit_text = f" 주요 혜택은 {', '.join(map(str, benefits[:3]))}입니다." if benefits else ""
+    reason = (
+        f'{rank}순위로 추천된 "{name}"은 월 {fee:,}원에 데이터 {data}를 제공하며, '
+        f"가격·데이터·혜택의 균형을 종합해 선정했습니다.{benefit_text}"
+    )
+    regular_fee = int(plan.get("monthly_fee") or fee)
+    months = plan.get("discount_period_months")
+    if regular_fee > fee:
+        when = f"{int(months)}개월의 할인 기간이 끝나면" if months else "할인이 끝나면"
+        reason += f" {when} 월 {regular_fee:,}원으로 변경될 수 있으니 가입 전에 조건을 확인하세요."
+    return reason
+
+
+def _rank_reasons(report: str, recommendations: list[dict[str, Any]]) -> list[str]:
+    """정해 둔 순위 제목 사이의 문단을 상품별 카드 설명으로 분리한다."""
+    matches = list(_RANK_HEADING.finditer(report))
+    extracted: dict[int, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(report)
+        body = report[match.end() : end].strip()
+        # 순위 설명 뒤의 공통 섹션은 마지막 상품 설명에서 제거한다.
+        body = re.split(r"^###\s+(?:현재 요금제와 비교|가입 전 확인)\s*$", body, maxsplit=1, flags=re.MULTILINE)[0].strip()
+        if body:
+            extracted[int(match.group(1))] = body
+    return [extracted.get(int(plan.get("rank") or 0), _fallback_reason(plan)) for plan in recommendations]
+
+
 def report_node(state: PipelineState, config: RunnableConfig) -> dict:
     recommendations = _ranked_recommendations(state)
 
@@ -151,8 +197,17 @@ def report_node(state: PipelineState, config: RunnableConfig) -> dict:
         if not report:
             raise ValueError("Report Agent가 빈 응답을 반환했습니다.")
 
+    ranked = list(state.get("ranked") or [])
+    if recommendations and ranked:
+        reasons = _rank_reasons(report, recommendations)
+        ranked = [
+            plan.model_copy(update={"reason": reasons[index]})
+            for index, plan in enumerate(ranked)
+        ]
+
     return {
         "report": report,
+        "ranked": ranked,
         "messages": [AIMessage(content=report, name="report")],
     }
 

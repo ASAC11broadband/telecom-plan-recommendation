@@ -65,6 +65,7 @@ export interface RecommendResponse {
   candidateCount: number;
   totalCount: number;
   report: string;
+  referencePlan: PlanItem | null;
   profile: Profile | null;
   followupQuestion: string | null;
   assumptions: string[];

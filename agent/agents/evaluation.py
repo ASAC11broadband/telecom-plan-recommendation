@@ -125,8 +125,6 @@ def _ranking_errors(profile: UserProfile | None, ranked: list, rows: list[dict])
 def _report_errors(report: str, ranked: list, rows: list[dict]) -> list[str]:
     """리포트가 추천 결과를 실제로 담고 있는지만 본다."""
     errors: list[str] = []
-    if "|" not in report:
-        errors.append("리포트에 비교 표가 없음")
     missing = [plan.plan_name for plan in ranked if plan.plan_name not in report]
     if missing:
         errors.append(f"추천 요금제가 리포트에서 빠짐: {', '.join(missing)}")

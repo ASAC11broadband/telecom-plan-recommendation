@@ -74,6 +74,7 @@ def recommend(req: RecommendRequest) -> dict:
     evaluation = state.get("evaluation")
 
     candidates = state.get("candidates", [])
+    reference = state.get("reference")
     followup = (profile.followup_question if profile else None) or state.get("clarification_question")
     plans = to_plan_items(candidates, ranked)
 
@@ -84,6 +85,8 @@ def recommend(req: RecommendRequest) -> dict:
         "candidateCount": len(candidates),
         "totalCount": len(_rows()),
         "report": state.get("report", ""),
+        # 선택한 추천 상품과 현재 요금제를 화면에서 직접 비교할 수 있도록 원본 기준 상품도 전달한다.
+        "referencePlan": to_plan_item(reference) if reference else None,
         "profile": profile.model_dump(exclude_none=True) if profile else None,
         # 조건이 부족해도 대개 추천은 낸다. 질문은 결과와 함께 내려보내 화면에서 이어 묻는다.
         "followupQuestion": followup,

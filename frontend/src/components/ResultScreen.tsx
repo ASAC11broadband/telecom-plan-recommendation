@@ -73,6 +73,7 @@ export function ResultScreen({
   loading,
   error,
   onFollowup,
+  onReport,
   onNavigate,
 }: {
   result: RecommendResponse | null;
@@ -82,6 +83,7 @@ export function ResultScreen({
   loading: boolean;
   error: string | null;
   onFollowup: (text: string) => void;
+  onReport: (planId: string) => void;
   onNavigate: (s: ScreenType) => void;
 }) {
   const [text, setText] = useState('');
@@ -203,7 +205,7 @@ export function ResultScreen({
                 key={plan.id}
                 plan={plan}
                 delta={deltaOf(plan, prevPlans)}
-                onReport={() => onNavigate('s-report')}
+                onReport={() => onReport(plan.id)}
               />
             ))}
           </div>
@@ -396,6 +398,7 @@ function CompareTable({ plans }: { plans: PlanItem[] }) {
     ['소진 후 속도', (p) => p.qos],
     ['음성통화', (p) => p.call],
     ['문자', (p) => p.sms],
+    ['주요 혜택', (p) => p.benefit],
     [`${plans[0].compareMonths}개월 총비용`, (p) => p.total],
   ];
 
