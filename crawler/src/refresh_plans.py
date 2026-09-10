@@ -4,7 +4,7 @@
     python src/refresh_plans.py --parse-only   # 이미 받아둔 캐시로 파싱·비교만
 
 하는 일:
-  ① 지금 최종본을 data/final/history/YYYY-MM-DD/ 로 백업
+  ① 지금 최종본을 data/final/history/<그 데이터의 수집일>/ 로 백업
   ② 4개 사이트 수집 (모요는 목록 비교로 바뀐 상세만 재수집)
   ③ 파싱 -> data/interim/*.csv
   ④ 필터·병합 (merge_plans.build) -> 새 최종 후보 (아직 파일로 안 씀)
@@ -77,11 +77,27 @@ def _write_csv(rows: list[dict], columns, path: Path):
         w.writerows(rows)
 
 
-def backup_current(run_date: str) -> Path | None:
-    """지금 최종본을 history/날짜/ 로 복사. 되돌릴 수 있게 남겨 둔다."""
+def _backup_date(prev: list[dict], run_date: str) -> str:
+    """백업 폴더에 쓸 날짜. 실행일이 아니라 **그 데이터가 수집된 날**이다.
+
+    실행일로 찍으면 두 가지가 어긋난다. (1) history/9-10 안에 9-09 데이터가
+    들어가 늘 하루씩 밀려 보인다. (2) 가드에 걸려 갱신이 중단되면(status=aborted)
+    다음 실행이 **같은 데이터를 새 날짜 폴더에 또** 복사해, 수집한 적 없는 날의
+    스냅샷이 있는 것처럼 보인다(2026-09-07 중단 -> 09-07과 09-10이 같은 09-02 데이터).
+    수집일로 찍으면 같은 데이터는 늘 같은 폴더로 가 덮어쓰기만 된다.
+    """
+    stamps = [r.get("crawled_at", "") for r in prev]
+    stamps = [s for s in stamps if s]
+    return max(stamps)[:10] if stamps else run_date
+
+
+def backup_current(prev: list[dict], run_date: str) -> Path | None:
+    """지금 최종본을 history/수집일/ 로 복사. 되돌릴 수 있게 남겨 둔다."""
     if not Path(PLAN_OUT).exists():
         return None
-    dest = HISTORY_DIR / run_date
+    dest = HISTORY_DIR / _backup_date(prev, run_date)
+    if dest.exists():
+        return dest     # 같은 수집일 백업이 이미 있으면 먼저 찍힌 걸 남긴다
     dest.mkdir(parents=True, exist_ok=True)
     for src in (PLAN_OUT, BENEFIT_OUT):
         if Path(src).exists():
@@ -260,7 +276,13 @@ def _selfcheck():
     assert (got[0]["old_value"], got[0]["new_value"]) == ("110.0", "120.0"), got
 
     assert [c["change_type"] for c in diff_plans(prev, [], [])] == ["단종"]
-    print("diff_plans 점검 통과")
+
+    rows = [{"crawled_at": "2026-09-02T01:58:43+00:00"},
+            {"crawled_at": "2026-09-02T02:10:00+00:00"}]
+    assert _backup_date(rows, "2026-09-10") == "2026-09-02", "수집일이 아니라 실행일로 찍힘"
+    assert _backup_date([], "2026-09-10") == "2026-09-10", "빈 이전본이면 실행일로"
+    assert _backup_date([{"crawled_at": ""}], "2026-09-10") == "2026-09-10"
+    print("diff_plans / _backup_date 점검 통과")
 
 
 def main() -> int:
@@ -272,7 +294,7 @@ def main() -> int:
     print(f"[갱신 시작] {run_date} (parse_only={parse_only})")
 
     prev = _read_csv(PLAN_OUT)
-    backup = backup_current(run_date)
+    backup = backup_current(prev, run_date)
     print(f"이전 최종본: {len(prev)}행" + (f" (백업: {backup})" if backup else " (없음)"))
 
     run_crawlers(parse_only)
