@@ -29,6 +29,7 @@ export default function App() {
   const [compare, setCompare] = useState<PlanItem[]>([]);
   const [compareOpen, setCompareOpen] = useState(false);
   const [askPlan, setAskPlan] = useState<PlanItem | null>(null);
+  const [reportPlanId, setReportPlanId] = useState<string | null>(null);
 
   const navigate = (next: ScreenType) => {
     setScreen(next);
@@ -76,6 +77,11 @@ export default function App() {
 
   const step = screen === 's-report' ? 3 : screen === 's-result' ? 2 : 1;
 
+  const openReport = (planId: string) => {
+    setReportPlanId(planId);
+    navigate('s-report');
+  };
+
   return (
     <div className="screen">
       <GNB
@@ -108,10 +114,13 @@ export default function App() {
           loading={loading}
           error={error}
           onFollowup={runRecommend}
+          onReport={openReport}
           onNavigate={navigate}
         />
       )}
-      {screen === 's-report' && <ReportScreen result={result} onNavigate={navigate} />}
+      {screen === 's-report' && (
+        <ReportScreen result={result} selectedPlanId={reportPlanId} onNavigate={navigate} />
+      )}
       {screen === 's-browse' && (
         <BrowseScreen
           compare={compare}

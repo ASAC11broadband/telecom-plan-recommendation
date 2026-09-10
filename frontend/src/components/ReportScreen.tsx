@@ -1,4 +1,5 @@
 import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { PlanItem, Profile, RecommendResponse, ScreenType } from '../types';
 
 /** 비용 표는 LLM 서술이 아니라 요금제 숫자로 직접 계산한다. 돈 얘기는 틀리면 안 된다. */
@@ -35,6 +36,60 @@ function verdicts(plan: PlanItem, profile: Profile | null) {
   return rows;
 }
 
+function benefitItems(plan: PlanItem) {
+  return plan.benefit === '부가 혜택 없음'
+    ? []
+    : plan.benefit.split(' · ').map((item) => item.trim()).filter(Boolean);
+}
+
+function dataDifference(base: PlanItem, target: PlanItem) {
+  if (base.dataUnlimited && target.dataUnlimited) return '데이터는 모두 무제한입니다.';
+  if (!base.dataUnlimited && target.dataUnlimited) return `데이터가 ${base.data}에서 무제한으로 늘어납니다.`;
+  if (base.dataUnlimited && !target.dataUnlimited) return `데이터가 무제한에서 ${target.data}로 줄어듭니다.`;
+  const baseGb = base.dataNum ?? 0;
+  const targetGb = target.dataNum ?? 0;
+  if (targetGb === baseGb) return `데이터 제공량은 ${target.data}로 같습니다.`;
+  return targetGb > baseGb
+    ? `데이터가 ${base.data}에서 ${target.data}로 늘어납니다.`
+    : `데이터가 ${base.data}에서 ${target.data}로 줄어듭니다.`;
+}
+
+function alternativeSummary(selected: PlanItem, other: PlanItem) {
+  const priceGap = Math.abs(other.priceNum - selected.priceNum).toLocaleString();
+  const price = other.priceNum === selected.priceNum
+    ? '월 요금은 같습니다'
+    : other.priceNum < selected.priceNum
+      ? `월 ${priceGap}원 더 저렴합니다`
+      : `월 ${priceGap}원 더 비쌉니다`;
+  const data = dataDifference(selected, other).replace(/^데이터(?:가| 제공량은)\s*/, '데이터는 ');
+  const benefits = benefitItems(other);
+  const benefit = benefits.length > 0
+    ? `주요 혜택은 ${benefits.join(', ')}입니다.`
+    : '확인된 부가 혜택은 없습니다.';
+  return `${price}. ${data} ${benefit}`;
+}
+
+function referenceRows(current: PlanItem, selected: PlanItem): [string, string][] {
+  const feeGap = selected.priceNum - current.priceNum;
+  const priceChange = feeGap === 0
+    ? '월 요금이 같습니다.'
+    : feeGap < 0
+      ? `월 ${Math.abs(feeGap).toLocaleString()}원 저렴해집니다.`
+      : `월 ${feeGap.toLocaleString()}원 비싸집니다.`;
+  const currentBenefits = benefitItems(current);
+  const selectedBenefits = benefitItems(selected);
+  const benefitChange = selectedBenefits.length === currentBenefits.length
+    ? `확인된 혜택 수는 ${selectedBenefits.length}개로 같습니다.`
+    : selectedBenefits.length > currentBenefits.length
+      ? `확인된 혜택이 ${currentBenefits.length}개에서 ${selectedBenefits.length}개로 늘어납니다.`
+      : `확인된 혜택이 ${currentBenefits.length}개에서 ${selectedBenefits.length}개로 줄어듭니다.`;
+  return [
+    ['월 요금', `${current.price}원 → ${selected.price}원 · ${priceChange}`],
+    ['데이터', `${current.data} → ${selected.data} · ${dataDifference(current, selected)}`],
+    ['주요 혜택', `${current.benefit} → ${selected.benefit} · ${benefitChange}`],
+  ];
+}
+
 /** 시안의 "실효 월 비용 시뮬레이션"을 대체한다.
  *  사용량 분산 데이터가 없어 금액 분포는 만들 수 없고, 요금제 스펙으로 판정 가능한 것은
  *  "초과 요금이 날 수 있는가" 뿐이다. 종량 단가는 수집 데이터에 없어 금액은 산정하지 않는다. */
@@ -69,9 +124,11 @@ function overageRisks(plan: PlanItem, profile: Profile | null): [string, string,
 
 export function ReportScreen({
   result,
+  selectedPlanId,
   onNavigate,
 }: {
   result: RecommendResponse | null;
+  selectedPlanId: string | null;
   onNavigate: (s: ScreenType) => void;
 }) {
   if (!result || result.plans.length === 0) {
@@ -89,7 +146,8 @@ export function ReportScreen({
     );
   }
 
-  const plan = result.plans[0];
+  const plan = result.plans.find((item) => item.id === selectedPlanId) ?? result.plans[0];
+  const alternatives = result.plans.filter((item) => item.id !== plan.id);
   const cost = costRows(plan);
   const meta = [
     plan.network ? `${plan.network}망` : '',
@@ -111,7 +169,7 @@ export function ReportScreen({
             ← 추천 결과로 돌아가기
           </div>
           <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-            <span className="tag tag-accent">1순위</span>
+            <span className="tag tag-accent">{plan.rank}순위</span>
             <span className="tag tag-green">적합도 {plan.score}</span>
           </div>
           <h2 style={{ fontSize: 19, fontWeight: 700 }}>{plan.name}</h2>
@@ -120,9 +178,8 @@ export function ReportScreen({
 
         <div className="report-sec">
           <h4>
-            <span className="no">01</span>추천 근거
+            <span className="no">01</span>선택 요금제 요약
           </h4>
-          <p>{plan.reason || '선정 사유가 제공되지 않았습니다.'}</p>
           <div className="mini-table">
             <div className="r">
               <span>평가 항목</span>
@@ -180,31 +237,80 @@ export function ReportScreen({
               </span>
             </div>
           </div>
-          {plan.priceRisesAfter !== null && (
+          {plan.isPromo && (
             <p style={{ marginTop: 8, fontSize: 'var(--fs-11)', color: 'var(--amber)' }}>
-              참고: {plan.priceRisesAfter + 1}개월차부터 정가 {plan.originalPrice.toLocaleString()}
-              원으로 인상됩니다. 비교 구간({cost.months}개월) 이후 비용 변동에 유의하세요.
+              참고: {plan.promoMonths ? `할인 기간 ${plan.promoMonths}개월이 끝나면` : '할인이 끝나면'} 정가{' '}
+              {plan.originalPrice.toLocaleString()}원으로 변경될 수 있습니다.
             </p>
           )}
         </div>
 
         <div className="report-sec">
           <h4>
-            <span className="no">03</span>대안과의 비교
+            <span className="no">03</span>추천 요금제 선정 이유
           </h4>
           <div className="md">
-            <Markdown>{result.report}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]}>
+              {plan.reason || '선정 사유가 제공되지 않았습니다.'}
+            </Markdown>
           </div>
         </div>
 
+        <div className="report-sec">
+          <h4>
+            <span className="no">04</span>다른 추천 후보와 비교
+          </h4>
+          {alternatives.length > 0 ? (
+            <div className="mini-table">
+              <div className="r">
+                <span>대안</span>
+                <span>선택 요금제와의 차이</span>
+              </div>
+              {alternatives.map((other) => (
+                <div className="r" key={other.id} style={{ alignItems: 'flex-start', gap: 18 }}>
+                  <span style={{ flex: '0 0 32%' }}>{other.rank}순위 · {other.name}</span>
+                  <span className="v" style={{ textAlign: 'right' }}>{alternativeSummary(plan, other)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p>비교할 다른 추천 후보가 없습니다.</p>
+          )}
+        </div>
+
+        {result.referencePlan && (
+          <div className="report-sec">
+            <h4>
+              <span className="no">05</span>현재 요금제와 비교
+            </h4>
+            <p>
+              현재 이용 중인 “{result.referencePlan.name}”과 선택한 “{plan.name}”을 비교했습니다.
+            </p>
+            <div className="mini-table">
+              <div className="r">
+                <span>비교 항목</span>
+                <span>변화</span>
+              </div>
+              {referenceRows(result.referencePlan, plan).map(([key, value]) => (
+                <div className="r" key={key} style={{ gap: 18 }}>
+                  <span>{key}</span>
+                  <span className="v" style={{ textAlign: 'right' }}>{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="report-sec" style={{ borderBottom: 'none' }}>
           <h4>
-            <span className="no">04</span>유의사항
+            <span className="no">06</span>가입 전 확인
           </h4>
           <p>
-            본 산정은 2026년 8월 21일 수집 데이터 기준이며, 프로모션 조건은 사업자 정책에 따라 변경될
-            수 있습니다. 가입 전 통신사 공식 페이지에서 최신 조건 확인이 필요합니다.
+            할인 기간과 종료 후 정상가, 가입 대상 조건을 통신사 공식 페이지에서 다시 확인해 주세요.
+            테더링 제공량은 {plan.tetheringGb !== null ? `${plan.tetheringGb}GB` : '자료에서 확인되지 않았으며'},
+            데이터 소진 후 속도는 {plan.qos === '-' ? '확인이 필요합니다' : `${plan.qos}입니다`}.
           </p>
+          <p>본 산정은 2026년 8월 21일 수집 데이터 기준이며 프로모션은 사업자 정책에 따라 변경될 수 있습니다.</p>
           {result.evaluation && !result.evaluation.passed && result.evaluation.feedback && (
             <p style={{ fontSize: 'var(--fs-11)', color: 'var(--t3)' }}>
               검증 메모: {result.evaluation.feedback}
