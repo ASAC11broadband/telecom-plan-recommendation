@@ -2,29 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import math
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..data import filter_candidates, find_plans_by_name
-from ..schemas import RankingResult, ScoredPlan, UserProfile
-from ..state import PipelineState, feedback_block, get_llm, user_query
-
-
-RECOMMEND_PROMPT = """Hard Filter를 통과한 실제 요금제 후보만 사용해 상위 5개를 고르라.
-
-- plan_id와 plan_name은 후보 값을 글자 그대로 복사한다.
-- 사용자가 priorities를 말했다면 그 순서를 가장 중요하게 반영한다.
-- 고정 가중치를 발명하지 말고 가격·데이터 적합성·혜택·QoS·통화·문자의 트레이드오프를 비교한다.
-- 데이터 무제한과 QoS는 서로 다른 속성이다. QoS가 높아도 무제한으로 재분류하지 않는다.
-- 사용량 추정값이 있으면 데이터 적합성 판단에 사용하되 추정값임을 이유에 드러낸다.
-- score는 이 후보군 안에서의 상대 적합도이며 0~100 정수다.
-- 할인 가격은 discount_period_months 동안만 유효할 수 있으므로 기간과 종료 후 요금을 함께 고려한다.
-- reason은 후보 데이터에 있는 사실만 사용해 1~2문장으로 쓴다.
-- 후보가 5개보다 적으면 존재하는 후보만 반환한다.
-"""
+from ..mcda import evaluate_mcda, rank_smaa2
+from ..schemas import ScoredPlan, UserProfile
+from ..state import PipelineState
 
 
 def _data_value(plan: dict) -> float:
@@ -216,35 +202,28 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             "messages": [AIMessage(content="조건을 만족하는 요금제가 없습니다.", name="recommend")],
         }
 
-    shortlist = _shortlist(_dedupe_by_name(candidates), profile, reference)
-    prompt = (
-        RECOMMEND_PROMPT
-        + "\n\n[사용자 원문]\n"
-        + user_query(state)
-        + "\n\n[UserProfile]\n"
-        + profile.model_dump_json(exclude_none=True)
-        + "\n\n[비교 기준]\n"
-        + json.dumps(reference, ensure_ascii=False)
-        + "\n\n[후보]\n"
-        + json.dumps(shortlist, ensure_ascii=False)
-        + "\n\n"
-        + feedback_block(state)
+    ranking_candidates = _dedupe_by_name(candidates)
+    by_id = {candidate["plan_id"]: candidate for candidate in ranking_candidates}
+    preferred_carrier = profile.mvno_brand or profile.host_mno
+    decisions = evaluate_mcda(
+        ranking_candidates,
+        profile.priorities,
+        preferred_carrier,
+        reference=reference,
+        comparison_goals=profile.comparison_goals,
     )
-    result: RankingResult = get_llm(config).with_structured_output(RankingResult).invoke(
-        [SystemMessage(content=prompt)]
-    )
-
-    by_id = {candidate["plan_id"]: candidate for candidate in shortlist}
-    ranked: list[ScoredPlan] = []
-    seen: set[str] = set()
-    for plan in result.plans:
-        candidate = by_id.get(plan.plan_id)
-        if candidate is None or plan.plan_id in seen:
-            continue
-        seen.add(plan.plan_id)
-        ranked.append(plan.model_copy(update={"plan_name": candidate["plan_name"]}))
-        if len(ranked) == 5:
-            break
+    ranked = [
+        ScoredPlan(
+            plan_id=decision.plan_id,
+            plan_name=by_id[decision.plan_id]["plan_name"],
+            score=decision.smaa2_score,
+            reason=(
+                f"가중치 조합에서 기대순위 {decision.smaa2_expected_rank:.2f}, "
+                f"1위 수용도 {decision.smaa2_first_rank_acceptability * 100:.1f}%입니다."
+            ),
+        )
+        for decision in rank_smaa2(decisions)[:5]
+    ]
 
     return {
         "candidates": candidates,
