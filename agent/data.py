@@ -110,9 +110,18 @@ def filter_candidates(profile: dict) -> list[dict]:
     if profile.get("data_unlimited") is True:
         df = df[df["data_unlimited"]]
 
-    if profile.get("min_data_gb") is not None:
-        # 무제한은 data_gb 가 비어 있어 수치 비교가 성립하지 않는다 → 최소량 조건은 충족으로 본다.
-        df = df[df["data_unlimited"] | (df["data_gb"] >= profile["min_data_gb"])]
+    # 사용자가 직접 말한 최소량과 이용 패턴에서 계산한 예상량 중 큰 값을 적용한다.
+    # estimated_monthly_data_gb는 파생값이므로 hard_constraints에는 넣지 않지만,
+    # 후보 선정 단계에서는 실제로 감당할 수 있는 기본 데이터량으로 먼저 거른다.
+    data_targets = [
+        float(profile[field])
+        for field in ("min_data_gb", "estimated_monthly_data_gb")
+        if profile.get(field) is not None
+    ]
+    if data_targets:
+        required_data_gb = max(data_targets)
+        # 무제한은 data_gb가 비어 있어 수치 비교가 성립하지 않는다 → 예상량을 충족으로 본다.
+        df = df[df["data_unlimited"] | (df["data_gb"] >= required_data_gb)]
 
     if profile.get("min_qos_mbps") is not None:
         df = df[df["qos_mbps"] >= profile["min_qos_mbps"]]
@@ -270,6 +279,13 @@ if __name__ == "__main__":
 
     # 무제한은 data_gb 가 비어 있어도 최소량 조건에서 탈락하지 않는다
     assert len(filter_candidates({"data_unlimited": True, "min_data_gb": 30})) > 0
+
+    # 이용 패턴 추정값도 명시 최소량과 함께 후보 필터에 적용한다.
+    estimated = filter_candidates({"estimated_monthly_data_gb": 64.4})
+    assert estimated
+    assert all(x["data_unlimited"] or (x.get("data_gb") or 0) >= 64.4 for x in estimated)
+    stricter = filter_candidates({"min_data_gb": 100, "estimated_monthly_data_gb": 64.4})
+    assert all(x["data_unlimited"] or (x.get("data_gb") or 0) >= 100 for x in stricter)
 
     assert "data_gb" not in slim(c)[0] and slim(c)[0]["plan_name"] == c[0]["plan_name"]
 

@@ -14,7 +14,14 @@ function deltaOf(plan: PlanItem, prev: PlanItem[]) {
 function conditionCells(result: RecommendResponse) {
   const p = result.profile ?? {};
   return [
-    ['데이터', p.data_unlimited ? '무제한' : p.min_data_gb ? `${p.min_data_gb}GB` : '미지정'],
+    [
+      '데이터',
+      p.data_unlimited
+        ? '무제한'
+        : p.min_data_gb || p.estimated_monthly_data_gb
+          ? `${Math.max(p.min_data_gb ?? 0, p.estimated_monthly_data_gb ?? 0)}GB 이상`
+          : '미지정',
+    ],
     ['통화', p.voice_unlimited ? '무제한' : p.min_voice_minutes ? `${p.min_voice_minutes}분` : '미지정'],
     ['문자', p.sms_unlimited ? '무제한' : '미지정'],
     ['예산', p.budget_max_won ? `${p.budget_max_won.toLocaleString()}원 이하` : '미지정'],
@@ -183,6 +190,27 @@ export function ResultScreen({
         {result.followupQuestion && (
           <FollowupNotice question={result.followupQuestion} onAnswer={onFollowup} blocking={false} />
         )}
+
+        {result.profile?.estimated_monthly_data_gb &&
+          result.profile.usage_estimate_notes &&
+          result.profile.usage_estimate_notes.length > 0 && (
+            <div className="notice" style={{ alignItems: 'flex-start', gap: 10 }}>
+              <span className="tag tag-green" style={{ background: '#fff', flexShrink: 0 }}>
+                사용량 추정
+              </span>
+              <div className="txt">
+                <strong>
+                  {result.profile.smartchoice_usage_pattern ? '추천 데이터 기준' : '월 예상 사용량'}{' '}
+                  {result.profile.estimated_monthly_data_gb.toLocaleString()}GB
+                </strong>
+                <div style={{ marginTop: 4, color: 'var(--t3)', lineHeight: 1.6 }}>
+                  {result.profile.usage_estimate_notes.map((note) => (
+                    <div key={note}>· {note}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
         <div className="card cond-bar">
           {conditionCells(result).map(([k, v]) => (

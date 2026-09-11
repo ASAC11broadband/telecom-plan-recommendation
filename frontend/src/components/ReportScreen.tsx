@@ -21,9 +21,13 @@ function costRows(plan: PlanItem) {
 function verdicts(plan: PlanItem, profile: Profile | null) {
   const rows: [string, string][] = [];
   const p = profile ?? {};
+  const dataNeed = Math.max(p.min_data_gb ?? 0, p.estimated_monthly_data_gb ?? 0);
   if (p.data_unlimited) rows.push(['데이터 충족도', '무제한 요구 충족']);
-  else if (p.min_data_gb)
-    rows.push(['데이터 충족도', `${p.min_data_gb}GB 요구 대비 ${plan.data} 제공`]);
+  else if (dataNeed)
+    rows.push([
+      '데이터 충족도',
+      `${p.estimated_monthly_data_gb ? '예상 사용량 기준' : '요구량'} ${dataNeed}GB 대비 ${plan.data} 제공`,
+    ]);
   if (p.voice_unlimited) rows.push(['통화 충족도', '통화 무제한 제공']);
   else if (p.min_voice_minutes)
     rows.push(['통화 충족도', `${p.min_voice_minutes}분 요구 대비 ${plan.call} 제공`]);
@@ -104,7 +108,7 @@ function overageRisks(plan: PlanItem, profile: Profile | null): [string, string,
     rows.push(['데이터 소진 후', '속도 제어 없음 · 초과분 종량 과금 발생', 'tag-amber']);
   }
 
-  const need = profile?.min_data_gb;
+  const need = Math.max(profile?.min_data_gb ?? 0, profile?.estimated_monthly_data_gb ?? 0);
   if (need && plan.dataNum !== null && !plan.dataUnlimited && plan.dataNum < need) {
     rows.push(['요구 데이터', `요구 ${need}GB 대비 ${plan.dataNum}GB — 매월 부족`, 'tag-amber']);
   }

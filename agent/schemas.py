@@ -11,6 +11,22 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class AppUsage(BaseModel):
+    """앱별 하루 이용 시간과 사용자가 명시한 화질·모드."""
+
+    service: Literal[
+        "youtube", "netflix", "disney_plus", "tiktok", "instagram",
+        "instagram_reels", "spotify", "google_maps", "zoom", "whatsapp",
+        "mobile_game", "casual_game", "pokemongo_game", "moba_game",
+        "battle_royale_game", "league_of_legend_game", "battleground_game",
+        "clashroyale_game", "online_rpg_game", "fortnite_game",
+        "callofduty_game", "brawlstars_game", "stardewvalley_game",
+        "generic_video", "generic_shortform",
+    ] = Field(..., description="usage.py에서 사용하는 정규화된 앱 식별자")
+    daily_hours: float = Field(..., gt=0, description="해당 앱의 하루 평균 이용 시간")
+    mode: Optional[str] = Field(None, description="사용자가 명시한 화질·이용 모드")
+
+
 class UserProfile(BaseModel):
     """1단계 산출물 — 사용자 요구사항."""
 
@@ -51,6 +67,13 @@ class UserProfile(BaseModel):
     daily_video_hours: Optional[float] = Field(None, description="하루 일반 영상 시청 시간")
     daily_shortform_hours: Optional[float] = Field(None, description="하루 숏폼 시청 시간")
     daily_game_hours: Optional[float] = Field(None, description="하루 모바일 게임 시간")
+    app_usages: list[AppUsage] = Field(
+        default_factory=list,
+        description="사용자가 말한 앱별 하루 이용 시간과 선택적 화질·모드",
+    )
+    smartchoice_usage_pattern: Optional[
+        Literal["wifi_primary", "web_music_primary", "video_1h", "video_2h", "video_3h_plus"]
+    ] = Field(None, description="앱·화질이 특정되지 않은 스마트초이스 생활패턴")
     estimated_monthly_data_gb: Optional[float] = Field(
         None,
         description="이용 시간으로 코드가 계산한 월 예상 데이터량(GB)",
