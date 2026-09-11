@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,7 @@ PLANS_CSV = DATA_DIR / "통신요금제_통합데이터_최종.csv"
 BENEFITS_CSV = DATA_DIR / "통신요금제_혜택상세_최종.csv"
 
 _plans = None
+_load_lock = threading.Lock()
 
 
 def _speed_to_mbps(value) -> float | None:
@@ -36,24 +38,35 @@ def _speed_to_mbps(value) -> float | None:
 
 
 def load() -> None:
+    """CSV를 읽어 `_plans`를 채운다.
+
+    여러 요청이 동시에 처음 호출하면(스레드풀 등) `_plans`를 완성 전에 서로
+    덮어써서 일부 스레드가 `included_benefits` 없는 프레임을 보는 경합이
+    있었다 — 락으로 한 스레드만 조립하게 하고, 완성된 프레임만 마지막에
+    한 번 `_plans`에 대입한다(조립 도중 상태가 전역에 노출되지 않는다).
+    """
     global _plans
     if _plans is not None:
         return
-    _plans = pd.read_csv(PLANS_CSV, dtype={"plan_id": str})
-    _plans["qos_mbps"] = _plans["data_throttle_speed"].map(_speed_to_mbps)
-    benefits = pd.read_csv(BENEFITS_CSV, dtype={"plan_id": str})
-    benefit_lists = (
-        benefits.groupby("plan_id")["benefit_name"]
-        .apply(lambda values: [str(value) for value in values.dropna().unique()])
-    )
-    _plans["included_benefits"] = _plans["plan_id"].map(benefit_lists).apply(
-        lambda value: value if isinstance(value, list) else []
-    )
-    _plans["benefit_search_text"] = (
-        _plans["ott_options"].fillna("").astype(str)
-        + " | "
-        + _plans["included_benefits"].apply(" | ".join)
-    )
+    with _load_lock:
+        if _plans is not None:
+            return
+        plans = pd.read_csv(PLANS_CSV, dtype={"plan_id": str})
+        plans["qos_mbps"] = plans["data_throttle_speed"].map(_speed_to_mbps)
+        benefits = pd.read_csv(BENEFITS_CSV, dtype={"plan_id": str})
+        benefit_lists = (
+            benefits.groupby("plan_id")["benefit_name"]
+            .apply(lambda values: [str(value) for value in values.dropna().unique()])
+        )
+        plans["included_benefits"] = plans["plan_id"].map(benefit_lists).apply(
+            lambda value: value if isinstance(value, list) else []
+        )
+        plans["benefit_search_text"] = (
+            plans["ott_options"].fillna("").astype(str)
+            + " | "
+            + plans["included_benefits"].apply(" | ".join)
+        )
+        _plans = plans
 
 
 # 사용자가 혜택 이름 뒤에 붙이는 수식어. 붙은 채로 substring 매칭하면 무조건 0건이 된다.
