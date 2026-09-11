@@ -64,16 +64,26 @@ def _finite_voice(plan: dict, finite_max: float) -> float:
     return finite_max * 1.25 if plan.get("voice_unlimited") else float(plan.get("voice_minutes") or 0)
 
 
+def _finite_sms(plan: dict, finite_max: float) -> float:
+    return finite_max * 1.25 if plan.get("sms_unlimited") else float(plan.get("sms_count") or 0)
+
+
 def _utility_rows(candidates: list[dict]) -> list[list[float]]:
     data_max = max((float(p.get("data_gb") or 0) for p in candidates), default=1.0) or 1.0
     voice_max = max((float(p.get("voice_minutes") or 0) for p in candidates), default=1.0) or 1.0
+    sms_max = max((float(p.get("sms_count") or 0) for p in candidates), default=1.0) or 1.0
     columns = {
-        "price": _minmax([float(p.get("discounted_fee") or 0) for p in candidates], cost=True),
-        "data": _minmax([_finite_data(p, data_max) for p in candidates]),
+        # price/data는 min-max 전에 log1p를 먼저 씌운다 — 저가/저용량 구간의 차이를
+        # 크게, 고가/대용량 구간의 차이를 작게 반영한다(체감효과). 후보군 상대 정규화라
+        # 절대 스케일(예: DATA_MAX)이 없어도 되고, 로그값끼리 다시 min-max하면 된다.
+        "price": _minmax([math.log1p(float(p.get("discounted_fee") or 0)) for p in candidates], cost=True),
+        "data": _minmax([math.log1p(_finite_data(p, data_max)) for p in candidates]),
         "qos": _minmax([float(p.get("qos_mbps") or 0) for p in candidates]),
         "benefit": _minmax([float(len(p.get("included_benefits") or [])) for p in candidates]),
         "voice": _minmax([_finite_voice(p, voice_max) for p in candidates]),
-        "sms": [1.0 if p.get("sms_unlimited") else 0.0 for p in candidates],
+        # 예전엔 무제한 여부(1/0)만 봤다 — sms_count가 후보 dict에 없었다. 이제
+        # data.py가 실제 문자 개수를 넘겨주니 voice와 같은 방식으로 정규화한다.
+        "sms": _minmax([_finite_sms(p, sms_max) for p in candidates]),
         "tethering": _minmax([float(p.get("tethering_gb") or 0) for p in candidates]),
     }
     return [[columns[name][i] for name in CRITERIA] for i in range(len(candidates))]
