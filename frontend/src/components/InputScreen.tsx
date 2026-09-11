@@ -50,8 +50,11 @@ export function InputScreen({
   const shownData = profile
     ? profile.data_unlimited
       ? '무제한'
-      : profile.min_data_gb
-        ? `${profile.min_data_gb}GB`
+      : profile.min_data_gb || profile.estimated_monthly_data_gb
+        ? `${profile.estimated_monthly_data_gb ? '예상 ' : ''}${Math.max(
+            profile.min_data_gb ?? 0,
+            profile.estimated_monthly_data_gb ?? 0,
+          )}GB`
         : '미확인'
     : data >= 31
       ? '무제한'

@@ -74,11 +74,34 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   '포함/혜택/되는 요금제'처럼 상품 혜택을 원할 때만 wanted_benefits에 저장한다.
 
 [이용 패턴]
-- GB 수치 없이 이용 시간만 말하면 계산하지 말고 하루 시간만 저장한다.
-- 유튜브 일반영상·넷플릭스·티빙·디즈니+ → daily_video_hours
-- 릴스·틱톡·유튜브 쇼츠 → daily_shortform_hours
-- 모바일 게임 → daily_game_hours
-- 음악 스트리밍과 일반 SNS 피드는 위 시간 필드에 넣지 않는다.
+- GB 수치 없이 앱 이용 시간을 말하면 app_usages에 앱별 항목을 저장한다.
+  각 항목은 service, daily_hours, mode로 구성하고 mode는 사용자가 말하지 않으면 null로 둔다.
+- 앱 이름은 다음 키로 정규화한다.
+  유튜브=youtube, 넷플릭스=netflix, 디즈니+=disney_plus, 틱톡=tiktok,
+  인스타그램=instagram, 인스타그램 릴스·릴스=instagram_reels, 스포티파이=spotify,
+  구글 지도·내비게이션=google_maps, 줌=zoom, 왓츠앱=whatsapp,
+  포켓몬GO=pokemongo_game, 리그오브레전드=league_of_legend_game,
+  배틀그라운드=battleground_game, 클래시로얄=clashroyale_game,
+  포트나이트=fortnite_game, 콜오브듀티=callofduty_game,
+  브롤스타즈=brawlstars_game, 스타듀밸리=stardewvalley_game,
+  그 밖의 모바일 게임=mobile_game, 앱 미지정 영상=generic_video,
+  앱 미지정 숏폼=generic_shortform. 티빙은 전용 계수가 없으므로 generic_video로 저장한다.
+- 사용자가 화질·모드를 말하면 해당 app_usages 항목의 mode에 저장한다.
+  유튜브: 240p=low_240p, 480p=sd_480p, 720p·HD=hd_720p,
+  1440p=fullhd_1440p, 4K=uhd_4k.
+  넷플릭스: 저화질=low, SD=sd, HD=hd, 4K=uhd_4k.
+  틱톡: 일반=standard, 고화질=hd.
+  인스타그램: 사진 피드=photo_feed, 스토리·릴스=story_reels_mix, 라이브=live.
+  스포티파이: 일반=normal_96kbps, 매우 높음=very_high_320kbps, 무손실=lossless_hifi.
+  Zoom: 오디오=audio_only, 1:1 영상=one_to_one_sd, 그룹 HD=group_hd.
+- 화질을 말하지 않으면 mode=null로 둔다. usage.py가 기본 모드를 적용한다.
+- 앱별 시간을 저장한 경우 기존 daily_video_hours/daily_shortform_hours/daily_game_hours에 중복 저장하지 않는다.
+- 앱이나 화질이 특정되지 않은 생활패턴은 smartchoice_usage_pattern으로 저장한다.
+  와이파이 위주=wifi_primary, 웹서핑·음악 위주=web_music_primary,
+  영상 하루 약 1시간=video_1h, 영상 하루 약 2시간=video_2h,
+  영상 하루 3시간 이상=video_3h_plus.
+- smartchoice_usage_pattern을 저장한 경우 generic_video나 daily_video_hours를 중복 저장하지 않는다.
+- 앱을 언급했다는 이유만으로 min_qos_mbps를 만들지 않는다. 사용자가 소진 후 속도를 직접 요구한 경우에만 저장한다.
 
 [기준 요금제·비교]
 - 현재·기존 요금제 이름은 reference_plan_name에 저장한다.
@@ -138,15 +161,83 @@ def _drop_phantom_budget(profile: UserProfile, query: str) -> UserProfile:
     return profile.model_copy(update={"budget_min_won": None, "budget_max_won": None})
 
 
+_NAMED_VIDEO_APP = re.compile(
+    r"유튜브|youtube|넷플릭스|netflix|디즈니\s*(?:플러스|\+)|"
+    r"티빙|tving|틱톡|tiktok|인스타(?:그램)?\s*릴스|릴스",
+    re.IGNORECASE,
+)
+
+
+def _smartchoice_usage_pattern(query: str) -> str | None:
+    """정확한 영상 앱명이 없는 생활패턴을 스마트초이스 구간으로 분류한다."""
+    text = (query or "").casefold()
+    if _NAMED_VIDEO_APP.search(text):
+        return None
+
+    wifi = r"(?:와이파이|wi-?fi)"
+    primary = r"(?:주로|위주|대부분|많이)"
+    if re.search(wifi + r".{0,12}?" + primary, text) or re.search(
+        primary + r".{0,12}?" + wifi, text
+    ):
+        return "wifi_primary"
+
+    web_music = r"(?:웹\s*서핑|인터넷\s*검색|음악\s*(?:듣기|감상|스트리밍))"
+    if re.search(web_music + r".{0,20}?" + primary, text) or re.search(
+        primary + r".{0,20}?" + web_music, text
+    ):
+        return "web_music_primary"
+
+    hour_token = r"[123](?:\.0)?|한|두|세"
+    hour_patterns = (
+        rf"(?:영상|동영상).{{0,18}}?(?:하루(?:에)?\s*)?(?:약\s*)?"
+        rf"(?P<hours>{hour_token})\s*시간(?P<plus>\s*이상)?",
+        rf"(?:하루(?:에)?\s*)?(?:약\s*)?(?P<hours>{hour_token})\s*시간"
+        r"(?P<plus>\s*이상)?.{0,18}?(?:영상|동영상)",
+    )
+    korean_hour_numbers = {"한": 1.0, "두": 2.0, "세": 3.0}
+    for pattern in hour_patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        token = match.group("hours")
+        hours = korean_hour_numbers[token] if token in korean_hour_numbers else float(token)
+        if hours >= 3:
+            return "video_3h_plus"
+        if hours == 2:
+            return "video_2h"
+        if hours == 1:
+            return "video_1h"
+    return None
+
+
+def _apply_smartchoice_usage_rule(profile: UserProfile, query: str) -> UserProfile:
+    """앱명이 없는 발화에는 LLM 추정보다 스마트초이스 분류를 우선한다."""
+    pattern = _smartchoice_usage_pattern(query)
+    if pattern is None:
+        return profile
+    updates: dict[str, object] = {"smartchoice_usage_pattern": pattern}
+    if pattern.startswith("video_"):
+        updates.update(
+            daily_video_hours=None,
+            app_usages=[],
+        )
+    return profile.model_copy(update=updates)
+
+
 def _normalize_profile(profile: UserProfile) -> UserProfile:
     """스키마 값으로 Hard Constraint와 재질문 상태를 결정한다."""
     if profile.mvno_brand and profile.carrier_type != "MVNO":
         profile = profile.model_copy(update={"carrier_type": "MVNO"})
 
+    usage_hours = {usage.service: usage.daily_hours for usage in profile.app_usages}
+    usage_modes = {usage.service: usage.mode for usage in profile.app_usages if usage.mode}
     estimated_gb, usage_notes = estimate_monthly_data_gb(
         profile.daily_video_hours,
         profile.daily_shortform_hours,
         profile.daily_game_hours,
+        usage_hours,
+        usage_modes,
+        profile.smartchoice_usage_pattern,
     )
     hard_constraints = [
         field for field in CONSTRAINT_FIELDS if _has_value(getattr(profile, field))
@@ -187,6 +278,8 @@ def core_signal_missing(profile: UserProfile | None) -> bool:
             profile.reference_data_gb,
         )
     )
+    has_data = has_data or bool(profile.app_usages)
+    has_data = has_data or profile.smartchoice_usage_pattern is not None
     has_fee = any(
         value is not None
         for value in (profile.budget_max_won, profile.budget_min_won, profile.reference_fee_won)
@@ -205,9 +298,13 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
 
     prompt = PROFILING_PROMPT + "\n\n" + feedback_block(state)
     llm = get_llm(config).with_structured_output(UserProfile)
+    query = user_query(state)
     profile = _normalize_profile(
-        _drop_phantom_budget(
-            llm.invoke([SystemMessage(content=prompt), *messages]), user_query(state)
+        _apply_smartchoice_usage_rule(
+            _drop_phantom_budget(
+                llm.invoke([SystemMessage(content=prompt), *messages]), query
+            ),
+            query,
         )
     )
     if core_signal_missing(profile):
@@ -266,5 +363,29 @@ if __name__ == "__main__":
     # hard_constraints 는 값이 있는 필터 필드만
     normalized = _normalize_profile(UserProfile(budget_max_won=30000, voice_unlimited=True))
     assert set(normalized.hard_constraints) == {"budget_max_won", "voice_unlimited"}
+
+    vague_video = UserProfile(
+        daily_video_hours=1,
+        app_usages=[{"service": "youtube", "daily_hours": 1}],
+    )
+    for text, expected_pattern, expected_gb in (
+        ("하루 한시간 영상을 봐", "video_1h", 37.0),
+        ("영상을 하루 두 시간 정도 봐", "video_2h", 80.0),
+        ("하루 3시간 이상 동영상을 봐", "video_3h_plus", 90.0),
+    ):
+        corrected = _normalize_profile(_apply_smartchoice_usage_rule(vague_video, text))
+        assert corrected.smartchoice_usage_pattern == expected_pattern, text
+        assert corrected.app_usages == [], text
+        assert corrected.estimated_monthly_data_gb == expected_gb, text
+
+    named_video = _normalize_profile(
+        _apply_smartchoice_usage_rule(
+            UserProfile(app_usages=[{"service": "youtube", "daily_hours": 1}]),
+            "유튜브 하루 한시간",
+        )
+    )
+    assert named_video.smartchoice_usage_pattern is None
+    assert named_video.estimated_monthly_data_gb == 64.4
+    assert named_video.min_qos_mbps is None
 
     print("self-check ok")

@@ -54,6 +54,10 @@ export interface Profile {
   age_condition?: string;
   host_mno?: string;
   carrier_type?: string;
+  estimated_monthly_data_gb?: number;
+  usage_estimate_notes?: string[];
+  smartchoice_usage_pattern?: string;
+  app_usages?: { service: string; daily_hours: number; mode?: string | null }[];
   assumptions?: string[];
   [key: string]: unknown;
 }
