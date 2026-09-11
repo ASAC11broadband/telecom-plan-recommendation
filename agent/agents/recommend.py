@@ -205,12 +205,9 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
 
     ranking_candidates = _dedupe_by_name(candidates)
     by_id = {candidate["plan_id"]: candidate for candidate in ranking_candidates}
-    preferred_carrier = profile.mvno_brand or profile.host_mno
     decisions = evaluate_mcda(
         ranking_candidates,
         profile.priorities,
-        preferred_carrier,
-        reference=reference,
         comparison_goals=profile.comparison_goals,
     )
     ranked = [
