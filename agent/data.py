@@ -222,6 +222,7 @@ def _row_summary(r) -> dict:
         "voice_minutes": int(r["voice_minutes"]) if pd.notna(r["voice_minutes"]) else None,
         "voice_unlimited": bool(r["voice_unlimited"]),
         "sms_unlimited": bool(r["sms_unlimited"]),
+        "sms_count": int(r["sms_count"]) if pd.notna(r["sms_count"]) else None,
         "monthly_fee": int(r["monthly_fee"]),
         "discounted_fee": int(r["discounted_fee"]),
         "discount_type": r["discount_type"] if pd.notna(r["discount_type"]) else "",
