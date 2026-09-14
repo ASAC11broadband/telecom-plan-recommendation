@@ -1,46 +1,16 @@
-"""SMAA-2 기반 다기준 요금제 랭킹.
-
-가중치 표본은 더 이상 무작위(감마분포)로 지어내지 않는다. `weight_bootstrap.json`에
-실제 알뜰폰 가입자 데이터(로그 시장점유율 ~ 변환 Ridge 표준화 계수)를 부트스트랩
-300회 돌려 뽑은 가중치 300세트가 들어있다 — 도출 과정은
-notebooks/linear_spec_diagnostic.ipynb 참고. 우선순위/비교 목표가 있으면 그 표본
-각각에 가산 후 재정규화해서 반영한다.
-
-문자(sms)는 축에서 뺐다. 통화 무제한과 98.1% 겹치는 묶음 상품이라 같이 넣으면 두
-계수가 서로 상쇄하며 부호가 뒤집힌다(부트스트랩 상관 -0.895). 통화 축이 이미 재고
-있으니 회귀 전에 뺀다.
-"""
+"""SMAA-2 기반 다기준 요금제 랭킹."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-import json
 import math
+import random
 
 
-CRITERIA = ("price", "data", "qos", "benefit", "voice", "tethering")
-
-# 우선순위 1단계당/비교 목표당 얼마나 가산할지. 예전 감마분포 버전이 균등 alpha=1.0
-# 기준(합계 len(CRITERIA))에 +10.0/+12.0을 더하던 것과 같은 비율로, 합계가 1인
-# 실측 가중치 벡터에 맞게 축소했다.
-_PRIORITY_UNIT = 10.0 / len(CRITERIA)
-_GOAL_UNIT = 12.0 / len(CRITERIA)
-
-_WEIGHT_DATA_PATH = Path(__file__).resolve().parent / "weight_bootstrap.json"
-
-
-def _load_base_weights() -> list[list[float]]:
-    payload = json.loads(_WEIGHT_DATA_PATH.read_text(encoding="utf-8"))
-    if tuple(payload["criteria"]) != CRITERIA:
-        raise ValueError(
-            f"{_WEIGHT_DATA_PATH.name}의 criteria 순서가 CRITERIA와 다르다: "
-            f"{payload['criteria']} != {list(CRITERIA)}"
-        )
-    return payload["vectors"]
-
-
-_BASE_WEIGHTS = _load_base_weights()
+CRITERIA = (
+    "price", "data", "qos", "benefit", "voice", "sms", "tethering", "carrier",
+    "similarity", "improvement",
+)
 
 
 @dataclass(frozen=True)
@@ -68,66 +38,116 @@ def _finite_voice(plan: dict, finite_max: float) -> float:
     return finite_max * 1.25 if plan.get("voice_unlimited") else float(plan.get("voice_minutes") or 0)
 
 
-def _utility_rows(candidates: list[dict]) -> list[list[float]]:
+def _reference_similarity(plan: dict, reference: dict | None) -> float:
+    if not reference:
+        return 0.5
+    distances: list[float] = []
+    for field in ("discounted_fee", "data_gb", "qos_mbps", "voice_minutes"):
+        target = reference.get(field)
+        if target not in (None, 0):
+            distances.append(abs(float(plan.get(field) or 0) - float(target)) / float(target))
+    for field in ("data_unlimited", "voice_unlimited"):
+        if reference.get(field) is not None:
+            distances.append(float(bool(plan.get(field)) != bool(reference.get(field))))
+    if not distances:
+        return 0.5
+    return 1.0 / (1.0 + sum(distances) / len(distances))
+
+
+def _reference_improvement(plan: dict, reference: dict | None) -> float:
+    if not reference:
+        return 0.5
+    gains: list[float] = []
+    fee = reference.get("discounted_fee")
+    if fee:
+        gains.append((float(fee) - float(plan.get("discounted_fee") or 0)) / float(fee))
+    for field in ("data_gb", "qos_mbps", "voice_minutes"):
+        target = reference.get(field)
+        if target not in (None, 0):
+            gains.append((float(plan.get(field) or 0) - float(target)) / float(target))
+    if not gains:
+        return 0.5
+    average = sum(gains) / len(gains)
+    return max(0.0, min(1.0, 0.5 + average / 2.0))
+
+
+def _utility_rows(
+    candidates: list[dict], preferred_carrier: str | None, reference: dict | None
+) -> list[list[float]]:
     data_max = max((float(p.get("data_gb") or 0) for p in candidates), default=1.0) or 1.0
     voice_max = max((float(p.get("voice_minutes") or 0) for p in candidates), default=1.0) or 1.0
     columns = {
-        # 가중치를 뽑은 회귀와 같은 변환을 쓴다: 가격 sqrt, 데이터 log1p. 축마다 계수
-        # 하나가 곱해지는 선형 형태라야 그 계수를 가중치로 읽을 수 있고, 변환이 다르면
-        # 가중치가 재는 축과 점수가 재는 축이 어긋난다.
-        "price": _minmax([math.sqrt(float(p.get("discounted_fee") or 0)) for p in candidates], cost=True),
-        "data": _minmax([math.log1p(_finite_data(p, data_max)) for p in candidates]),
+        "price": _minmax([float(p.get("discounted_fee") or 0) for p in candidates], cost=True),
+        "data": _minmax([_finite_data(p, data_max) for p in candidates]),
         "qos": _minmax([float(p.get("qos_mbps") or 0) for p in candidates]),
         "benefit": _minmax([float(len(p.get("included_benefits") or [])) for p in candidates]),
         "voice": _minmax([_finite_voice(p, voice_max) for p in candidates]),
+        "sms": [1.0 if p.get("sms_unlimited") else 0.0 for p in candidates],
         "tethering": _minmax([float(p.get("tethering_gb") or 0) for p in candidates]),
+        "carrier": [
+            1.0
+            if preferred_carrier
+            and preferred_carrier
+            in {p.get("host_mno"), p.get("mvno_brand"), p.get("carrier")}
+            else 0.5
+            for p in candidates
+        ],
+        "similarity": [_reference_similarity(p, reference) for p in candidates],
+        "improvement": [_reference_improvement(p, reference) for p in candidates],
     }
     return [[columns[name][i] for name in CRITERIA] for i in range(len(candidates))]
 
 
-def _boosted(vector: list[float], priorities: list[str], comparison_goals: list[str]) -> list[float]:
-    """실측 가중치 하나에 사용자 우선순위/비교 목표를 가산하고 재정규화한다."""
-    boosted = list(vector)
+def _weight_samples(
+    priorities: list[str], comparison_goals: list[str], count: int, seed: int
+) -> list[list[float]]:
     priority_position = {name: i for i, name in enumerate(priorities) if name in CRITERIA}
-    for name, position in priority_position.items():
-        extra = max(0, len(priorities) - position) * _PRIORITY_UNIT
-        boosted[CRITERIA.index(name)] += extra
-
+    alpha = [
+        1.0 + max(0, len(priorities) - priority_position[name]) * 10.0
+        if name in priority_position
+        else 1.0
+        for name in CRITERIA
+    ]
     goal_criteria = {
         "cheaper": "price",
         "more_data": "data",
         "faster_qos": "qos",
+        "similar": "similarity",
+        "better": "improvement",
     }
     for goal in comparison_goals:
         criterion = goal_criteria.get(goal)
         if criterion:
-            boosted[CRITERIA.index(criterion)] += _GOAL_UNIT
-
-    total = sum(boosted)
-    return [value / total for value in boosted]
-
-
-def _weight_samples(priorities: list[str], comparison_goals: list[str]) -> list[list[float]]:
-    if not priorities and not comparison_goals:
-        return [list(vector) for vector in _BASE_WEIGHTS]
-    return [_boosted(vector, priorities, comparison_goals) for vector in _BASE_WEIGHTS]
+            alpha[CRITERIA.index(criterion)] += 12.0
+    rng = random.Random(seed)
+    samples: list[list[float]] = []
+    for _ in range(count):
+        draw = [rng.gammavariate(a, 1.0) for a in alpha]
+        total = sum(draw)
+        samples.append([value / total for value in draw])
+    return samples
 
 
 def evaluate_mcda(
     candidates: list[dict],
     priorities: list[str] | None = None,
+    preferred_carrier: str | None = None,
     *,
+    reference: dict | None = None,
     comparison_goals: list[str] | None = None,
+    samples: int = 1200,
+    seed: int = 20260901,
 ) -> list[MCDAResult]:
-    """가중치 표본(실측 부트스트랩 60세트)별 순위를 집계해 SMAA-2 지표를 계산한다."""
+    """가중치 표본별 순위를 집계해 SMAA-2 지표를 계산한다."""
     if not candidates:
         return []
+    if samples <= 0:
+        raise ValueError("samples는 1 이상이어야 합니다.")
     plan_ids = [str(candidate["plan_id"]) for candidate in candidates]
     if len(plan_ids) != len(set(plan_ids)):
         raise ValueError("MCDA 후보의 plan_id는 서로 달라야 합니다.")
-    utilities = _utility_rows(candidates)
-    weights = _weight_samples(priorities or [], comparison_goals or [])
-    samples = len(weights)
+    utilities = _utility_rows(candidates, preferred_carrier, reference)
+    weights = _weight_samples(priorities or [], comparison_goals or [], samples, seed)
     n = len(candidates)
     rank_counts = [[0] * n for _ in candidates]
     favorable_weight_sums = [[0.0] * len(CRITERIA) for _ in candidates]
@@ -182,11 +202,8 @@ if __name__ == "__main__":
         {"plan_id": "cheap", "discounted_fee": 20_000, "data_gb": 10, "voice_minutes": 100},
         {"plan_id": "large", "discounted_fee": 40_000, "data_gb": 100, "voice_minutes": 300},
     ]
-    first = evaluate_mcda(sample, ["price"])
-    second = evaluate_mcda(sample, ["price"])
-    assert first == second, "같은 입력이면 결과가 재현되어야 한다(실측 데이터라 난수 없음)"
+    first = evaluate_mcda(sample, ["price"], samples=400)
+    second = evaluate_mcda(sample, ["price"], samples=400)
+    assert first == second, "고정 seed에서 결과가 재현되어야 한다"
     assert rank_smaa2(first)[0].plan_id == "cheap", "가격 우선순위가 반영되어야 한다"
-
-    baseline = evaluate_mcda(sample)  # 우선순위 없음 -> 실측 60세트 그대로
-    assert len(baseline[0].favorable_weights) == len(CRITERIA)
-    print("self-check ok: SMAA-2 ranking (bootstrap weights)")
+    print("self-check ok: SMAA-2 ranking")
