@@ -28,6 +28,11 @@ function verdicts(plan: PlanItem, profile: Profile | null) {
       '데이터 충족도',
       `${p.estimated_monthly_data_gb ? '예상 사용량 기준' : '요구량'} ${dataNeed}GB 대비 ${plan.data} 제공`,
     ]);
+  if (p.max_data_gb)
+    rows.push([
+      '데이터 상한',
+      `최대 ${p.max_data_gb}GB 조건 대비 ${plan.data} 제공`,
+    ]);
   if (p.voice_unlimited) rows.push(['통화 충족도', '통화 무제한 제공']);
   else if (p.min_voice_minutes)
     rows.push(['통화 충족도', `${p.min_voice_minutes}분 요구 대비 ${plan.call} 제공`]);

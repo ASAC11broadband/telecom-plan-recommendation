@@ -22,6 +22,89 @@ _plans = None
 _load_lock = threading.Lock()
 
 
+BENEFIT_CATEGORY_ALIASES = {
+    "ott": "영상/OTT",
+    "영상": "영상/OTT",
+    "스트리밍": "영상/OTT",
+    "영상 스트리밍": "영상/OTT",
+    "영상/ott": "영상/OTT",
+    "음악": "음악/오디오",
+    "오디오": "음악/오디오",
+    "음악 스트리밍": "음악/오디오",
+    "음악/오디오": "음악/오디오",
+    "도서": "도서/콘텐츠",
+    "전자책": "도서/콘텐츠",
+    "도서/콘텐츠": "도서/콘텐츠",
+    "디지털": "제휴서비스",
+    "제휴": "제휴서비스",
+    "제휴 서비스": "제휴서비스",
+    "제휴서비스": "제휴서비스",
+    "디지털/제휴": "제휴서비스",
+    "복합": "복합/선택혜택",
+    "선택": "복합/선택혜택",
+    "선택 혜택": "복합/선택혜택",
+    "복합/선택혜택": "복합/선택혜택",
+    "교육": "교육/AI서비스",
+    "ai": "교육/AI서비스",
+    "ai 서비스": "교육/AI서비스",
+    "ai 구독": "교육/AI서비스",
+    "ai 교육": "교육/AI서비스",
+    "모의고사": "교육/AI서비스",
+    "교육/ai서비스": "교육/AI서비스",
+    "멤버십": "멤버십",
+    "스마트기기": "스마트기기",
+    "스마트워치": "스마트기기",
+    "워치": "스마트기기",
+    "태블릿": "스마트기기",
+    "추가데이터": "추가데이터",
+    "추가 데이터": "추가데이터",
+    "사은품": "사은품/페이백",
+    "페이백": "사은품/페이백",
+    "상품권": "사은품/페이백",
+    "캐시백": "사은품/페이백",
+    "사은품/페이백": "사은품/페이백",
+    "기타": "기타",
+}
+
+BENEFIT_NAME_ALIASES = {
+    "디즈니플러스": "디즈니+",
+    "디즈니 플러스": "디즈니+",
+    "밀리의 서재": "밀리의서재",
+    "플로": "flo",
+    "구글 원": "구글원",
+}
+
+
+def normalize_benefit_category(value: object) -> str | None:
+    """사용자 표현 또는 정식 카테고리명을 DB 카테고리명으로 바꾼다."""
+    text = str(value or "").strip().casefold().replace("·", "/").replace(".", "/")
+    # '복합/선택혜택'처럼 정식 명칭 자체가 '혜택'으로 끝나는 값은 먼저 확정한다.
+    exact = BENEFIT_CATEGORY_ALIASES.get(text)
+    if exact:
+        return exact
+    for suffix in ("포함", "혜택", "제공", "되는", "있는", "카테고리"):
+        if text.endswith(suffix) and len(text) > len(suffix):
+            text = text[: -len(suffix)].strip()
+    return BENEFIT_CATEGORY_ALIASES.get(text)
+
+
+def has_benefit_category(categories: object, requested: object) -> bool:
+    """후보의 카테고리 목록에 요청 카테고리가 정확히 포함되는지 확인한다."""
+    category = normalize_benefit_category(requested)
+    return bool(category) and category in (categories or [])
+
+
+def _merge_search_categories(values) -> list[str]:
+    """파이프로 저장된 검색 카테고리를 요금제 단위 중복 없는 목록으로 합친다."""
+    merged = []
+    for value in values.dropna():
+        for category in str(value).split("|"):
+            category = category.strip()
+            if category and category not in merged:
+                merged.append(category)
+    return merged
+
+
 def _speed_to_mbps(value) -> float | None:
     """100Kbps/1Mbps 형태의 QoS 값을 Mbps 숫자로 정규화한다."""
     if pd.isna(value):
@@ -58,7 +141,46 @@ def load() -> None:
             benefits.groupby("plan_id")["benefit_name"]
             .apply(lambda values: [str(value) for value in values.dropna().unique()])
         )
+        category_column = (
+            "benefit_search_categories"
+            if "benefit_search_categories" in benefits.columns
+            else "benefit_category"
+        )
+        # 검색 태그에는 복합 혜택의 실제 구성 요소만 저장한다. 대표 분류도 합쳐서
+        # '복합 혜택' 자체를 요청하는 경우와 실제 서비스 유형 검색을 모두 지원한다.
+        benefits["_all_benefit_categories"] = benefits.apply(
+            lambda row: " | ".join(
+                value
+                for value in (
+                    str(row.get("benefit_category", "")).strip(),
+                    str(row.get(category_column, "")).strip(),
+                )
+                if value and value.casefold() != "nan"
+            ),
+            axis=1,
+        )
+        benefit_categories = benefits.groupby("plan_id")["_all_benefit_categories"].apply(
+            _merge_search_categories
+        )
+        benefit_details: dict[str, list[dict[str, object]]] = {}
+        for row in benefits.to_dict("records"):
+            plan_id = str(row.get("plan_id", ""))
+            categories = _merge_search_categories(
+                pd.Series([row.get("benefit_category"), row.get(category_column)])
+            )
+            benefit_details.setdefault(plan_id, []).append(
+                {
+                    "name": str(row.get("benefit_name") or ""),
+                    "categories": categories,
+                }
+            )
         plans["included_benefits"] = plans["plan_id"].map(benefit_lists).apply(
+            lambda value: value if isinstance(value, list) else []
+        )
+        plans["benefit_categories"] = plans["plan_id"].map(benefit_categories).apply(
+            lambda value: value if isinstance(value, list) else []
+        )
+        plans["benefit_details"] = plans["plan_id"].map(benefit_details).apply(
             lambda value: value if isinstance(value, list) else []
         )
         plans["benefit_search_text"] = (
@@ -84,13 +206,17 @@ def normalize_benefit(benefit: object) -> str:
             if text.endswith(suffix) and len(text) > len(suffix):
                 text = text[: -len(suffix)].strip()
                 changed = True
-    return text.casefold()
+    folded = text.casefold()
+    return BENEFIT_NAME_ALIASES.get(folded, folded)
 
 
 def has_benefit(search_text: str, benefit: object) -> bool:
     """혜택 문구 안에 요구 혜택이 들어 있는지. 필터와 검증이 같은 규칙을 쓴다."""
     needle = normalize_benefit(benefit)
-    return bool(needle) and needle in str(search_text).casefold()
+    haystack = str(search_text).casefold()
+    for alias, canonical in BENEFIT_NAME_ALIASES.items():
+        haystack = haystack.replace(alias, canonical)
+    return bool(needle) and needle in haystack
 
 
 def filter_candidates(profile: dict) -> list[dict]:
@@ -123,6 +249,15 @@ def filter_candidates(profile: dict) -> list[dict]:
         # 무제한은 data_gb가 비어 있어 수치 비교가 성립하지 않는다 → 예상량을 충족으로 본다.
         df = df[df["data_unlimited"] | (df["data_gb"] >= required_data_gb)]
 
+    if profile.get("max_data_gb") is not None:
+        # '100GB 이하'는 기본 제공 데이터의 상한이다. 제공량을 특정할 수 없는
+        # 무제한 요금제는 상한을 만족한다고 볼 수 없으므로 함께 제외한다.
+        df = df[
+            ~df["data_unlimited"]
+            & df["data_gb"].notna()
+            & (df["data_gb"] <= profile["max_data_gb"])
+        ]
+
     if profile.get("min_qos_mbps") is not None:
         df = df[df["qos_mbps"] >= profile["min_qos_mbps"]]
     if profile.get("min_tethering_gb") is not None:
@@ -153,8 +288,28 @@ def filter_candidates(profile: dict) -> list[dict]:
         normalized = df["mvno_brand"].fillna("").astype(str).str.strip().str.casefold()
         df = df[normalized == brand]
 
-    for benefit in profile.get("wanted_benefits") or []:
-        df = df[df["benefit_search_text"].map(lambda text: has_benefit(text, benefit))]
+    benefit_masks = [
+        df["benefit_search_text"].map(lambda text, value=benefit: has_benefit(text, value))
+        for benefit in profile.get("wanted_benefits") or []
+    ]
+    for category in profile.get("wanted_benefit_categories") or []:
+        normalized = normalize_benefit_category(category)
+        if normalized is None:
+            return []
+        benefit_masks.append(
+            df["benefit_categories"].map(
+                lambda values, value=normalized: value in values
+            )
+        )
+    if benefit_masks:
+        matches = benefit_masks[0]
+        if profile.get("benefit_match_mode") == "any":
+            for mask in benefit_masks[1:]:
+                matches = matches | mask
+        else:
+            for mask in benefit_masks[1:]:
+                matches = matches & mask
+        df = df[matches]
 
     if profile.get("min_discount_period_months") is not None:
         df = df[
@@ -240,6 +395,8 @@ def _row_summary(r) -> dict:
         else None,
         "ott_options": r["ott_options"] if pd.notna(r["ott_options"]) else "",
         "included_benefits": list(r["included_benefits"]),
+        "benefit_categories": list(r["benefit_categories"]),
+        "benefit_details": list(r["benefit_details"]),
         "age_condition": r["age_condition"] if pd.notna(r["age_condition"]) else "",
         "source_url": r["source_url"] if pd.notna(r["source_url"]) else "",
         "is_online_only": bool(r["is_online_only"]),
@@ -261,6 +418,8 @@ SLIM_FIELDS = (
     "discount_period_months",
     "ott_options",
     "included_benefits",
+    "benefit_categories",
+    "benefit_details",
     "age_condition",
 )
 
@@ -286,6 +445,11 @@ if __name__ == "__main__":
     assert all(x["data_unlimited"] or (x.get("data_gb") or 0) >= 64.4 for x in estimated)
     stricter = filter_candidates({"min_data_gb": 100, "estimated_monthly_data_gb": 64.4})
     assert all(x["data_unlimited"] or (x.get("data_gb") or 0) >= 100 for x in stricter)
+    capped = filter_candidates({"max_data_gb": 100})
+    assert capped and all(
+        not x["data_unlimited"] and (x.get("data_gb") or 0) <= 100
+        for x in capped
+    )
 
     assert "data_gb" not in slim(c)[0] and slim(c)[0]["plan_name"] == c[0]["plan_name"]
 
@@ -298,4 +462,53 @@ if __name__ == "__main__":
     plain = len(filter_candidates({"wanted_benefits": ["유튜브 프리미엄"]}))
     assert plain > 0
     assert len(filter_candidates({"wanted_benefits": ["유튜브 프리미엄 포함"]})) == plain
+
+    # 포괄적 유형은 카테고리로, 고유 서비스명은 기존 문자열 검색으로 구분한다.
+    music = filter_candidates({"wanted_benefit_categories": ["음악"]})
+    assert music and all("음악/오디오" in row["benefit_categories"] for row in music)
+    assert len(music) > len(filter_candidates({"wanted_benefits": ["음악"]}))
+    genie = filter_candidates({"wanted_benefits": ["지니뮤직"]})
+    assert genie and len(genie) < len(music)
+    assert normalize_benefit_category("스마트워치 혜택") == "스마트기기"
+    assert normalize_benefit_category("AI 구독") == "교육/AI서비스"
+    assert normalize_benefit_category("복합/선택혜택") == "복합/선택혜택"
+
+    # 복합 혜택은 대표 분류와 별개로 포함된 각 서비스 유형으로도 검색된다.
+    mixed_plan_ids = set(
+        benefits_id
+        for benefits_id in _plans[
+            _plans["included_benefits"].map(
+                lambda values: "티빙/지니/밀리" in values
+            )
+        ]["plan_id"]
+    )
+    assert mixed_plan_ids
+    assert mixed_plan_ids <= {row["plan_id"] for row in music}
+    assert mixed_plan_ids <= {
+        row["plan_id"]
+        for row in filter_candidates(
+            {"wanted_benefit_categories": ["도서/콘텐츠"]}
+        )
+    }
+
+    disney = filter_candidates({"wanted_benefits": ["디즈니플러스"]})
+    books = filter_candidates({"wanted_benefit_categories": ["도서/콘텐츠"]})
+    either = filter_candidates(
+        {
+            "wanted_benefits": ["디즈니플러스"],
+            "wanted_benefit_categories": ["도서/콘텐츠"],
+            "benefit_match_mode": "any",
+        }
+    )
+    both = filter_candidates(
+        {
+            "wanted_benefits": ["디즈니플러스"],
+            "wanted_benefit_categories": ["도서/콘텐츠"],
+            "benefit_match_mode": "all",
+        }
+    )
+    ids = lambda rows: {row["plan_id"] for row in rows}
+    assert ids(either) == ids(disney) | ids(books)
+    assert ids(both) == ids(disney) & ids(books)
+    assert normalize_benefit_category("도서.콘텐츠") == "도서/콘텐츠"
     print(f"self-check ok: {len(c)} candidates")

@@ -14,6 +14,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from ..data import has_benefit, normalize_benefit_category
 from ..state import PipelineState, get_llm, user_query
 
 
@@ -35,6 +36,8 @@ REPORT_PROMPT = """\
   하위 순위를 두고 예산 초과·데이터 부족 같은 조건 미달이라고 쓰지 마라. 순위 차이는
   조건 충족 여부가 아니라 제공량·가격·혜택의 우열로 설명한다.
 - 순위는 그대로 유지하되 앞 단계의 내부 계산 문구는 인용하지 않고 사용자 관점의 이유로 다시 설명한다.
+- matched_benefits가 있으면 사용자가 요청한 조건과 직접 일치하는 실제 혜택명이다.
+  각 상품 설명 첫 문장에 이 혜택명을 생략하거나 일반화하지 말고 그대로 적는다.
 
 [리포트 작성 규칙]
 1. 한국어 Markdown으로 바로 사용자에게 보여 줄 최종 답변만 작성한다.
@@ -77,6 +80,39 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _profile_value(profile: Any, field: str) -> list[str]:
+    if isinstance(profile, Mapping):
+        value = profile.get(field)
+    else:
+        value = getattr(profile, field, None)
+    return [str(item) for item in (value or [])]
+
+
+def _matched_benefits(profile: Any, plan: Mapping[str, Any]) -> list[str]:
+    """사용자가 요구한 개별 서비스·카테고리에 직접 해당하는 실제 혜택명."""
+    wanted_names = _profile_value(profile, "wanted_benefits")
+    wanted_categories = {
+        normalized
+        for value in _profile_value(profile, "wanted_benefit_categories")
+        if (normalized := normalize_benefit_category(value))
+    }
+    if not wanted_names and not wanted_categories:
+        return []
+
+    matches: list[str] = []
+    for detail in plan.get("benefit_details") or []:
+        if not isinstance(detail, Mapping):
+            continue
+        name = str(detail.get("name") or "").strip()
+        categories = set(detail.get("categories") or [])
+        if name and (
+            any(has_benefit(name, wanted) for wanted in wanted_names)
+            or bool(categories & wanted_categories)
+        ) and name not in matches:
+            matches.append(name)
+    return matches
+
+
 def _ranked_recommendations(state: PipelineState) -> list[dict[str, Any]]:
     """랭킹 결과(ranked)에 후보 원본(candidates) 정보를 결합한다.
 
@@ -99,7 +135,11 @@ def _ranked_recommendations(state: PipelineState) -> list[dict[str, Any]]:
         # 기대순위·수용도 문구는 사용자용 설명을 흐리므로 Report Agent에 넘기지 않는다.
         scored_row.pop("reason", None)
         matched = by_id.get(str(scored_row.get("plan_id")), {})
-        recommendations.append({**matched, **scored_row, "rank": rank})
+        recommendation = {**matched, **scored_row, "rank": rank}
+        recommendation["matched_benefits"] = _matched_benefits(
+            state.get("profile"), recommendation
+        )
+        recommendations.append(recommendation)
 
     return recommendations
 
@@ -159,6 +199,15 @@ def _fallback_reason(plan: dict[str, Any]) -> str:
     return reason
 
 
+def _ensure_matched_benefits(reason: str, plan: Mapping[str, Any]) -> str:
+    """LLM이 필수 혜택명을 생략해도 카드 근거에는 확정적으로 표시한다."""
+    matches = [str(value) for value in plan.get("matched_benefits") or [] if value]
+    if not matches or all(value in reason for value in matches):
+        return reason
+    quoted = ", ".join(f"‘{value}’" for value in matches)
+    return f"요청한 혜택 조건은 {quoted}으로 충족합니다. {reason}".strip()
+
+
 def _rank_reasons(report: str, recommendations: list[dict[str, Any]]) -> list[str]:
     """정해 둔 순위 제목 사이의 문단을 상품별 카드 설명으로 분리한다."""
     matches = list(_RANK_HEADING.finditer(report))
@@ -199,9 +248,21 @@ def report_node(state: PipelineState, config: RunnableConfig) -> dict:
 
     ranked = list(state.get("ranked") or [])
     if recommendations and ranked:
-        reasons = _rank_reasons(report, recommendations)
+        reasons = [
+            _ensure_matched_benefits(reason, plan)
+            for reason, plan in zip(
+                _rank_reasons(report, recommendations), recommendations
+            )
+        ]
         ranked = [
-            plan.model_copy(update={"reason": reasons[index]})
+            plan.model_copy(
+                update={
+                    "reason": reasons[index],
+                    "matched_benefits": recommendations[index].get(
+                        "matched_benefits", []
+                    ),
+                }
+            )
             for index, plan in enumerate(ranked)
         ]
 
@@ -213,7 +274,7 @@ def report_node(state: PipelineState, config: RunnableConfig) -> dict:
 
 
 if __name__ == "__main__":
-    from ..schemas import ScoredPlan
+    from ..schemas import ScoredPlan, UserProfile
 
     # 동명이인 요금제: 이름으로 붙이면 다른 상품의 요금이 실린다. plan_id 로 붙는지 본다.
     candidates = [
@@ -224,6 +285,30 @@ if __name__ == "__main__":
     rows = _ranked_recommendations({"candidates": candidates, "ranked": ranked})
     assert len(rows) == 1 and rows[0]["discounted_fee"] == 45000, rows
     assert rows[0]["rank"] == 1
+
+    membership_state = {
+        "profile": UserProfile(wanted_benefit_categories=["멤버십"]),
+        "candidates": [
+            {
+                "plan_id": "3",
+                "plan_name": "데일리 너겟59",
+                "discounted_fee": 19000,
+                "benefit_details": [
+                    {
+                        "name": "U+ 멤버십 VIP콕(24개월 간 매월 제공)",
+                        "categories": ["멤버십"],
+                    }
+                ],
+            }
+        ],
+        "ranked": [ScoredPlan(plan_id="3", plan_name="데일리 너겟59", score=100)],
+    }
+    membership_rows = _ranked_recommendations(membership_state)
+    assert membership_rows[0]["matched_benefits"] == [
+        "U+ 멤버십 VIP콕(24개월 간 매월 제공)"
+    ]
+    ensured = _ensure_matched_benefits("가격과 데이터가 좋습니다.", membership_rows[0])
+    assert "U+ 멤버십 VIP콕(24개월 간 매월 제공)" in ensured
 
     # 환각(후보에 없는 plan_id)이어도 랭킹 값은 살아남는다
     orphan = [ScoredPlan(plan_id="404", plan_name="없는요금제", score=50, reason="")]

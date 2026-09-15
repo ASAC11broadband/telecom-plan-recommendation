@@ -291,8 +291,8 @@ def _find_col(row: dict, must_contain: str, must_not_contain: str = None) -> str
 
 # 표 헤더 키워드 -> 통합 혜택 분류
 BENEFIT_COLUMN_RULES = [
-    ("초이스", "OTT/구독"),
-    ("플러스", "OTT/구독"),
+    ("초이스", "제휴서비스"),
+    ("플러스", "제휴서비스"),
     ("멤버십", "멤버십"),
     ("단말보험", "기타"),
     ("스마트기기", "스마트기기"),

@@ -21,7 +21,7 @@ import math
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from ..data import find_candidate, has_benefit, slim
+from ..data import find_candidate, has_benefit, has_benefit_category, slim
 from ..schemas import Evaluation, UserProfile
 from ..state import PipelineState, get_eval_llm
 
@@ -45,6 +45,21 @@ def _benefit_text(plan: dict) -> str:
     return f"{plan.get('ott_options') or ''} | " + " | ".join(plan.get("included_benefits") or [])
 
 
+def _matches_requested_benefits(profile: UserProfile, plan: dict) -> bool:
+    """서비스명·카테고리 조건을 프로필의 AND/OR 방식으로 함께 검증한다."""
+    checks = [
+        has_benefit(_benefit_text(plan), benefit)
+        for benefit in profile.wanted_benefits or []
+    ]
+    checks.extend(
+        has_benefit_category(plan.get("benefit_categories"), category)
+        for category in profile.wanted_benefit_categories or []
+    )
+    if not checks:
+        return True
+    return any(checks) if profile.benefit_match_mode == "any" else all(checks)
+
+
 # UserProfile 의 hard_constraints 필드명 → 후보 dict 검증식.
 # data.py 의 filter_candidates 와 짝이지만 판정은 한 단계 느슨하게 둔다(오탐이 재시도를 태우므로).
 CONSTRAINT_CHECKS = {
@@ -52,6 +67,9 @@ CONSTRAINT_CHECKS = {
     "budget_max_won": lambda plan, v: plan["discounted_fee"] <= v,
     # 무제한은 data_gb 가 null 이라 수치 비교가 성립하지 않는다 → 충족으로 본다.
     "min_data_gb": lambda plan, v: plan["data_unlimited"] or (plan.get("data_gb") or 0) >= v,
+    "max_data_gb": lambda plan, v: not plan["data_unlimited"] and (
+        plan.get("data_gb") if plan.get("data_gb") is not None else math.inf
+    ) <= v,
     "data_unlimited": lambda plan, v: plan["data_unlimited"] or not v,  # v=False 는 "필수 아님"
     "min_qos_mbps": lambda plan, v: (plan.get("qos_mbps") or 0) >= v,
     "min_tethering_gb": lambda plan, v: (plan.get("tethering_gb") or 0) >= v,
@@ -65,9 +83,6 @@ CONSTRAINT_CHECKS = {
     "age_condition": lambda plan, v: plan.get("age_condition") in ("", None, v),
     "mvno_brand": lambda plan, v: str(plan.get("mvno_brand") or "").strip().casefold()
     == str(v).strip().casefold(),
-    "wanted_benefits": lambda plan, v: all(
-        has_benefit(_benefit_text(plan), benefit) for benefit in v
-    ),
     "min_discount_period_months": lambda plan, v: (plan.get("discount_period_months") or 0) >= v,
 }
 
@@ -78,7 +93,16 @@ def _constraint_errors(profile: UserProfile | None, plan: dict) -> list[str]:
         return []
 
     errors: list[str] = []
+    benefit_fields = {"wanted_benefits", "wanted_benefit_categories"}
+    if benefit_fields.intersection(profile.hard_constraints):
+        if not _matches_requested_benefits(profile, plan):
+            errors.append(
+                f"'{plan['plan_name']}'이 필수 혜택 조건 "
+                f"({profile.benefit_match_mode})을 만족하지 않음"
+            )
     for field in profile.hard_constraints:
+        if field in benefit_fields:
+            continue
         check = CONSTRAINT_CHECKS.get(field)
         value = getattr(profile, field, None)
         if check is None or value is None:
@@ -234,6 +258,7 @@ if __name__ == "__main__":
             "age_condition": "",
             "ott_options": "",
             "included_benefits": [],
+            "benefit_categories": [],
             "discount_period_months": 12,
         }
         row.update(kw)
@@ -254,6 +279,39 @@ if __name__ == "__main__":
     errors, rows = _code_checks(_state([a, b], ranked, report, ok_profile))
     assert errors == [], errors
     assert len(rows) == 2
+
+    # 포괄적 혜택 유형은 혜택명 문자열이 아니라 카테고리로 다시 검증한다.
+    music_profile = UserProfile(
+        wanted_benefit_categories=["음악/오디오"],
+        hard_constraints=["wanted_benefit_categories"],
+    )
+    music_plan = _plan("1", "A", benefit_categories=["음악/오디오"])
+    errors, _ = _code_checks(
+        _state([music_plan], ranked[:1], "| 1 | A | 30,000원 |", music_profile)
+    )
+    assert errors == [], errors
+    no_music = _plan("1", "A", benefit_categories=["영상/OTT"])
+    errors, _ = _code_checks(
+        _state([no_music], ranked[:1], "| 1 | A | 30,000원 |", music_profile)
+    )
+    assert any("필수 혜택 조건" in error for error in errors), errors
+
+    mixed_any = UserProfile(
+        wanted_benefits=["디즈니+"],
+        wanted_benefit_categories=["도서/콘텐츠"],
+        benefit_match_mode="any",
+        hard_constraints=["wanted_benefits", "wanted_benefit_categories"],
+    )
+    book_only = _plan("1", "A", benefit_categories=["도서/콘텐츠"])
+    errors, _ = _code_checks(
+        _state([book_only], ranked[:1], "| 1 | A | 30,000원 |", mixed_any)
+    )
+    assert errors == [], errors
+    mixed_all = mixed_any.model_copy(update={"benefit_match_mode": "all"})
+    errors, _ = _code_checks(
+        _state([book_only], ranked[:1], "| 1 | A | 30,000원 |", mixed_all)
+    )
+    assert any("필수 혜택 조건" in error for error in errors), errors
 
     # 환각: 후보에 없는 plan_id
     errors, _ = _code_checks(_state([a], ranked, report, ok_profile))

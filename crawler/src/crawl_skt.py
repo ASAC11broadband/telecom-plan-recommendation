@@ -25,7 +25,7 @@ import requests
 
 from schema import (
     write_plans, write_benefits, summarize_benefits, expand_select_variants,
-    extract_speed, make_benefit_row, canonical_spelling, OTT_KEYWORDS,
+    extract_speed, make_benefit_row, canonical_spelling, classify_benefit_name,
     normalize_age_condition,
     to_gb,
     cache_dir, interim_path,
@@ -373,17 +373,7 @@ def _network_gen(prod_id: str) -> str:
 
 def _classify(name: str, detail: str) -> str:
     blob = f"{name} {detail}"
-    if any(k in blob for k in OTT_KEYWORDS):
-        return "OTT/구독"
-    if "멤버십" in blob:
-        return "멤버십"
-    if "스마트기기" in blob or "워치" in blob or "태블릿" in blob:
-        return "스마트기기"
-    if "데이터" in blob and ("추가" in blob or "공유" in blob or "쉐어" in blob):
-        return "추가데이터"
-    if any(k in blob for k in ("상품권", "페이백", "캐시백", "사은품", "쿠폰")):
-        return "사은품/페이백"
-    return "기타"
+    return classify_benefit_name(blob, "기타")
 
 
 # 상세 문구 안의 '작은따옴표' 로 감싸인 선택형 옵션명
@@ -443,10 +433,14 @@ def _benefits_for(prod_id: str, plan_name: str, source_url: str) -> list[dict]:
             options = [o.strip() for o in SELECT_OPTION_RE.findall(detail)]
             options = [o for o in dict.fromkeys(options) if o]
 
-            if len(options) >= 2 and category == "OTT/구독":
+            if len(options) >= 2 and category in {
+                "영상/OTT", "음악/오디오", "도서/콘텐츠", "제휴서비스", "복합/선택혜택",
+                "교육/AI서비스",
+            }:
                 for opt in options:
+                    option_category = classify_benefit_name(opt, category)
                     rows.append(make_benefit_row(
-                        prod_id, "SKT", plan_name, category, opt,
+                        prod_id, "SKT", plan_name, option_category, opt,
                         selectable=True, select_group=name or area_title,
                         detail=detail or summary, source_url=source_url,
                     ))

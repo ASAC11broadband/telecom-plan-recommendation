@@ -54,8 +54,10 @@ export function InputScreen({
         ? `${profile.estimated_monthly_data_gb ? '예상 ' : ''}${Math.max(
             profile.min_data_gb ?? 0,
             profile.estimated_monthly_data_gb ?? 0,
-          )}GB`
-        : '미확인'
+          )}GB${profile.max_data_gb ? ` 이상 · 최대 ${profile.max_data_gb}GB` : ''}`
+        : profile.max_data_gb
+          ? `최대 ${profile.max_data_gb}GB`
+          : '미확인'
     : data >= 31
       ? '무제한'
       : `${data}GB`;

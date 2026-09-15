@@ -76,13 +76,24 @@ def _hashtags(row: dict, is_cheapest: bool = False) -> list[str]:
     return tags
 
 
-def _benefit_text(row: dict) -> str:
+def _benefit_text(row: dict, matched_benefits: list[str] | None = None) -> str:
     items = [b for b in (row.get("ott_options", "").split(" | ") if row.get("ott_options") else []) if b]
     items += [b for b in row.get("included_benefits", []) if b not in items]
-    return " · ".join(items[:3]) if items else "부가 혜택 없음"
+    # 비교표에서는 사용자가 직접 요청한 조건과 일치하는 혜택을 앞에 고정한다.
+    # 원본 순서의 앞 3개만 자르면 네 번째 이후의 필수 혜택이 사라질 수 있다.
+    prioritized = [b for b in (matched_benefits or []) if b]
+    ordered = prioritized + [b for b in items if b not in prioritized]
+    return " · ".join(ordered[:3]) if ordered else "부가 혜택 없음"
 
 
-def to_plan_item(row: dict, rank: int = 0, score: int = 0, reason: str = "", is_cheapest: bool = False) -> dict:
+def to_plan_item(
+    row: dict,
+    rank: int = 0,
+    score: int = 0,
+    reason: str = "",
+    matched_benefits: list[str] | None = None,
+    is_cheapest: bool = False,
+) -> dict:
     total = six_month_cost(row)
     period = row.get("discount_period_months")
     is_promo = row["discounted_fee"] < row["monthly_fee"]
@@ -109,7 +120,7 @@ def to_plan_item(row: dict, rank: int = 0, score: int = 0, reason: str = "", is_
         "sms": "무제한" if row["sms_unlimited"] else "기본",
         "tetheringGb": row.get("tethering_gb"),
         "hash": _hashtags(row, is_cheapest),
-        "benefit": _benefit_text(row),
+        "benefit": _benefit_text(row, matched_benefits),
         "total": f"{total:,}원",
         "totalNum": total,
         "compareMonths": COMPARE_MONTHS,
@@ -146,6 +157,7 @@ def to_plan_items(rows: list[dict], ranked: list[dict] | None = None) -> list[di
                 rank=rank,
                 score=scored.get("score", 0),
                 reason=scored.get("reason", ""),
+                matched_benefits=scored.get("matched_benefits", []),
                 is_cheapest=row["discounted_fee"] == cheapest,
             )
         )

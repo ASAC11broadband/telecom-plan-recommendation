@@ -33,6 +33,9 @@ class UserProfile(BaseModel):
     budget_min_won: Optional[int] = Field(None, description="월 예산 하한(원). 언급 없으면 null")
     budget_max_won: Optional[int] = Field(None, description="월 예산 상한(원). 언급 없으면 null")
     min_data_gb: Optional[float] = Field(None, description="최소 데이터량(GB)")
+    max_data_gb: Optional[float] = Field(
+        None, description="최대 데이터량(GB). 무제한은 상한 조건에서 제외"
+    )
     data_unlimited: Optional[bool] = Field(None, description="데이터 무제한 필수 여부. 언급 없으면 null")
     min_qos_mbps: Optional[float] = Field(None, description="데이터 소진 후 최소 요구 속도(Mbps). 언급 없으면 null")
     min_tethering_gb: Optional[float] = Field(None, description="최소 테더링 제공량(GB). 언급 없으면 null")
@@ -58,7 +61,31 @@ class UserProfile(BaseModel):
     )
     wanted_benefits: Optional[list[str]] = Field(
         None,
-        description="원하는 OTT/구독/부가혜택 목록(예: 넷플릭스, 유튜브 프리미엄). 언급 없으면 null",
+        description="원하는 개별 서비스·혜택명 목록(예: 넷플릭스, 지니뮤직). 언급 없으면 null",
+    )
+    wanted_benefit_categories: Optional[
+        list[
+            Literal[
+                "영상/OTT",
+                "음악/오디오",
+                "도서/콘텐츠",
+                "제휴서비스",
+                "복합/선택혜택",
+                "교육/AI서비스",
+                "멤버십",
+                "스마트기기",
+                "추가데이터",
+                "사은품/페이백",
+                "기타",
+            ]
+        ]
+    ] = Field(
+        None,
+        description="원하는 혜택 유형 목록. 개별 서비스명이 아닌 포괄적 유형 요청에 사용",
+    )
+    benefit_match_mode: Literal["all", "any"] = Field(
+        "all",
+        description="여러 혜택 조건을 모두 만족해야 하면 all, 하나 이상이면 any",
     )
     min_discount_period_months: Optional[int] = Field(
         None,
@@ -127,6 +154,10 @@ class ScoredPlan(BaseModel):
     plan_name: str = Field(..., description="후보 데이터의 plan_name을 글자 그대로 복사")
     score: int = Field(..., ge=0, le=100, description="후보군 내 사용자 요청 상대 적합도")
     reason: str = Field("", description="선정 이유 1-2문장, 데이터 근거 인용")
+    matched_benefits: list[str] = Field(
+        default_factory=list,
+        description="사용자가 요청한 혜택 조건과 직접 일치하는 실제 혜택명",
+    )
 
 
 class RankingResult(BaseModel):

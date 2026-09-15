@@ -11,7 +11,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from schema import (PLAN_COLUMNS, BENEFIT_COLUMNS, total_data_gb,
+from schema import (PLAN_COLUMNS, BENEFIT_COLUMNS, classify_benefit_name,
+                    infer_benefit_search_categories, total_data_gb,
                     interim_path, final_path)
 
 SITES = ("kt", "skt", "lguplus", "moyo")
@@ -62,8 +63,27 @@ def in_scope(plan: dict) -> bool:
 def _read(path, columns):
     with open(path, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
+        rows = list(reader)
+        # 기존 interim 혜택 CSV도 새 크롤링 전까지 병합할 수 있게 메모리에서만
+        # 검색 카테고리를 보충한다. 새 크롤러 출력은 처음부터 새 컬럼을 포함한다.
+        legacy_benefit_columns = [
+            column for column in BENEFIT_COLUMNS
+            if column != "benefit_search_categories"
+        ]
+        if columns == BENEFIT_COLUMNS and reader.fieldnames == legacy_benefit_columns:
+            for row in rows:
+                row["benefit_category"] = classify_benefit_name(
+                    row.get("benefit_name", ""),
+                    row.get("benefit_category", "") or "기타",
+                )
+                row["benefit_search_categories"] = " | ".join(
+                    infer_benefit_search_categories(
+                        row.get("benefit_name", ""), row.get("benefit_category", "")
+                    )
+                )
+            return rows
         assert reader.fieldnames == columns, f"{path} 컬럼이 schema.py와 다름:\n{reader.fieldnames}"
-        return list(reader)
+        return rows
 
 
 def _write(rows, columns, out_path):

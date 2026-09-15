@@ -5,7 +5,7 @@ lguplus.com은 Vue(Nuxt) SPA라 목록 페이지는 브라우저 없이는 카�
 
 1. 목록에서 요금제 링크 수집  -> Selenium (여기만 브라우저 필요)
 2. 요금제 상세 스펙           -> Selenium 렌더링본 + BeautifulSoup
-3. 요금제 혜택(OTT/구독)      -> requests + JSON
+3. 요금제 혜택(영상/음악/도서/제휴 등) -> requests + JSON
    GET /uhdc/fo/prdv/mblppexhi/v2/premium-benefit/{planCode}
    - baseAmount            = 구독 정가
    - customerPaymentAmount = 가입자가 실제로 더 내는 금액 (0이면 완전 무료)
@@ -493,8 +493,14 @@ def parse_direct_card(card, now: str, name_to_code: dict):
             benefits.append(_benefit_row(plan_id, name, url, category, info[key]))
     for key in ("프리미엄플러스", "데일리플러스"):
         # 혜택 API가 비어있는 요금제는 카드에 적힌 요약 문구라도 남긴다
-        if info.get(key) and not any(b["benefit_category"] == "OTT/구독" for b in benefits):
-            benefits.append(_benefit_row(plan_id, name, url, "OTT/구독", key, info[key]))
+        if info.get(key) and not any(
+            b["benefit_category"] in {
+                "영상/OTT", "음악/오디오", "도서/콘텐츠", "제휴서비스", "복합/선택혜택",
+                "교육/AI서비스",
+            }
+            for b in benefits
+        ):
+            benefits.append(_benefit_row(plan_id, name, url, "제휴서비스", key, info[key]))
     # tether_spec은 이미 "테더링+쉐어링 80GB" 형태라 접두사를 덧붙이지 않는다
     if tether_spec and not is_non_benefit(tether_spec):
         benefits.append(_benefit_row(plan_id, name, url, "추가데이터", tether_spec))
