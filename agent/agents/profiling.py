@@ -7,6 +7,7 @@ import re
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from ..data import normalize_benefit_category
 from ..schemas import UserProfile
 from ..state import PipelineState, feedback_block, get_llm, user_query
 from ..usage import estimate_monthly_data_gb
@@ -17,6 +18,7 @@ CONSTRAINT_FIELDS = (
     "budget_min_won",
     "budget_max_won",
     "min_data_gb",
+    "max_data_gb",
     "data_unlimited",
     "min_qos_mbps",
     "min_tethering_gb",
@@ -29,6 +31,7 @@ CONSTRAINT_FIELDS = (
     "network_gen",
     "age_condition",
     "wanted_benefits",
+    "wanted_benefit_categories",
     "min_discount_period_months",
 )
 
@@ -46,7 +49,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - N만원대 → budget_min_won=N0,000, budget_max_won=N9,999
 - N만원 이하/이상 → budget_max_won/budget_min_won
 - N만원 정도·내외·안팎 → N만원 ±5,000원
-- 데이터 NGB 이상, QoS·소진 후 NMbps 이상, 테더링 NGB 이상을 각각 최소 필드에 저장한다.
+- 데이터 NGB 이상은 min_data_gb, 데이터 NGB 이하·미만·최대 NGB는 max_data_gb에 저장한다.
+  데이터 상한을 요청하면 무제한 요금제는 제외한다. QoS·소진 후 NMbps 이상, 테더링 NGB 이상은 각각 최소 필드에 저장한다.
 - 데이터 무제한은 data_unlimited=true, 통화 N분 이상과 통화 무제한은 해당 통화 필드에 저장한다.
 - 무제한 상품을 명시적으로 제외할 때만 해당 unlimited 필드를 false로 저장한다.
 - 문자는 sms_unlimited만 구조화한다. 문자 건수 조건은 필드를 만들지 말고 notes에 기록한다.
@@ -68,8 +72,20 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   명시적으로 요청하면 age_condition='만 34세 이하'로 저장한다.
 - '나는 20대인데 추천해줘'처럼 나이만 밝히고 청년 상품군을 요청하지 않은 경우에는
   청년 전용 상품만 원한다고 단정하지 말고 age_condition을 설정하지 않는다.
-- OTT·구독·멤버십 등 요구 혜택은 wanted_benefits에 저장한다.
-  혜택 이름만 넣고 '포함/혜택/되는' 같은 수식어는 뺀다. '유튜브 프리미엄 포함된' → '유튜브 프리미엄' 
+- 포괄적인 혜택 유형은 wanted_benefit_categories에 다음 정식 카테고리명으로 저장한다.
+  OTT·영상 스트리밍='영상/OTT', 음악·오디오='음악/오디오', 도서·전자책='도서/콘텐츠',
+  외부 제휴 서비스='제휴서비스', 여러 종류 중 선택='복합/선택혜택', AI 교육·모의고사='교육/AI서비스', 멤버십='멤버십',
+  스마트워치·태블릿='스마트기기', 추가 데이터='추가데이터', 사은품·페이백='사은품/페이백'.
+- 넷플릭스·지니뮤직·밀리의서재처럼 특정 서비스나 혜택을 지정하면 wanted_benefits에 저장한다.
+  혜택 이름만 넣고 '포함/혜택/되는' 같은 수식어는 뺀다. '유튜브 프리미엄 포함된' → '유튜브 프리미엄'
+- '음악 혜택'은 wanted_benefit_categories=['음악/오디오']이고 wanted_benefits에는 넣지 않는다.
+  '지니뮤직 혜택'은 wanted_benefits=['지니뮤직']이고 카테고리를 임의로 추가하지 않는다.
+- 혜택 조건이 여러 개일 때 '그리고/모두/동시에'는 benefit_match_mode='all'로 저장한다.
+  '또는/둘 중 하나/아무거나/하나라도'는 benefit_match_mode='any'로 저장한다.
+  연결 표현이 없거나 혜택 조건이 하나뿐이면 기본값 all을 유지한다.
+- 개별 서비스와 카테고리가 섞여도 같은 규칙을 적용한다.
+  '디즈니플러스 또는 도서 혜택'은 wanted_benefits=['디즈니플러스'],
+  wanted_benefit_categories=['도서/콘텐츠'], benefit_match_mode='any'다.
 - 단순히 넷플릭스·유튜브 등을 시청한다고 말한 것은 혜택 요구가 아니다.
   '포함/혜택/되는 요금제'처럼 상품 혜택을 원할 때만 wanted_benefits에 저장한다.
 
@@ -167,6 +183,12 @@ _NAMED_VIDEO_APP = re.compile(
     re.IGNORECASE,
 )
 
+# LLM 구조화 출력에 앞뒤 공백·조사가 붙은 데이터 상한을 놓쳐도, 사용자가 직접
+# 말한 '100GB 이하'는 필터에서 빠지지 않게 한다.
+_EXPLICIT_DATA_MAX_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:g|gb)\s*(?:이하|최대)", re.IGNORECASE
+)
+
 
 def _smartchoice_usage_pattern(query: str) -> str | None:
     """정확한 영상 앱명이 없는 생활패턴을 스마트초이스 구간으로 분류한다."""
@@ -224,8 +246,37 @@ def _apply_smartchoice_usage_rule(profile: UserProfile, query: str) -> UserProfi
     return profile.model_copy(update=updates)
 
 
+def _apply_explicit_data_max(profile: UserProfile, query: str) -> UserProfile:
+    """자연어에 명시된 데이터 상한을 구조화 출력에 확정적으로 반영한다."""
+    matches = list(_EXPLICIT_DATA_MAX_RE.finditer(query))
+    if not matches:
+        return profile
+    max_data_gb = float(matches[-1].group(1))
+    return profile.model_copy(update={"max_data_gb": max_data_gb})
+
+
+def _normalize_benefit_requests(profile: UserProfile) -> UserProfile:
+    """예전 방식으로 추출된 '음악'·'OTT'를 카테고리 요청으로 이관한다."""
+    categories = list(profile.wanted_benefit_categories or [])
+    benefits: list[str] = []
+    for benefit in profile.wanted_benefits or []:
+        category = normalize_benefit_category(benefit)
+        if category:
+            categories.append(category)
+        else:
+            benefits.append(benefit)
+    categories = list(dict.fromkeys(categories))
+    return profile.model_copy(
+        update={
+            "wanted_benefits": benefits or None,
+            "wanted_benefit_categories": categories or None,
+        }
+    )
+
+
 def _normalize_profile(profile: UserProfile) -> UserProfile:
     """스키마 값으로 Hard Constraint와 재질문 상태를 결정한다."""
+    profile = _normalize_benefit_requests(profile)
     if profile.mvno_brand and profile.carrier_type != "MVNO":
         profile = profile.model_copy(update={"carrier_type": "MVNO"})
 
@@ -270,6 +321,7 @@ def core_signal_missing(profile: UserProfile | None) -> bool:
         value is not None
         for value in (
             profile.min_data_gb,
+            profile.max_data_gb,
             profile.data_unlimited,
             profile.estimated_monthly_data_gb,
             profile.daily_video_hours,
@@ -301,8 +353,11 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     query = user_query(state)
     profile = _normalize_profile(
         _apply_smartchoice_usage_rule(
-            _drop_phantom_budget(
-                llm.invoke([SystemMessage(content=prompt), *messages]), query
+            _apply_explicit_data_max(
+                _drop_phantom_budget(
+                    llm.invoke([SystemMessage(content=prompt), *messages]), query
+                ),
+                query,
             ),
             query,
         )
@@ -358,11 +413,21 @@ if __name__ == "__main__":
     assert core_signal_missing(UserProfile()) is True
     assert core_signal_missing(UserProfile(reference_plan_name="초이스90")) is False
     assert core_signal_missing(UserProfile(budget_max_won=30000)) is False
+    assert core_signal_missing(UserProfile(max_data_gb=100)) is False
     assert core_signal_missing(UserProfile(data_unlimited=False)) is False
+    assert _apply_explicit_data_max(UserProfile(), "데이터 100GB이하").max_data_gb == 100
 
     # hard_constraints 는 값이 있는 필터 필드만
     normalized = _normalize_profile(UserProfile(budget_max_won=30000, voice_unlimited=True))
     assert set(normalized.hard_constraints) == {"budget_max_won", "voice_unlimited"}
+
+    music = _normalize_profile(UserProfile(wanted_benefits=["음악 혜택"]))
+    assert music.wanted_benefits is None
+    assert music.wanted_benefit_categories == ["음악/오디오"]
+    assert "wanted_benefit_categories" in music.hard_constraints
+    genie = _normalize_profile(UserProfile(wanted_benefits=["지니뮤직"]))
+    assert genie.wanted_benefits == ["지니뮤직"]
+    assert genie.wanted_benefit_categories is None
 
     vague_video = UserProfile(
         daily_video_hours=1,

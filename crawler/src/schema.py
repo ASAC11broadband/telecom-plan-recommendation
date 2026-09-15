@@ -25,10 +25,13 @@ from pathlib import Path
 
 # 경로는 이 파일 위치 기준으로 잡는다. 상대경로면 프로젝트 루트에서 실행할 때만 동작한다.
 BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_DIR = BASE_DIR.parent
 DATA_DIR = BASE_DIR / "data"
 RAW_CACHE_DIR = DATA_DIR / "raw_cache"   # 사이트 원본 HTML/JSON
 INTERIM_DIR = DATA_DIR / "interim"       # 사이트별 중간 CSV
-FINAL_DIR = DATA_DIR / "final"           # 합친 최종 CSV
+# 캐시/중간 결과는 crawler/data에 두되, 검증을 통과한 최종본은 애플리케이션이
+# 실제로 읽는 프로젝트 루트의 data/에 바로 반영한다.
+FINAL_DIR = PROJECT_DIR / "data"          # 합친 최종 CSV
 
 
 def cache_dir(site: str) -> Path:
@@ -134,7 +137,12 @@ def total_data_gb(row: dict):
 
 # 4개 사이트 공통 분류 체계. benefit_category에 이 중 하나가 들어간다.
 BENEFIT_CATEGORIES = [
-    "OTT/구독",
+    "영상/OTT",
+    "음악/오디오",
+    "도서/콘텐츠",
+    "제휴서비스",
+    "복합/선택혜택",
+    "교육/AI서비스",
     "멤버십",
     "스마트기기",
     "추가데이터",
@@ -147,6 +155,8 @@ BENEFIT_COLUMNS = [
     "host_mno",
     "plan_name",
     "benefit_category",
+    # 대표 분류는 하나만 두되, 복합 혜택은 검색될 분류를 파이프로 모두 적는다.
+    "benefit_search_categories",
     "benefit_name",        # 사이트에 적힌 혜택명 그대로
     "benefit_service",     # 정규화한 서비스명 (예: "넷플릭스"). 못 찾으면 빈값
     "benefit_tier",        # 구독 등급. 없으면 빈값
@@ -177,10 +187,18 @@ SERVICE_ALIASES = [
     ("지니뮤직", ("지니",)),
     ("FLO", ("flo",)),
     ("구글 원", ("구글 원", "구글원", "google one")),
-    ("Google AI", ("google ai", "ai 구독")),
+    ("Google AI", ("google ai", "googleai", "구글 ai", "구글ai", "ai 구독")),
     ("T 우주", ("t 우주", "우주패스")),
     ("위버스", ("위버스",)),
     ("가전구독", ("가전구독",)),
+    ("조선일보", ("조선일보",)),
+    ("더중앙플러스", ("더중앙플러스",)),
+    ("YES24 크레마클럽", ("예스24 크레마클럽", "yes24 크레마클럽", "크레마클럽")),
+    ("네이버웹툰", ("네이버웹툰",)),
+    ("카카오 이모티콘 플러스", ("카카오이모티콘 플러스", "이모티콘플러스")),
+    ("교보문고", ("교보문고",)),
+    ("모아진", ("모아진",)),
+    ("북앤라이프", ("북앤라이프",)),
     ("폰케어", ("폰케어",)),
     ("삼성 디바이스", ("삼성",)),
     ("애플 디바이스", ("애플",)),
@@ -274,17 +292,50 @@ def classify_benefit_name(name: str, default: str = "기타") -> str:
     카테고리는 default로만 쓰고, 이름에 단서가 있으면 그걸 우선한다.
     """
     text = name or ""
-    # OTT/구독을 사은품보다 **먼저** 본다. "구글 AI프로+도미노피자 할인쿠폰"처럼
-    # 구독에 쿠폰이 딸려오는 이름이 있어서, 쿠폰을 먼저 보면 구독 혜택이 통째로
-    # 사은품으로 넘어간다(모요 44행). 3사 전수 확인: 쿠폰 + OTT 키워드가 같이
-    # 걸리는 혜택명 0건이라 반대 방향 오분류는 없다.
-    if any(k in text for k in OTT_KEYWORDS):
-        return "OTT/구독"
-    if any(k in text for k in ("보험", "폰케어")):
+    folded = text.casefold()
+
+    # 기존 통합 카테고리를 폴백으로 다시 남기지 않는다. 이름에 더 구체적인 단서가
+    # 없던 과거 KT 초이스/플러스 혜택은 제휴서비스로 이관한다. 직전 버전의
+    # '디지털/제휴'도 같은 뜻의 레거시 값으로 받아 재크롤링·병합 시 남지 않게 한다.
+    if default in {"OTT/구독", "디지털/제휴"}:
+        default = "제휴서비스"
+
+    # 한 행 안에서 서로 다른 종류를 고르는 묶음은 첫 번째 서비스 카테고리로
+    # 단정하지 않는다. 예: '티빙/지니/밀리'는 영상·음악·도서 중 택1이다.
+    # 이런 혼합형은 어느 한 서비스 유형으로 대표시키지 않고 별도 분류한다.
+    if any(keyword.casefold() in folded for keyword in MIXED_DIGITAL_KEYWORDS):
+        return "복합/선택혜택"
+
+    # AI 학습/시험 서비스는 영상 OTT 선택지가 아니다. 교육 단서를 먼저 확인해야
+    # "토스미·오픽미 AI 모의고사"가 디지털 제휴로 섞이지 않는다.
+    if any(keyword.casefold() in folded for keyword in EDUCATION_AI_KEYWORDS):
+        return "교육/AI서비스"
+
+    if any(keyword.casefold() in folded for keyword in VIDEO_OTT_KEYWORDS):
+        return "영상/OTT"
+    if any(keyword.casefold() in folded for keyword in MUSIC_AUDIO_KEYWORDS):
+        return "음악/오디오"
+    if any(keyword.casefold() in folded for keyword in BOOK_CONTENT_KEYWORDS):
+        return "도서/콘텐츠"
+
+    # KT 초이스 표에서 옵션명이 서비스명 한 단어로만 오는 경우를 처리한다.
+    if folded.strip() in {"삼성", "애플"}:
+        return "스마트기기"
+
+    # Google AI/Google One 같은 디지털 서비스와 결합 쿠폰은 영상 OTT와 분리한다.
+    if any(keyword.casefold() in folded for keyword in DIGITAL_PARTNER_KEYWORDS):
+        return "제휴서비스"
+
+    # '구독'만으로 음악·도서·AI를 영상 OTT로 묶지 않는다.
+    if "ott" in folded:
+        return "영상/OTT"
+    if "구독" in folded:
+        return "제휴서비스"
+    if any(k in text for k in OTHER_KEYWORDS):
         return "기타"
     if any(k in text for k in ("디바이스", "워치", "태블릿", "액션캠", "스마트기기")):
         return "스마트기기"
-    if "멤버십" in text:
+    if any(k in text.upper() for k in MEMBERSHIP_KEYWORDS):
         return "멤버십"
     # 사은품 판정도 추가데이터보다 뒤다. "데이터쿠폰 20GB"(모요 23행)처럼 데이터를
     # 더 주는 혜택에 '쿠폰'이 붙는 이름이 있다.
@@ -319,14 +370,107 @@ def canonical_spelling(text: str) -> str:
     return out
 
 
-# 혜택명에 이 키워드가 있으면 OTT/구독. SKT/LGU+가 각자 목록을 두다가 조금씩
-# 달라져서 하나로 합쳤다. KT는 혜택이 표 헤더 단위로 와서 대신 헤더명 규칙
-# (crawl_kt.py의 BENEFIT_COLUMN_RULES)을 쓴다.
-OTT_KEYWORDS = (
-    "넷플릭스", "Netflix", "유튜브", "YouTube", "디즈니", "Disney", "티빙", "웨이브",
-    "Wavve", "밀리", "지니", "FLO", "우주", "Google AI", "구글", "AI", "OTT", "구독",
-    "데일리",
+# 구독/제휴 혜택을 실제 서비스 성격별로 나눈다. 각 통신사 크롤러가 같은 목록을
+# 공유해야 갱신할 때마다 카테고리가 다시 합쳐지지 않는다.
+EDUCATION_AI_KEYWORDS = (
+    "토스미", "오픽미", "모의고사",
+    "Google AI", "GoogleAI", "구글 AI", "구글AI", "AI프로", "AI 구독",
 )
+
+# 서로 다른 카테고리의 선택지가 한 혜택명에 합쳐진 원문 표기. 단일 컬럼에
+# 억지로 영상/음악/도서 중 하나만 넣으면 나머지 검색이 왜곡되므로 복합 묶음으로 둔다.
+MIXED_DIGITAL_KEYWORDS = (
+    "티빙/지니/밀리",
+    "지니뮤직, 밀리의서재, 구글원",
+    "OTT 1개 또는 디바이스",
+)
+
+DIGITAL_PARTNER_KEYWORDS = (
+    "Google One", "구글 원", "구글원", "우주", "데일리", "위버스",
+    "카카오이모티콘 플러스", "이모티콘플러스", "SNOW 앱",
+)
+
+VIDEO_OTT_KEYWORDS = (
+    "넷플릭스", "Netflix", "유튜브", "YouTube", "디즈니", "Disney", "티빙",
+    "웨이브", "Wavve", "왓챠", "Watcha",
+)
+
+MUSIC_AUDIO_KEYWORDS = (
+    "지니뮤직", "지니 뮤직", "지니 스마트 음악감상", "FLO", "플로",
+    "Spotify", "스포티파이", "VIBE", "바이브",
+)
+
+BOOK_CONTENT_KEYWORDS = (
+    "밀리의서재", "밀리의 서재", "교보문고", "모아진",
+    "조선일보", "종이신문", "더중앙플러스", "중앙일보",
+    "예스24", "YES24", "크레마클럽", "네이버웹툰",
+    "북앤라이프", "도서문화상품권",
+)
+
+# 별도 카테고리가 없는 통신/보호 부가 혜택. 이름에 쿠폰·할인이 같이 있어도
+# 지급 수단이 아니라 실제 혜택 성격(로밍/보험/안심 서비스)을 우선한다.
+OTHER_KEYWORDS = (
+    "보험", "폰케어", "로밍", "안심박스", "청소년 보호",
+    "집지킴", "돌봄이",
+)
+
+MEMBERSHIP_KEYWORDS = (
+    "멤버십", "VIP 등급", "VVIP 등급",
+)
+
+
+def infer_benefit_search_categories(
+    name: str, primary_category: str | None = None
+) -> list[str]:
+    """혜택 하나가 카테고리 검색에서 노출돼야 할 모든 분류를 돌려준다.
+
+    `benefit_category`는 대표 분류 하나를 유지한다. 대신 이름 하나에 영상·음악·
+    도서 등이 함께 있는 복합 혜택은 이 목록에 관련 분류를 모두 넣어, 어느 쪽으로
+    질문해도 누락되지 않게 한다.
+    """
+    text = name or ""
+    folded = text.casefold()
+    primary = primary_category or classify_benefit_name(text)
+    # 복합은 데이터 관리용 대표 분류다. 검색 태그에는 사용자가 실제로 찾을
+    # 영상·음악·도서·기기·제휴 서비스 유형만 넣는다.
+    matched = set() if primary == "복합/선택혜택" else {primary}
+
+    def contains_any(keywords) -> bool:
+        return any(keyword.casefold() in folded for keyword in keywords)
+
+    if contains_any(EDUCATION_AI_KEYWORDS):
+        matched.add("교육/AI서비스")
+    if contains_any(VIDEO_OTT_KEYWORDS) or "ott" in folded:
+        matched.add("영상/OTT")
+    if contains_any(MUSIC_AUDIO_KEYWORDS):
+        matched.add("음악/오디오")
+    if contains_any(BOOK_CONTENT_KEYWORDS):
+        matched.add("도서/콘텐츠")
+    if contains_any(DIGITAL_PARTNER_KEYWORDS):
+        matched.add("제휴서비스")
+    if folded.strip() in {"삼성", "애플"} or any(
+        keyword.casefold() in folded
+        for keyword in ("디바이스", "워치", "태블릿", "액션캠", "스마트기기")
+    ):
+        matched.add("스마트기기")
+
+    # KT가 세 서비스명을 줄여 쓴 원문. '지니'와 '밀리'만으로 전역 키워드를
+    # 넓히면 사람 이름·일반 문구까지 오탐할 수 있어 이 복합 표기에서만 보충한다.
+    if "티빙/지니/밀리" in text:
+        matched.update({"영상/OTT", "음악/오디오", "도서/콘텐츠"})
+
+    if not matched:
+        matched.add(primary)
+
+    # 대표 분류가 실제 검색 유형이면 맨 앞에 두고, 복합 대표 분류이면 실제
+    # 구성 요소만 공통 카테고리 순서대로 반환한다.
+    if primary in matched:
+        return [primary] + [
+            category
+            for category in BENEFIT_CATEGORIES
+            if category in matched and category != primary
+        ]
+    return [category for category in BENEFIT_CATEGORIES if category in matched]
 
 
 # "혜택" 칸에 적혀 있지만 실제로는 "별도로 더 주는 건 없다"는 뜻인 문구들
@@ -461,6 +605,17 @@ def write_plans(rows, path):
 
 def write_benefits(rows, path):
     for row in rows:
+        # 통신사별 파서가 표 헤더에서 추정한 카테고리는 폴백일 뿐이다. 저장 직전에
+        # 모든 행을 공통 규칙으로 다시 분류해야 새 크롤링에서도 예전 분류가 살아나지
+        # 않는다. KT/SKT/LGU+/모요 크롤러가 모두 이 함수를 거친다.
+        row["benefit_category"] = classify_benefit_name(
+            row.get("benefit_name", ""), row.get("benefit_category", "") or "기타"
+        )
+        row["benefit_search_categories"] = " | ".join(
+            infer_benefit_search_categories(
+                row.get("benefit_name", ""), row["benefit_category"]
+            )
+        )
         if not row.get("benefit_service"):
             row["benefit_service"] = normalize_service(row.get("benefit_name", ""))
         if not row.get("benefit_tier"):
@@ -526,7 +681,9 @@ def expand_select_variants(plan: dict, benefits: list[dict]) -> list[tuple[dict,
 
 def summarize_benefits(benefit_rows: list[dict]) -> dict:
     """혜택 long rows -> plans.csv에 넣을 요약 컬럼들."""
-    ott = [b for b in benefit_rows if b["benefit_category"] == "OTT/구독"]
+    # ott_option_*은 이름 그대로 영상 OTT만 요약한다. 음악·전자책·AI 구독은
+    # 별도 카테고리이며 OTT 개수에 더하지 않는다.
+    ott = [b for b in benefit_rows if b["benefit_category"] == "영상/OTT"]
     membership = [b for b in benefit_rows if b["benefit_category"] == "멤버십"]
     smart = [b for b in benefit_rows if b["benefit_category"] == "스마트기기"]
     data = [b for b in benefit_rows if b["benefit_category"] == "추가데이터"]
@@ -559,10 +716,16 @@ if __name__ == "__main__":
     # 순서가 결과를 바꾸는 규칙이라(OTT vs 사은품, 사은품 vs 추가데이터) 실제로
     # 걸렸던 이름들을 그대로 박아 둔다.
     CASES = [
-        # 구독 이름이 들어간 사은품 링크 - 사은품보다 OTT가 먼저다
-        ("구글 AI프로+도미노피자 할인쿠폰", "사은품/페이백", "OTT/구독"),
-        ("밀리의 서재 평생 구독 0원", "사은품/페이백", "OTT/구독"),
-        ("티빙 광고형 스탠다드 제공 (12개월)", "사은품/페이백", "OTT/구독"),
+        # AI·교육·제휴 서비스는 영상 OTT와 구분한다.
+        ("구글 AI프로+도미노피자 할인쿠폰", "사은품/페이백", "교육/AI서비스"),
+        ("토스미·오픽미 AI 모의고사", "사은품/페이백", "교육/AI서비스"),
+        ("GoogleAI Plus (400GB)", "OTT/구독", "교육/AI서비스"),
+        ("위버스", "OTT/구독", "제휴서비스"),
+        # 영상·음악·도서 구독을 각각 분리한다.
+        ("밀리의 서재 평생 구독 0원", "사은품/페이백", "도서/콘텐츠"),
+        ("지니 스마트 음악감상", "OTT/구독", "음악/오디오"),
+        ("티빙 광고형 스탠다드 제공 (12개월)", "사은품/페이백", "영상/OTT"),
+        ("삼성", "OTT/구독", "스마트기기"),
         # 결합/추가 데이터 - '데이터'라는 말이 없는 표기까지
         ("솔로결합(+20GB)", "사은품/페이백", "추가데이터"),
         ("SOLO결합 데이터 10GB 지급", "사은품/페이백", "추가데이터"),

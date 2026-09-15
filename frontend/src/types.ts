@@ -47,6 +47,7 @@ export interface ChatMessage {
 export interface Profile {
   budget_max_won?: number;
   min_data_gb?: number;
+  max_data_gb?: number;
   data_unlimited?: boolean;
   min_voice_minutes?: number;
   voice_unlimited?: boolean;

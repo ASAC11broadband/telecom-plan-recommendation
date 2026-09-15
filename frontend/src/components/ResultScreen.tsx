@@ -13,15 +13,15 @@ function deltaOf(plan: PlanItem, prev: PlanItem[]) {
 
 function conditionCells(result: RecommendResponse) {
   const p = result.profile ?? {};
+  const dataCondition = p.data_unlimited
+    ? '무제한'
+    : p.min_data_gb || p.estimated_monthly_data_gb
+      ? `${Math.max(p.min_data_gb ?? 0, p.estimated_monthly_data_gb ?? 0)}GB 이상${p.max_data_gb ? ` · ${p.max_data_gb}GB 이하` : ''}`
+      : p.max_data_gb
+        ? `${p.max_data_gb}GB 이하`
+        : '미지정';
   return [
-    [
-      '데이터',
-      p.data_unlimited
-        ? '무제한'
-        : p.min_data_gb || p.estimated_monthly_data_gb
-          ? `${Math.max(p.min_data_gb ?? 0, p.estimated_monthly_data_gb ?? 0)}GB 이상`
-          : '미지정',
-    ],
+    ['데이터', dataCondition],
     ['통화', p.voice_unlimited ? '무제한' : p.min_voice_minutes ? `${p.min_voice_minutes}분` : '미지정'],
     ['문자', p.sms_unlimited ? '무제한' : '미지정'],
     ['예산', p.budget_max_won ? `${p.budget_max_won.toLocaleString()}원 이하` : '미지정'],
