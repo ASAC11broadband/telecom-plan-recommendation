@@ -88,8 +88,6 @@ export default function App() {
         currentScreen={screen}
         onNavigate={navigate}
         hasReport={!!result}
-        compareCount={compare.length}
-        onOpenCompare={() => setCompareOpen(true)}
       />
       {screen !== 's-home' && screen !== 's-browse' && (
         <Stepper current={step} hasResult={!!result} onStepClick={navigate} />

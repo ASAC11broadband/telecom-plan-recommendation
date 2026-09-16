@@ -72,6 +72,7 @@ CONSTRAINT_CHECKS = {
     ) <= v,
     "data_unlimited": lambda plan, v: plan["data_unlimited"] or not v,  # v=False 는 "필수 아님"
     "min_qos_mbps": lambda plan, v: (plan.get("qos_mbps") or 0) >= v,
+    "requires_qos": lambda plan, v: (plan.get("qos_mbps") or 0) > 0 or not v,
     "min_tethering_gb": lambda plan, v: (plan.get("tethering_gb") or 0) >= v,
     "min_voice_minutes": lambda plan, v: plan["voice_unlimited"] or (plan.get("voice_minutes") or 0) >= v,
     "voice_unlimited": lambda plan, v: plan["voice_unlimited"] or not v,  # v=False 는 "필수 아님"

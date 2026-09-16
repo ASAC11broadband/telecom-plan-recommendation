@@ -42,6 +42,10 @@ class UserProfile(BaseModel):
     )
     data_unlimited: Optional[bool] = Field(None, description="데이터 무제한 필수 여부. 언급 없으면 null")
     min_qos_mbps: Optional[float] = Field(None, description="데이터 소진 후 최소 요구 속도(Mbps). 언급 없으면 null")
+    requires_qos: Optional[bool] = Field(
+        None,
+        description="속도 수치와 관계없이 데이터 소진 후 QoS 제공이 필수이면 true. 언급 없으면 null",
+    )
     min_tethering_gb: Optional[float] = Field(None, description="최소 테더링 제공량(GB). 언급 없으면 null")
     min_voice_minutes: Optional[int] = Field(None, description="최소 통화 시간(분). 언급 없으면 null")
     voice_unlimited: Optional[bool] = Field(None, description="통화 무제한 필수 여부")
@@ -126,7 +130,9 @@ class UserProfile(BaseModel):
     comparison_goals: Optional[
         list[Literal["cheaper", "more_data", "faster_qos", "similar", "better"]]
     ] = Field(None, description="기준 요금제 대비 사용자가 원하는 개선·비교 방향")
-    priorities: Optional[list[Literal["price", "data", "qos", "benefit", "voice", "sms", "tethering", "carrier"]]] = Field(
+    priorities: Optional[
+        list[Literal["price", "data", "qos", "benefit", "voice", "tethering"]]
+    ] = Field(
         None,
         description="사용자가 직접 말한 추천 우선순위를 중요도 순으로 저장. 언급 없으면 null",
     )

@@ -25,6 +25,7 @@ CONSTRAINT_FIELDS = (
     "max_data_gb",
     "data_unlimited",
     "min_qos_mbps",
+    "requires_qos",
     "min_tethering_gb",
     "min_voice_minutes",
     "voice_unlimited",
@@ -57,6 +58,9 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   데이터 NGB 정도·쯤·내외·전후처럼 목표량을 말하면 target_data_gb에 저장하고
   min_data_gb에는 복사하지 않는다.
   데이터 상한을 요청하면 무제한 요금제는 제외한다. QoS·소진 후 NMbps 이상, 테더링 NGB 이상은 각각 최소 필드에 저장한다.
+- 'QoS 있는/제공되는 요금제', '데이터 소진 후에도 사용할 수 있는 요금제'처럼 속도 수치 없이
+  소진 후 데이터 사용 가능 여부를 요구하면 requires_qos=true로 저장한다.
+  'QoS는 상관없음/없어도 됨'은 필수조건이 아니므로 requires_qos=null로 둔다.
 - 데이터 무제한은 data_unlimited=true, 통화 N분 이상과 통화 무제한은 해당 통화 필드에 저장한다.
 - 무제한 상품을 명시적으로 제외할 때만 해당 unlimited 필드를 false로 저장한다.
 - 문자는 sms_unlimited만 구조화한다. 문자 건수 조건은 필드를 만들지 말고 notes에 기록한다.
@@ -94,6 +98,11 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   wanted_benefit_categories=['도서/콘텐츠'], benefit_match_mode='any'다.
 - 단순히 넷플릭스·유튜브 등을 시청한다고 말한 것은 혜택 요구가 아니다.
   '포함/혜택/되는 요금제'처럼 상품 혜택을 원할 때만 wanted_benefits에 저장한다.
+- 특정 혜택명이나 유형 없이 '혜택 좋은/더 괜찮은/우선/많은 순/다양한 순'이라고만 하면
+  혜택의 좋고 나쁨이나 개수를 임의로 평가하지 않는다. needs_user_input=true로 두고
+  원하는 혜택 유형을 질문한다.
+- 'OTT 혜택이 좋은 요금제'처럼 유형을 함께 말하면 해당 유형을 필수 혜택으로 저장하고
+  comparison_goals의 better로 해석하지 않는다.
 
 [이용 패턴]
 - GB 수치 없이 앱 이용 시간을 말하면 app_usages에 앱별 항목을 저장한다.
@@ -143,7 +152,10 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - 1년 넘게 할인 → min_discount_period_months=13
 
 [우선순위·Hard Constraint]
-- priorities에는 사용자가 말한 정렬 기준만 저장한다. 없으면 null이며 시스템 기본값을 넣지 않는다.
+- priorities에는 사용자가 말한 정렬 기준 중 price/data/qos/benefit/voice/tethering만 저장한다.
+  없으면 null이며 시스템 기본값을 넣지 않는다.
+- sms와 carrier는 점수 우선순위가 아니다. '문자가 중요하다'만으로 sms_unlimited를 추측하지 말고,
+  선호 통신사 이름 없이 '통신사가 중요하다'고만 하면 carrier 조건도 추측하지 않는다.
 - 구체적인 금액·사용량·통신사·혜택 등 필터 조건은 기본적으로 Hard Constraint다.
 - 가장 싼 것·데이터 많은 순 같은 정렬 표현은 조건 필드가 아니라 priorities에만 저장한다.
 - 가격대·연령·브랜드 변환처럼 정해진 정규화는 assumptions에 반복 기록하지 않는다.
@@ -198,6 +210,11 @@ _NAMED_VIDEO_APP = re.compile(
 # 말한 '100GB 이하'는 필터에서 빠지지 않게 한다.
 _EXPLICIT_DATA_MAX_RE = re.compile(
     r"(\d+(?:\.\d+)?)\s*(?:g|gb)\s*(?:이하|최대)", re.IGNORECASE
+)
+_EXPLICIT_QOS_MIN_RE = re.compile(
+    r"(?:qos|소진\s*후(?:\s*속도)?)\s*(?:가|는|도)?\s*"
+    r"(\d+(?:\.\d+)?)\s*mbps\s*(?:이상|최소)",
+    re.IGNORECASE,
 )
 
 
@@ -264,6 +281,91 @@ def _apply_explicit_data_max(profile: UserProfile, query: str) -> UserProfile:
         return profile
     max_data_gb = float(matches[-1].group(1))
     return profile.model_copy(update={"max_data_gb": max_data_gb})
+
+
+def _apply_explicit_qos_min(profile: UserProfile, query: str) -> UserProfile:
+    """명시한 QoS 최솟값을 구조화 출력과 관계없이 확정적으로 보존한다."""
+    matches = list(_EXPLICIT_QOS_MIN_RE.finditer(query or ""))
+    if not matches:
+        return profile
+    return profile.model_copy(update={"min_qos_mbps": float(matches[-1].group(1))})
+
+
+_QOS_REQUIRED_RE = re.compile(
+    r"(?:qos\s*(?:가|는|도)?\s*(?:있(?:는|어|고)|제공|지원|적용|포함|요금제|상품)|"
+    r"(?:데이터\s*)?소진\s*후(?:에도)?(?:\s*속도(?:가|는)?\s*(?:있|제공|지원)|"
+    r"(?:\s*데이터(?:를|가)?)?.{0,10}?(?:사용\s*가능|사용할\s*수\s*있|계속\s*사용)))",
+    re.IGNORECASE,
+)
+_QOS_OPTIONAL_RE = re.compile(
+    r"(?:qos|소진\s*후).{0,12}?(?:상관\s*없|없어도|필요\s*없)",
+    re.IGNORECASE,
+)
+
+
+def _apply_explicit_qos_requirement(profile: UserProfile, query: str) -> UserProfile:
+    """수치가 없는 'QoS 있음' 요청도 후보 필터에서 빠지지 않게 한다."""
+    text = query or ""
+    required = list(_QOS_REQUIRED_RE.finditer(text))
+    optional = list(_QOS_OPTIONAL_RE.finditer(text))
+    if not required:
+        return profile
+    # 대화 전체가 들어오므로 서로 충돌하면 사용자가 나중에 말한 의도를 따른다.
+    if optional and optional[-1].start() > required[-1].start():
+        return profile.model_copy(update={"requires_qos": None})
+    return profile.model_copy(update={"requires_qos": True})
+
+
+BENEFIT_PREFERENCE_QUESTION = (
+    "어떤 혜택을 찾으시나요? OTT·영상, 음악·오디오, 도서·콘텐츠, 멤버십, "
+    "스마트기기, 추가 데이터, 페이백 중에서 말씀해 주세요."
+)
+_VAGUE_BENEFIT_PREFERENCE_RE = re.compile(
+    r"(?:부가\s*)?혜택\s*(?:이|은|을|도)?\s*(?:현재보다\s*)?(?:더\s*)?"
+    r"(?:좋(?:은|아|고|게)|괜찮(?:은|아|고)|나은|우선|중요|중심|"
+    r"많(?:은|아|고|게)|다양(?:한|해|하고)|풍부(?:한|해))",
+    re.IGNORECASE,
+)
+_BENEFIT_PREFERENCE_MARKER = "benefit_preference"
+
+
+def benefit_preference_missing(profile: UserProfile | None) -> bool:
+    """혜택의 좋고 나쁨을 판단할 사용자 기준이 아직 없는지 반환한다."""
+    return bool(
+        profile
+        and profile.needs_user_input
+        and _BENEFIT_PREFERENCE_MARKER in profile.ambiguous
+    )
+
+
+def _apply_benefit_preference_question(profile: UserProfile, query: str) -> UserProfile:
+    """주관적인 '혜택 좋음'을 임의 점수화하지 않고 원하는 유형을 확인한다."""
+    if not _VAGUE_BENEFIT_PREFERENCE_RE.search(query or ""):
+        return profile
+
+    goals = [goal for goal in profile.comparison_goals or [] if goal != "better"]
+    ambiguous = [item for item in profile.ambiguous if item != _BENEFIT_PREFERENCE_MARKER]
+    has_specific_preference = bool(
+        profile.wanted_benefits or profile.wanted_benefit_categories
+    )
+    if has_specific_preference:
+        updates: dict[str, object] = {
+            "comparison_goals": goals or None,
+            "ambiguous": ambiguous,
+        }
+        if profile.followup_question == BENEFIT_PREFERENCE_QUESTION:
+            updates.update({"needs_user_input": False, "followup_question": None})
+        return profile.model_copy(update=updates)
+
+    ambiguous.append(_BENEFIT_PREFERENCE_MARKER)
+    return profile.model_copy(
+        update={
+            "comparison_goals": goals or None,
+            "ambiguous": ambiguous,
+            "needs_user_input": True,
+            "followup_question": BENEFIT_PREFERENCE_QUESTION,
+        }
+    )
 
 
 _GENERIC_REFERENCE_RE = re.compile(
@@ -402,8 +504,17 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
         _repair_reference_plan_name(
             _apply_smartchoice_usage_rule(
                 _apply_explicit_data_max(
-                    _drop_phantom_budget(
-                        llm.invoke([SystemMessage(content=prompt), *messages]), query
+                    _apply_explicit_qos_min(
+                        _apply_benefit_preference_question(
+                            _apply_explicit_qos_requirement(
+                                _drop_phantom_budget(
+                                    llm.invoke([SystemMessage(content=prompt), *messages]), query
+                                ),
+                                query,
+                            ),
+                            query,
+                        ),
+                        query,
                     ),
                     query,
                 ),
@@ -412,7 +523,7 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
             query,
         ),
     )
-    if core_signal_missing(profile):
+    if core_signal_missing(profile) and not benefit_preference_missing(profile):
         profile = profile.model_copy(
             update={
                 "needs_user_input": True,
@@ -466,6 +577,48 @@ if __name__ == "__main__":
     assert core_signal_missing(UserProfile(max_data_gb=100)) is False
     assert core_signal_missing(UserProfile(data_unlimited=False)) is False
     assert _apply_explicit_data_max(UserProfile(), "데이터 100GB이하").max_data_gb == 100
+    assert _apply_explicit_qos_min(UserProfile(), "qos가 3mbps이상인 요금제").min_qos_mbps == 3
+    assert _apply_explicit_qos_requirement(UserProfile(), "qos있는 요금제를 추천해줘").requires_qos is True
+    assert _apply_explicit_qos_requirement(UserProfile(), "QoS가 포함된 상품").requires_qos is True
+    assert _apply_explicit_qos_requirement(UserProfile(), "소진 후 속도가 있는 요금제").requires_qos is True
+    assert _apply_explicit_qos_requirement(UserProfile(), "데이터 소진 후에도 사용할 수 있는 요금제").requires_qos is True
+    assert _apply_explicit_qos_requirement(UserProfile(), "QoS는 없어도 돼").requires_qos is None
+    assert _apply_explicit_qos_requirement(
+        UserProfile(requires_qos=True), "QoS 있는 요금제\nQoS는 없어도 돼"
+    ).requires_qos is None
+    followup = _apply_explicit_qos_requirement(
+        _apply_explicit_data_max(UserProfile(), "50GB이하 요금제 추천해줘\nqos있는 요금제를 추천해줘"),
+        "50GB이하 요금제 추천해줘\nqos있는 요금제를 추천해줘",
+    )
+    assert followup.max_data_gb == 50
+    assert followup.requires_qos is True
+
+    vague_benefit = _apply_benefit_preference_question(
+        UserProfile(reference_plan_name="초이스90", comparison_goals=["better"]),
+        "현재 요금제보다 혜택이 더 괜찮은 요금제를 추천해줘",
+    )
+    assert vague_benefit.needs_user_input is True
+    assert vague_benefit.followup_question == BENEFIT_PREFERENCE_QUESTION
+    assert vague_benefit.comparison_goals is None
+    assert _BENEFIT_PREFERENCE_MARKER in vague_benefit.ambiguous
+    assert _apply_benefit_preference_question(
+        UserProfile(reference_plan_name="초이스90"), "혜택을 우선해서 추천해줘"
+    ).needs_user_input is True
+    assert _apply_benefit_preference_question(
+        UserProfile(reference_plan_name="초이스90"), "혜택이 많은 순으로 추천해줘"
+    ).needs_user_input is True
+
+    specific_benefit = _apply_benefit_preference_question(
+        UserProfile(
+            reference_plan_name="초이스90",
+            wanted_benefit_categories=["영상/OTT"],
+            comparison_goals=["better"],
+        ),
+        "현재보다 OTT 혜택이 좋은 요금제를 추천해줘",
+    )
+    assert specific_benefit.needs_user_input is False
+    assert specific_benefit.comparison_goals is None
+    assert specific_benefit.wanted_benefit_categories == ["영상/OTT"]
 
     # hard_constraints 는 값이 있는 필터 필드만
     normalized = _normalize_profile(UserProfile(budget_max_won=30000, voice_unlimited=True))

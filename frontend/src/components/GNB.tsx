@@ -4,14 +4,10 @@ export function GNB({
   currentScreen,
   onNavigate,
   hasReport,
-  compareCount,
-  onOpenCompare,
 }: {
   currentScreen: ScreenType;
   onNavigate: (s: ScreenType) => void;
   hasReport: boolean;
-  compareCount: number;
-  onOpenCompare: () => void;
 }) {
   return (
     <nav className="gnb">
@@ -50,16 +46,6 @@ export function GNB({
               onClick={() => onNavigate('s-browse')}
             >
               전체 요금제
-            </button>
-          </li>
-          <li>
-            <button
-              disabled={compareCount < 2}
-              title={compareCount < 2 ? '전체 요금제에서 2건 이상 선택하세요' : ''}
-              onClick={onOpenCompare}
-            >
-              비교함
-              {compareCount > 0 && <span className="gnb-badge num">{compareCount}</span>}
             </button>
           </li>
           <li>
