@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import re
 import threading
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +22,38 @@ BENEFITS_CSV = DATA_DIR / "통신요금제_혜택상세_최종.csv"
 
 _plans = None
 _load_lock = threading.Lock()
+
+
+_CARRIER_NAME_PREFIXES = (
+    "kt엠모바일",
+    "lg헬로비전",
+    "sk텔링크",
+    "lg유플러스",
+    "lguplus",
+    "유플러스",
+    "skt",
+    "kt",
+    "lg",
+)
+
+
+def normalize_plan_name(value: object) -> str:
+    """공백·기호·통신사 접두어 차이를 제거한 요금제명 비교 키."""
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
+    text = text.replace("플러스", "+")
+    text = re.sub(r"요금제\s*$", "", text)
+    compact = re.sub(r"[^0-9a-z가-힣]+", "", text)
+    for prefix in _CARRIER_NAME_PREFIXES:
+        if compact.startswith(prefix) and len(compact) > len(prefix) + 2:
+            compact = compact[len(prefix):]
+            break
+    return compact
+
+
+def _plan_name_stem(value: object) -> str:
+    """혜택 괄호·제휴 suffix를 뺀 기본 상품명 키."""
+    base = re.split(r"[(_]", str(value or ""), maxsplit=1)[0]
+    return normalize_plan_name(base)
 
 
 BENEFIT_CATEGORY_ALIASES = {
@@ -236,16 +270,11 @@ def filter_candidates(profile: dict) -> list[dict]:
     if profile.get("data_unlimited") is True:
         df = df[df["data_unlimited"]]
 
-    # 사용자가 직접 말한 최소량과 이용 패턴에서 계산한 예상량 중 큰 값을 적용한다.
-    # estimated_monthly_data_gb는 파생값이므로 hard_constraints에는 넣지 않지만,
-    # 후보 선정 단계에서는 실제로 감당할 수 있는 기본 데이터량으로 먼저 거른다.
-    data_targets = [
-        float(profile[field])
-        for field in ("min_data_gb", "estimated_monthly_data_gb")
-        if profile.get(field) is not None
-    ]
-    if data_targets:
-        required_data_gb = max(data_targets)
+    # 사용자가 직접 말한 "NGB 이상"만 Hard Constraint로 적용한다.
+    # "NGB 정도"와 앱 사용량 추정값은 목표치이므로 후보를 제거하지 않고
+    # mcda.py에서 부족/과잉 공급 적합도로 평가한다.
+    if profile.get("min_data_gb") is not None:
+        required_data_gb = float(profile["min_data_gb"])
         # 무제한은 data_gb가 비어 있어 수치 비교가 성립하지 않는다 → 예상량을 충족으로 본다.
         df = df[df["data_unlimited"] | (df["data_gb"] >= required_data_gb)]
 
@@ -338,7 +367,7 @@ def all_plans() -> list[dict]:
 
 
 def find_plans_by_name(plan_name_query: str) -> list[dict]:
-    """정확 일치를 우선하고 없으면 부분 일치로 기준 요금제를 찾는다."""
+    """원문·정규화 이름의 정확 일치를 우선하고 없으면 부분 일치한다."""
     load()
     query = plan_name_query.strip().casefold()
     if not query:
@@ -346,9 +375,40 @@ def find_plans_by_name(plan_name_query: str) -> list[dict]:
 
     names = _plans["plan_name"].fillna("").astype(str)
     exact = _plans[names.str.strip().str.casefold() == query]
-    matched = exact if not exact.empty else _plans[
-        names.str.contains(plan_name_query.strip(), case=False, na=False, regex=False)
-    ]
+    if not exact.empty:
+        return [_row_summary(row) for _, row in exact.iterrows()]
+
+    query_key = normalize_plan_name(plan_name_query)
+    if not query_key:
+        return []
+    name_keys = names.map(normalize_plan_name)
+    stem_keys = names.map(_plan_name_stem)
+    normalized_exact = _plans[(name_keys == query_key) | (stem_keys == query_key)]
+    if not normalized_exact.empty:
+        return [_row_summary(row) for _, row in normalized_exact.iterrows()]
+
+    raw_contains = names.str.contains(plan_name_query.strip(), case=False, na=False, regex=False)
+    normalized_contains = name_keys.str.contains(query_key, regex=False) | stem_keys.str.contains(
+        query_key, regex=False
+    )
+    matched = _plans[raw_contains | normalized_contains]
+    return [_row_summary(row) for _, row in matched.iterrows()]
+
+
+def find_plans_mentioned_in_text(text: str) -> list[dict]:
+    """문장 안에 실제 DB 요금제명이 있으면 가장 구체적인 이름으로 찾는다."""
+    load()
+    text_key = normalize_plan_name(text)
+    if not text_key:
+        return []
+
+    names = _plans["plan_name"].fillna("").astype(str)
+    stems = names.map(_plan_name_stem)
+    mentioned = stems.map(lambda key: len(key) >= 4 and key in text_key)
+    if not mentioned.any():
+        return []
+    longest = max(stems[mentioned].map(len))
+    matched = _plans[mentioned & (stems.map(len) == longest)]
     return [_row_summary(row) for _, row in matched.iterrows()]
 
 
@@ -430,6 +490,11 @@ def slim(rows: list[dict]) -> list[dict]:
 
 
 if __name__ == "__main__":
+    assert normalize_plan_name("SKT 초이스 90 요금제") == normalize_plan_name("초이스90")
+    assert normalize_plan_name("베스트 99") == normalize_plan_name("베스트99")
+    assert find_plans_by_name("쉐이크 5G 110GB+")
+    assert find_plans_by_name("KT엠모바일 모두다 맘껏 100GB+")
+
     c = filter_candidates(
         {"budget_max_won": 50000, "data_unlimited": True}
     )
@@ -439,10 +504,10 @@ if __name__ == "__main__":
     # 무제한은 data_gb 가 비어 있어도 최소량 조건에서 탈락하지 않는다
     assert len(filter_candidates({"data_unlimited": True, "min_data_gb": 30})) > 0
 
-    # 이용 패턴 추정값도 명시 최소량과 함께 후보 필터에 적용한다.
+    # 이용 패턴 추정값은 목표 적합도이므로 단독으로 후보를 제거하지 않는다.
     estimated = filter_candidates({"estimated_monthly_data_gb": 64.4})
     assert estimated
-    assert all(x["data_unlimited"] or (x.get("data_gb") or 0) >= 64.4 for x in estimated)
+    assert any(not x["data_unlimited"] and (x.get("data_gb") or 0) < 64.4 for x in estimated)
     stricter = filter_candidates({"min_data_gb": 100, "estimated_monthly_data_gb": 64.4})
     assert all(x["data_unlimited"] or (x.get("data_gb") or 0) >= 100 for x in stricter)
     capped = filter_candidates({"max_data_gb": 100})

@@ -33,6 +33,10 @@ class UserProfile(BaseModel):
     budget_min_won: Optional[int] = Field(None, description="월 예산 하한(원). 언급 없으면 null")
     budget_max_won: Optional[int] = Field(None, description="월 예산 상한(원). 언급 없으면 null")
     min_data_gb: Optional[float] = Field(None, description="최소 데이터량(GB)")
+    target_data_gb: Optional[float] = Field(
+        None,
+        description="목표 데이터량(GB). '100GB 정도'처럼 근접 적합도를 계산할 때 사용",
+    )
     max_data_gb: Optional[float] = Field(
         None, description="최대 데이터량(GB). 무제한은 상한 조건에서 제외"
     )

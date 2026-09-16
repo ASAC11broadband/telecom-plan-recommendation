@@ -7,7 +7,11 @@ import re
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
-from ..data import normalize_benefit_category
+from ..data import (
+    find_plans_by_name,
+    find_plans_mentioned_in_text,
+    normalize_benefit_category,
+)
 from ..schemas import UserProfile
 from ..state import PipelineState, feedback_block, get_llm, user_query
 from ..usage import estimate_monthly_data_gb
@@ -50,6 +54,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - N만원 이하/이상 → budget_max_won/budget_min_won
 - N만원 정도·내외·안팎 → N만원 ±5,000원
 - 데이터 NGB 이상은 min_data_gb, 데이터 NGB 이하·미만·최대 NGB는 max_data_gb에 저장한다.
+  데이터 NGB 정도·쯤·내외·전후처럼 목표량을 말하면 target_data_gb에 저장하고
+  min_data_gb에는 복사하지 않는다.
   데이터 상한을 요청하면 무제한 요금제는 제외한다. QoS·소진 후 NMbps 이상, 테더링 NGB 이상은 각각 최소 필드에 저장한다.
 - 데이터 무제한은 data_unlimited=true, 통화 N분 이상과 통화 무제한은 해당 통화 필드에 저장한다.
 - 무제한 상품을 명시적으로 제외할 때만 해당 unlimited 필드를 false로 저장한다.
@@ -121,6 +127,11 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 
 [기준 요금제·비교]
 - 현재·기존 요금제 이름은 reference_plan_name에 저장한다.
+- 실제 상품 고유명사가 있을 때만 reference_plan_name을 채운다.
+  '월 5만원에 데이터 50GB 사용 중', '3만원짜리', '데이터 무제한 요금제'처럼
+  현재 스펙만 설명한 문장은 상품명이 아니므로 reference_plan_name=null이다.
+- 상품명의 숫자·5G/LTE·GB·+까지 생략하지 말고 사용자가 말한 전체 이름을 보존한다.
+  예: 'SKT 다이렉트5G 69'의 reference_plan_name은 '다이렉트5G 69'다.
 - 현재 요금제명 앞의 통신사명은 기준 상품 식별 정보일 뿐 새 상품의 carrier 조건으로 복사하지 않는다.
   예: '현재 KT 초이스90보다 싼 것' → reference_plan_name='초이스90', comparison_goals=['cheaper']
 - 사용자가 현재 가격·데이터·통화·QoS를 직접 말하면 reference_* 필드에 저장한다.
@@ -255,6 +266,41 @@ def _apply_explicit_data_max(profile: UserProfile, query: str) -> UserProfile:
     return profile.model_copy(update={"max_data_gb": max_data_gb})
 
 
+_GENERIC_REFERENCE_RE = re.compile(
+    r"(?:\d[\d,.]*\s*(?:원|만원|천원|g|gb|기가|분|mbps)|"
+    r"데이터|통화|무제한|짜리|가격|요금)",
+    re.IGNORECASE,
+)
+_REFERENCE_SPEC_FIELDS = (
+    "reference_fee_won",
+    "reference_data_gb",
+    "reference_data_unlimited",
+    "reference_voice_minutes",
+    "reference_voice_unlimited",
+    "reference_qos_mbps",
+)
+
+
+def _repair_reference_plan_name(profile: UserProfile, query: str) -> UserProfile:
+    """스펙 설명을 상품명으로 오인한 값을 버리고 문장 속 실제 DB명을 복구한다."""
+    name = (profile.reference_plan_name or "").strip()
+    if not name:
+        return profile
+
+    direct = find_plans_by_name(name)
+    mentioned = find_plans_mentioned_in_text(query)
+    has_reference_spec = any(
+        getattr(profile, field) is not None for field in _REFERENCE_SPEC_FIELDS
+    )
+    if has_reference_spec and _GENERIC_REFERENCE_RE.search(name) and not mentioned:
+        return profile.model_copy(update={"reference_plan_name": None})
+    if len(direct) == 1:
+        return profile
+    if mentioned and (not direct or len(direct) > 1):
+        return profile.model_copy(update={"reference_plan_name": mentioned[0]["plan_name"]})
+    return profile
+
+
 def _normalize_benefit_requests(profile: UserProfile) -> UserProfile:
     """예전 방식으로 추출된 '음악'·'OTT'를 카테고리 요청으로 이관한다."""
     categories = list(profile.wanted_benefit_categories or [])
@@ -321,6 +367,7 @@ def core_signal_missing(profile: UserProfile | None) -> bool:
         value is not None
         for value in (
             profile.min_data_gb,
+            profile.target_data_gb,
             profile.max_data_gb,
             profile.data_unlimited,
             profile.estimated_monthly_data_gb,
@@ -352,15 +399,18 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     llm = get_llm(config).with_structured_output(UserProfile)
     query = user_query(state)
     profile = _normalize_profile(
-        _apply_smartchoice_usage_rule(
-            _apply_explicit_data_max(
-                _drop_phantom_budget(
-                    llm.invoke([SystemMessage(content=prompt), *messages]), query
+        _repair_reference_plan_name(
+            _apply_smartchoice_usage_rule(
+                _apply_explicit_data_max(
+                    _drop_phantom_budget(
+                        llm.invoke([SystemMessage(content=prompt), *messages]), query
+                    ),
+                    query,
                 ),
                 query,
             ),
             query,
-        )
+        ),
     )
     if core_signal_missing(profile):
         profile = profile.model_copy(

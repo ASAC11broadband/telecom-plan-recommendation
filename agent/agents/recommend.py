@@ -78,8 +78,13 @@ def _apply_comparison(
     if "cheaper" in goals and reference.get("discounted_fee") is not None:
         result = [p for p in result if p["discounted_fee"] < reference["discounted_fee"]]
     if "more_data" in goals:
-        reference_data = _data_value(reference)
-        result = [p for p in result if _data_value(p) > reference_data]
+        if reference.get("data_unlimited"):
+            # 무제한보다 수치상 더 많은 데이터는 존재하지 않는다. 사용자의 의도는
+            # 데이터 수준을 떨어뜨리지 않는 대안을 찾는 것으로 보고 무제한끼리 비교한다.
+            result = [p for p in result if p.get("data_unlimited")]
+        else:
+            reference_data = _data_value(reference)
+            result = [p for p in result if _data_value(p) > reference_data]
     if "faster_qos" in goals and reference.get("qos_mbps") is not None:
         result = [p for p in result if (p.get("qos_mbps") or 0) > reference["qos_mbps"]]
     if "better" in goals:
@@ -209,6 +214,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
         ranking_candidates,
         profile.priorities,
         comparison_goals=profile.comparison_goals,
+        profile=profile,
     )
     ranked = [
         ScoredPlan(
