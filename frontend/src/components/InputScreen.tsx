@@ -2,10 +2,22 @@ import { useState } from 'react';
 import { ChatMessage, RecommendResponse, ScreenType } from '../types';
 
 const QUICK = [
-  '월 3만원 이하 가성비',
-  '데이터 무제한 (OTT/동영상)',
-  '통화 위주 요금제',
-  '통신 3사 가족결합 기준',
+  {
+    label: '월 3만원 이하 가성비인 요금제',
+    query: '월 3만원 이하인 요금제 추천해줘',
+  },
+  {
+    label: '데이터 무제한인 요금제',
+    query: '데이터 무제한인 요금제 추천해줘',
+  },
+  {
+    label: '페이백 혜택이 있고 요금이 5만원 이하인 요금제',
+    query: '페이백 혜택이 있고 요금이 5만원 이하인 요금제 추천해줘',
+  },
+  {
+    label: 'QoS 3Mbps 이상이고 요금이 3만원 이하인 요금제',
+    query: 'QoS 3Mbps 이상이고 요금이 3만원 이하인 요금제 추천해줘',
+  },
 ];
 
 const AGES = ['20대', '30대', '40대', '50대+'];
@@ -90,7 +102,7 @@ export function InputScreen({
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
             <strong style={{ fontSize: 'var(--fs-13)' }}>이용 패턴 입력</strong>
             <span style={{ fontSize: 'var(--fs-11)', color: 'var(--accent)' }}>
-              한마디 입력 시 즉시 1차 추천 및 꼬리질문 진행
+              조건 입력 시 즉시 1차 추천 및 꼬리질문 진행
             </span>
           </div>
           <div className="toggle">
@@ -137,9 +149,14 @@ export function InputScreen({
                 자주 찾는 이용 조건:
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {QUICK.map((q) => (
-                  <button key={q} className="btn btn-sm" disabled={loading} onClick={() => submit(q)}>
-                    {q}
+                {QUICK.map(({ label, query }) => (
+                  <button
+                    key={label}
+                    className="btn btn-sm"
+                    disabled={loading}
+                    onClick={() => submit(query)}
+                  >
+                    {label}
                   </button>
                 ))}
               </div>

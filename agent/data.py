@@ -289,6 +289,8 @@ def filter_candidates(profile: dict) -> list[dict]:
 
     if profile.get("min_qos_mbps") is not None:
         df = df[df["qos_mbps"] >= profile["min_qos_mbps"]]
+    if profile.get("requires_qos") is True:
+        df = df[df["qos_mbps"].notna() & (df["qos_mbps"] > 0)]
     if profile.get("min_tethering_gb") is not None:
         df = df[df["tethering_gb"] >= profile["min_tethering_gb"]]
 
