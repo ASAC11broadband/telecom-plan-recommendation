@@ -1,10 +1,10 @@
 """SMAA-2 기반 다기준 요금제 랭킹.
 
 가중치 표본은 더 이상 무작위(감마분포)로 지어내지 않는다. `weight_bootstrap.json`에
-실제 알뜰폰 가입자 데이터(로그 시장점유율 ~ 변환 Ridge 표준화 계수)를 부트스트랩
-300회 돌려 뽑은 가중치 300세트가 들어있다 — 도출 과정은
-notebooks/linear_spec_diagnostic.ipynb 참고. 우선순위/비교 목표가 있으면 그 표본
-각각에 가산 후 재정규화해서 반영한다.
+실제 알뜰폰 가입자 데이터의 Ridge 표준화 계수를 부트스트랩 300회 돌려 뽑은
+가중치 300세트가 들어있다. 이 값은 시장 중요도의 사전분포로 사용하고, 각 후보의
+Feature 값은 사용자 요구 적합도(0~1)로 계산한다. 우선순위/비교 목표가 있으면 각
+가중치 표본에 가산 후 재정규화한다.
 
 문자(sms)는 축에서 뺐다. 통화 무제한과 98.1% 겹치는 묶음 상품이라 같이 넣으면 두
 계수가 서로 상쇄하며 부호가 뒤집힌다(부트스트랩 상관 -0.895). 통화 축이 이미 재고
@@ -28,6 +28,8 @@ _PRIORITY_UNIT = 10.0 / len(CRITERIA)
 _GOAL_UNIT = 12.0 / len(CRITERIA)
 
 _WEIGHT_DATA_PATH = Path(__file__).resolve().parent / "weight_bootstrap.json"
+_PRICE_HORIZON_MONTHS = 12
+_DATA_OVERSUPPLY_FLOOR = 0.8
 
 
 def _load_base_weights() -> list[list[float]]:
@@ -64,22 +66,125 @@ def _finite_data(plan: dict, finite_max: float) -> float:
     return finite_max * 1.25 if plan.get("data_unlimited") else float(plan.get("data_gb") or 0)
 
 
-def _finite_voice(plan: dict, finite_max: float) -> float:
-    return finite_max * 1.25 if plan.get("voice_unlimited") else float(plan.get("voice_minutes") or 0)
+def _profile_value(profile: object | dict | None, field: str):
+    if profile is None:
+        return None
+    if isinstance(profile, dict):
+        return profile.get(field)
+    return getattr(profile, field, None)
 
 
-def _utility_rows(candidates: list[dict]) -> list[list[float]]:
+def _effective_monthly_fee(plan: dict, months: int = _PRICE_HORIZON_MONTHS) -> float:
+    """프로모션 종료 후 정상가까지 포함한 비교기간 평균 월 납부액."""
+    discounted_raw = plan.get("discounted_fee")
+    regular_raw = plan.get("monthly_fee")
+    discounted = float(regular_raw or 0) if discounted_raw is None else float(discounted_raw)
+    regular = float(regular_raw) if regular_raw is not None else discounted
+    period = plan.get("discount_period_months")
+    if period is None:
+        return discounted
+    promo_months = max(0, min(int(period), months))
+    return (discounted * promo_months + regular * (months - promo_months)) / months
+
+
+def _minimum_fit(value: float, target: float | None) -> float:
+    if target is None or target <= 0:
+        return 0.5
+    return max(0.0, min(1.0, value / target))
+
+
+def _target_data_fit(value: float, target: float) -> float:
+    """목표량에서 1.0, 2배 이상에서는 0.8인 부족/과잉 비대칭 적합도."""
+    if target <= 0:
+        return 0.5
+    ratio = max(0.0, value) / target
+    if ratio <= 1.0:
+        return ratio
+    if ratio >= 2.0:
+        return _DATA_OVERSUPPLY_FLOOR
+    return 1.0 - (1.0 - _DATA_OVERSUPPLY_FLOOR) * (ratio - 1.0)
+
+
+def _benefit_fit(plan: dict, profile: object | dict | None) -> float:
+    wanted_names = list(_profile_value(profile, "wanted_benefits") or [])
+    wanted_categories = list(_profile_value(profile, "wanted_benefit_categories") or [])
+    requested = len(wanted_names) + len(wanted_categories)
+    if not requested:
+        return 0.5
+
+    searchable = " | ".join(
+        [
+            str(plan.get("ott_options") or ""),
+            *(str(value) for value in plan.get("included_benefits") or []),
+            *(str(value) for value in plan.get("benefit_details") or []),
+        ]
+    ).casefold()
+    categories = {str(value).casefold() for value in plan.get("benefit_categories") or []}
+    matched_names = sum(str(value).casefold() in searchable for value in wanted_names)
+    matched_categories = sum(str(value).casefold() in categories for value in wanted_categories)
+    return (matched_names + matched_categories) / requested
+
+
+def _utility_rows(
+    candidates: list[dict], profile: object | dict | None = None
+) -> list[list[float]]:
     data_max = max((float(p.get("data_gb") or 0) for p in candidates), default=1.0) or 1.0
-    voice_max = max((float(p.get("voice_minutes") or 0) for p in candidates), default=1.0) or 1.0
+
+    fees = [_effective_monthly_fee(p) for p in candidates]
+    budget_max = _profile_value(profile, "budget_max_won")
+    if budget_max is not None and float(budget_max) > 0:
+        price_utility = [
+            max(0.0, min(1.0, math.exp(-math.log(2.0) * fee / float(budget_max))))
+            for fee in fees
+        ]
+    else:
+        # 예산이 없을 때도 단기 프로모션에 끌리지 않도록 12개월 평균요금을 사용한다.
+        price_utility = _minmax([math.sqrt(max(0.0, fee)) for fee in fees], cost=True)
+
+    explicit_min_data = _profile_value(profile, "min_data_gb")
+    target_data = _profile_value(profile, "target_data_gb")
+    if target_data is None:
+        target_data = _profile_value(profile, "estimated_monthly_data_gb")
+
+    if _profile_value(profile, "data_unlimited") is True:
+        data_utility = [1.0 if p.get("data_unlimited") else 0.0 for p in candidates]
+    elif explicit_min_data is not None:
+        data_utility = [
+            1.0
+            if p.get("data_unlimited")
+            else _minimum_fit(float(p.get("data_gb") or 0), float(explicit_min_data))
+            for p in candidates
+        ]
+    elif target_data is not None and float(target_data) > 0:
+        data_utility = [
+            _DATA_OVERSUPPLY_FLOOR
+            if p.get("data_unlimited")
+            else _target_data_fit(float(p.get("data_gb") or 0), float(target_data))
+            for p in candidates
+        ]
+    else:
+        data_utility = _minmax([math.log1p(_finite_data(p, data_max)) for p in candidates])
+
+    if _profile_value(profile, "voice_unlimited") is True:
+        voice_utility = [1.0 if p.get("voice_unlimited") else 0.0 for p in candidates]
+    elif _profile_value(profile, "min_voice_minutes") is not None:
+        target_voice = float(_profile_value(profile, "min_voice_minutes"))
+        voice_utility = [
+            1.0
+            if p.get("voice_unlimited")
+            else _minimum_fit(float(p.get("voice_minutes") or 0), target_voice)
+            for p in candidates
+        ]
+    else:
+        # 요구량이 없으면 통화량이 많다는 이유만으로 순위를 바꾸지 않는다.
+        voice_utility = [0.5] * len(candidates)
+
     columns = {
-        # 가중치를 뽑은 회귀와 같은 변환을 쓴다: 가격 sqrt, 데이터 log1p. 축마다 계수
-        # 하나가 곱해지는 선형 형태라야 그 계수를 가중치로 읽을 수 있고, 변환이 다르면
-        # 가중치가 재는 축과 점수가 재는 축이 어긋난다.
-        "price": _minmax([math.sqrt(float(p.get("discounted_fee") or 0)) for p in candidates], cost=True),
-        "data": _minmax([math.log1p(_finite_data(p, data_max)) for p in candidates]),
+        "price": price_utility,
+        "data": data_utility,
         "qos": _minmax([float(p.get("qos_mbps") or 0) for p in candidates]),
-        "benefit": _minmax([float(len(p.get("included_benefits") or [])) for p in candidates]),
-        "voice": _minmax([_finite_voice(p, voice_max) for p in candidates]),
+        "benefit": [_benefit_fit(p, profile) for p in candidates],
+        "voice": voice_utility,
         "tethering": _minmax([float(p.get("tethering_gb") or 0) for p in candidates]),
     }
     return [[columns[name][i] for name in CRITERIA] for i in range(len(candidates))]
@@ -118,14 +223,15 @@ def evaluate_mcda(
     priorities: list[str] | None = None,
     *,
     comparison_goals: list[str] | None = None,
+    profile: object | dict | None = None,
 ) -> list[MCDAResult]:
-    """가중치 표본(실측 부트스트랩 60세트)별 순위를 집계해 SMAA-2 지표를 계산한다."""
+    """가중치 표본(실측 부트스트랩 300세트)별 순위를 집계해 SMAA-2 지표를 계산한다."""
     if not candidates:
         return []
     plan_ids = [str(candidate["plan_id"]) for candidate in candidates]
     if len(plan_ids) != len(set(plan_ids)):
         raise ValueError("MCDA 후보의 plan_id는 서로 달라야 합니다.")
-    utilities = _utility_rows(candidates)
+    utilities = _utility_rows(candidates, profile)
     weights = _weight_samples(priorities or [], comparison_goals or [])
     samples = len(weights)
     n = len(candidates)
@@ -187,6 +293,25 @@ if __name__ == "__main__":
     assert first == second, "같은 입력이면 결과가 재현되어야 한다(실측 데이터라 난수 없음)"
     assert rank_smaa2(first)[0].plan_id == "cheap", "가격 우선순위가 반영되어야 한다"
 
-    baseline = evaluate_mcda(sample)  # 우선순위 없음 -> 실측 60세트 그대로
+    baseline = evaluate_mcda(sample)  # 우선순위 없음 -> 실측 300세트 그대로
     assert len(baseline[0].favorable_weights) == len(CRITERIA)
+
+    fit_sample = [
+        {"plan_id": "target", "discounted_fee": 30_000, "monthly_fee": 30_000, "data_gb": 100,
+         "voice_minutes": 300, "included_benefits": ["넷플릭스"]},
+        {"plan_id": "over", "discounted_fee": 30_000, "monthly_fee": 30_000, "data_gb": 150,
+         "voice_minutes": 500, "included_benefits": []},
+        {"plan_id": "unlimited", "discounted_fee": 30_000, "monthly_fee": 30_000,
+         "data_unlimited": True, "voice_unlimited": True, "included_benefits": ["넷플릭스"]},
+    ]
+    rows = _utility_rows(
+        fit_sample,
+        {"target_data_gb": 100, "min_voice_minutes": 300, "wanted_benefits": ["넷플릭스"]},
+    )
+    data_index, benefit_index, voice_index = (
+        CRITERIA.index("data"), CRITERIA.index("benefit"), CRITERIA.index("voice")
+    )
+    assert [round(row[data_index], 2) for row in rows] == [1.0, 0.9, 0.8]
+    assert [row[benefit_index] for row in rows] == [1.0, 0.0, 1.0]
+    assert [row[voice_index] for row in rows] == [1.0, 1.0, 1.0]
     print("self-check ok: SMAA-2 ranking (bootstrap weights)")
