@@ -94,7 +94,7 @@ def _mvno_features() -> pd.DataFrame:
     d["tether_gb"] = d.tethering_gb.fillna(0)
     d["voice_min"] = np.where(d.voice_unlimited, 1000, d.voice_minutes.fillna(0)).clip(0, 1000)
     d["sms_cnt"] = np.where(d.sms_unlimited, 1000, d.sms_count.fillna(0)).clip(0, 1000)
-    ott = benefits[benefits.benefit_category == "OTT/구독"]
+    ott = benefits[benefits.benefit_service.isin(price_map)]  # 카테고리명이 바뀌어(2026-09-16 크롤러 수정) 서비스명 매칭으로 변경
     services = d.plan_id.map(ott.groupby("plan_id")["benefit_service"].apply(lambda v: sorted(set(v.dropna()))))
     d["ott_value"] = services.apply(lambda s: sum(price_map.get(x, 0) for x in s) if isinstance(s, list) else 0)
     return d
