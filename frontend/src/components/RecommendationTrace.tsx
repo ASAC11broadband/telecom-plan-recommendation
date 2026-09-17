@@ -63,6 +63,7 @@ export function RecommendationTrace({ result }: { result: RecommendResponse }) {
           {trace.referenceBaselineApplied &&
             ' 지금 쓰시는 요금제의 데이터 수준보다 낮아지지 않도록 기준을 잡았습니다.'}
         </p>
+        {trace.diversification && <p className="trace-note">{trace.diversification}</p>}
       </div>
 
       {conditions.length > 0 && (

@@ -8,7 +8,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from agent.data import all_plans, filter_candidates
 from agent.schemas import UserProfile, ScoredPlan, Evaluation
-from agent.agents.recommend import recommend_node, _apply_comparison, _reference_verdict
+from agent.agents.recommend import (recommend_node, _apply_comparison, _reference_verdict,
+                                    _dedupe_identical_offers, _diverse_selection, _offer_character)
 from agent.agents.evaluation import _ranking_errors, evaluation_node
 from agent.agents.profiling import _apply_user_age
 from backend.main import app, _llm_calls, LLM_CALLS_PER_MINUTE
@@ -170,6 +171,54 @@ class ServiceProcessTests(unittest.TestCase):
             response = self.client.post('/api/recommend', json={'messages': [{'role': 'user', 'content': '현재 5만원'}]})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['referenceVerdict']['status'], 'undetermined')
+
+    def test_same_name_different_offer_is_not_deleted(self):
+        """이름이 같아도 가입 조건·혜택이 다르면 별개 상품이다. 완전히 같은 행만 합친다."""
+        base = {'plan_name': '초이스90', 'carrier': 'KT', 'carrier_type': 'MNO', 'host_mno': 'KT',
+                'mvno_brand': '', 'network_gen': '5G', 'data_gb': 90.0, 'data_unlimited': False,
+                'voice_minutes': None, 'voice_unlimited': True, 'included_benefits': ['A'],
+                'age_condition': '', 'discounted_fee': 90000}
+        youth = {**base, 'age_condition': '만 34세 이하', 'included_benefits': ['A', 'B']}
+        same_but_pricier = {**base, 'discounted_fee': 95000}
+        kept = _dedupe_identical_offers([base, youth, same_but_pricier])
+        self.assertEqual(len(kept), 2, [p['age_condition'] for p in kept])
+        self.assertEqual(sorted(p['discounted_fee'] for p in kept), [90000, 90000])
+
+        # 실데이터: 예전 이름 기준 묶기보다 살아남는 행이 많아야 한다
+        names_only = len({r['plan_name'] for r in self.rows})
+        self.assertGreater(len(_dedupe_identical_offers(self.rows)), names_only)
+
+    def test_top5_does_not_repeat_the_same_kind_of_plan(self):
+        """한 사업자의 비슷한 라인업이 상위를 나눠 먹지 않는다. 다만 억지로 채우지도 않는다."""
+        from agent.mcda import evaluate_mcda, rank_smaa2
+        profile = UserProfile(budget_max_won=30000, min_data_gb=20.0, user_age=30,
+                              hard_constraints=['budget_max_won', 'min_data_gb'])
+        ranking = _dedupe_identical_offers(filter_candidates(profile.model_dump()))
+        by_id = {c['plan_id']: c for c in ranking}
+        ordered = rank_smaa2(evaluate_mcda(ranking, profile.priorities, profile=profile))
+
+        picked = _diverse_selection(ordered, by_id)
+        self.assertEqual(len(picked), 5)
+        characters = [_offer_character(by_id[d.plan_id]) for d in picked]
+        self.assertEqual(len(set(characters)), 5, characters)
+        # 변경 전(단순 상위 5)은 성격이 겹쳤다 — 이 테스트가 지키려는 회귀 지점이다
+        self.assertLess(len({_offer_character(by_id[d.plan_id]) for d in ordered[:5]}), 5)
+        # 순위 정합성과 중복 추천 검증을 그대로 통과해야 한다
+        ranks = [d.smaa2_expected_rank for d in picked]
+        self.assertEqual(ranks, sorted(ranks))
+        names = [by_id[d.plan_id]['plan_name'] for d in picked]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_diversity_never_invents_choices_it_does_not_have(self):
+        """성격이 겹치는 후보뿐이면 칸을 억지로 만들지 않고 기대순위대로 채운다."""
+        from agent.mcda import MCDAResult
+        same = {'carrier': 'A', 'data_gb': 20.0, 'data_unlimited': False, 'data_tier': 'capped'}
+        by_id = {str(i): {**same, 'plan_id': str(i), 'plan_name': f'요금제{i}'} for i in range(7)}
+        ordered = [MCDAResult(plan_id=str(i), smaa2_first_rank_acceptability=0.0,
+                              smaa2_expected_rank=float(i + 1), smaa2_score=100 - i,
+                              favorable_weights=()) for i in range(7)]
+        picked = _diverse_selection(ordered, by_id)
+        self.assertEqual([d.plan_id for d in picked], ['0', '1', '2', '3', '4'])
 
     def test_manual_current_plan_no_longer_crashes_api(self):
         state = {'profile': UserProfile(reference_fee_won=50000), 'reference': {'discounted_fee': 50000},

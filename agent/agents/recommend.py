@@ -217,16 +217,98 @@ def _similarity_distance(plan: dict, reference: dict) -> float:
     return distance
 
 
-def _dedupe_by_name(candidates: list[dict]) -> list[dict]:
-    """같은 요금제의 가입조건 변형이 순위를 나눠 먹지 않게 이름당 하나만 남긴다.
+# 사용자가 상품을 고를 때 실제로 보고 갈라지는 값들. 이게 다르면 다른 상품이다.
+_OFFER_FIELDS = (
+    "plan_name",
+    "age_condition",
+    "carrier",
+    "carrier_type",
+    "host_mno",
+    "mvno_brand",
+    "network_gen",
+    "data_gb",
+    "data_unlimited",
+    "voice_minutes",
+    "voice_unlimited",
+)
 
-    plan_id 는 다르지만 plan_name 이 같은 행(예: age_condition 만 다른 초이스90)이
-    상위 5개를 전부 채우는 것을 막는다. 같은 이름이면 실납부액이 싼 쪽을 남긴다.
+
+def _offer_key(plan: dict) -> tuple:
+    """같은 상품의 같은 조건이면 같은 키. 요금은 넣지 않는다(싼 쪽을 남기려고)."""
+    return (
+        *(str(plan.get(field)) for field in _OFFER_FIELDS),
+        tuple(sorted(str(value) for value in plan.get("included_benefits") or [])),
+    )
+
+
+def _dedupe_identical_offers(candidates: list[dict]) -> list[dict]:
+    """가입 조건·혜택·망까지 똑같은 중복 행만 합친다. 남기는 것은 실납부액이 싼 쪽.
+
+    예전에는 plan_name 하나로만 묶었다. 그러면 이름이 같다는 이유로 실제로 다른 상품이
+    사라진다 — 동명 그룹 200개(569행) 중 지워지던 369행을 실측해 보니 313행이
+    가입 조건·포함 혜택·망·데이터가 다른 별개 상품이었다. 혜택이 하나 더 많은 청년 전용
+    상품이 같은 요금인데도 조용히 빠지고 있었다.
+
+    이름이 같은 변형이 상위 5개를 나눠 먹는 문제는 여기서 지워서 막는 게 아니라
+    _diverse_selection 이 고를 때 막는다. 후보에서 없애면 그 상품은 아예 볼 수 없다.
     """
-    best: dict[str, dict] = {}
+    best: dict[tuple, dict] = {}
     for plan in sorted(candidates, key=lambda p: p["discounted_fee"]):
-        best.setdefault(plan["plan_name"], plan)
+        best.setdefault(_offer_key(plan), plan)
     return list(best.values())
+
+
+# 데이터 제공량을 '체감이 갈리는' 구간으로만 나눈다. 같은 구간이면 고르는 기준이 사실상 같다.
+_DATA_BANDS = (3, 10, 20, 50, 100, 200)
+
+
+def _data_band(plan: dict) -> str:
+    if plan.get("data_unlimited"):
+        return "unlimited"
+    gb = float(plan.get("data_gb") or 0)
+    return str(next((index for index, edge in enumerate(_DATA_BANDS) if gb < edge), len(_DATA_BANDS)))
+
+
+def _offer_character(plan: dict) -> tuple:
+    """'어떤 성격의 선택지인가'. 사업자·데이터 구간·소진 후 등급이 같으면 같은 성격으로 본다."""
+    return (str(plan.get("carrier")), _data_band(plan), str(plan.get("data_tier")))
+
+
+def _diverse_selection(ordered: list, by_id: dict[str, dict], limit: int = 5) -> list:
+    """순위를 지키면서, 성격이 겹치는 상품이 자리를 나눠 먹지 않게 고른다.
+
+    한 사업자의 비슷한 라인업이 상위를 채우던 문제를 막는다(실측: 3만원 이하 20GB 이상
+    요청에서 2·3·4위가 모두 같은 사업자의 20GB 상품이었다).
+
+    성격 분류를 억지로 채우지는 않는다. 겹치지 않는 후보가 모자라면 미뤄 둔 후보를
+    기대순위 순서대로 그냥 채운다. '절약형·데이터형·혜택형' 같은 칸을 만들지 않는다.
+    같은 상품명이 두 번 나오는 것만은 끝까지 막는다(코드 검증이 중복 추천으로 잡는다).
+    """
+    picked, deferred = [], []
+    seen_names, seen_characters = set(), set()
+    for decision in ordered:
+        plan = by_id[decision.plan_id]
+        name = plan["plan_name"]
+        character = _offer_character(plan)
+        if name in seen_names or character in seen_characters:
+            deferred.append(decision)
+            continue
+        seen_names.add(name)
+        seen_characters.add(character)
+        picked.append(decision)
+        if len(picked) == limit:
+            return picked
+
+    for decision in deferred:
+        name = by_id[decision.plan_id]["plan_name"]
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        picked.append(decision)
+        if len(picked) == limit:
+            break
+    # 채우면서 순서가 흐트러졌으므로 기대순위로 되돌린다(평가가 순위 정합성을 본다).
+    return sorted(picked, key=lambda decision: decision.smaa2_expected_rank)
 
 
 def _shortlist(
@@ -336,7 +418,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             "messages": [AIMessage(content="조건을 만족하는 요금제가 없습니다.", name="recommend")],
         }
 
-    ranking_candidates = _dedupe_by_name(candidates)
+    ranking_candidates = _dedupe_identical_offers(candidates)
     by_id = {candidate["plan_id"]: candidate for candidate in ranking_candidates}
     decisions = evaluate_mcda(
         ranking_candidates,
@@ -357,7 +439,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             expected_rank=decision.smaa2_expected_rank,
             first_rank_acceptability=decision.smaa2_first_rank_acceptability,
         )
-        for decision in rank_smaa2(decisions)[:5]
+        for decision in _diverse_selection(rank_smaa2(decisions), by_id)
     ]
 
     return {
@@ -368,7 +450,14 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             "shownCount": len(ranked),
             "rankingProfile": ranking_profile.model_dump(exclude_none=True),
             "referenceBaselineApplied": ranking_profile is not profile,
-            "deduplication": "동일 상품명은 현재 할인가가 가장 낮은 1건만 순위 계산",
+            "deduplication": (
+                "가입 조건·혜택·망까지 같은 중복 행만 1건으로 합침(현재 할인가가 낮은 쪽). "
+                "이름이 같아도 조건이 다르면 별개 상품으로 남김"
+            ),
+            "diversification": (
+                "상위 5개는 사업자·데이터 구간·소진 후 등급이 겹치지 않게 고름. "
+                "겹치지 않는 후보가 모자라면 기대순위 순서로 채움"
+            ),
         },
         "ranked": ranked,
         "reference": reference,

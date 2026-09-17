@@ -154,6 +154,8 @@ export interface RecommendResponse {
     rankingProfile?: Profile;
     referenceBaselineApplied?: boolean;
     deduplication?: string;
+    /** 상위 5개를 어떤 기준으로 겹치지 않게 골랐는지. */
+    diversification?: string;
     elapsedSeconds: number;
     evaluationAttempts: number;
   };

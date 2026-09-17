@@ -1,4 +1,4 @@
-# HANDOFF — 설명 검증 실패 / 비용 기준 통일 / 혜택 왜곡 / 필수·선호 분리 / 현재 요금제 유지 판정
+# HANDOFF — 설명 검증 / 비용 기준 통일 / 혜택 왜곡 / 필수·선호 / 유지 판정 / 비슷한 추천 완화
 
 작업일: 2026-09-18
 브랜치: `fix/plan`
@@ -120,6 +120,55 @@
 - 프롬프트에 "필수 조건이라는 이유로 같은 축을 `priorities`에도 넣지 마라"를 명시했습니다.
   가중치 표본에 대한 기존 우선순위 보정(`_boosted`, `_MAX_BOOSTED_SHARE`)은 그대로 씁니다.
 
+### 후순위 2 — 비슷한 추천 반복 완화
+
+**먼저 점검했습니다.** 기존 `_dedupe_by_name`은 `plan_name` 하나로만 묶어 이름이 같으면 지웠습니다.
+실측 결과 그게 지우던 **369행 중 313행이 실제로 다른 상품**이었습니다.
+
+| 동명 그룹이 갈리는 축 | 그룹 수 |
+|---|---|
+| 포함 혜택 | 101 |
+| 가입 조건(age_condition) | 97 |
+| 사업자 유형·브랜드 | 38 |
+| 망(host_mno) | 30 |
+| 데이터 제공량 | 32 |
+| 요금만 다름 | 54 |
+
+(전체 2,759행 / 고유 상품명 2,390 / 동명 그룹 200개 569행)
+예: `초이스 더블 유튜브 프리미엄+넷플릭스`는 같은 90,000원인데 **혜택이 하나 더 많은 청년 전용
+버전이 조용히 지워지고** 있었습니다.
+
+**고친 방식 — 지우는 자리와 고르는 자리를 분리했습니다.**
+
+1. `_dedupe_identical_offers` (후보 정리): 상품명·가입 조건·사업자·망·데이터·통화·포함 혜택까지
+   **전부 같은 중복 행만** 1건으로 합칩니다(실납부액이 싼 쪽). 이름이 같아도 조건이 다르면 남깁니다.
+   후보에서 없애면 그 상품은 화면에서 아예 볼 수 없기 때문입니다.
+2. `_diverse_selection` (상위 5개 선정): **사업자 · 데이터 구간 · 소진 후 등급**이 겹치는 상품이
+   자리를 나눠 먹지 않게 고릅니다. 데이터 구간은 `3/10/20/50/100/200GB` 경계입니다.
+   - 성격 분류를 **억지로 채우지 않습니다.** 겹치지 않는 후보가 모자라면 미뤄 둔 후보를
+     기대순위 순서대로 그냥 채웁니다. '절약형·데이터형·혜택형' 같은 칸은 만들지 않습니다.
+   - 같은 상품명이 두 번 나오는 것만은 끝까지 막습니다(코드 검증이 중복 추천으로 잡습니다).
+   - 마지막에 기대순위로 다시 정렬해 순위 정합성 검증을 그대로 통과합니다.
+3. `ranked`를 바꾸므로 **카드와 리포트가 같은 목록을 씁니다.** 카드 수만 달라지는 일은 없습니다.
+   화면의 "어떻게 이 결과가 나왔나요?"에 선정 기준 문구(`trace.diversification`)를 함께 내려보냅니다.
+
+**실제 결과** (`월 3만원 이하 20GB 이상`, 후보 578건)
+
+| | 1 | 2 | 3 | 4 | 5 | 서로 다른 성격 |
+|---|---|---|---|---|---|---|
+| 전 | 너겟49 (LG U+) | 더든든한500분20G (프리티) | (5G)더든든한200분20G (**프리티**) | (5G)하나은행 500분20G (**프리티**) | [K]울트라 (아이즈) | **3/5**, 사업자 3종 |
+| 후 | 너겟49 (LG U+) | 더든든한500분20G (프리티) | [K]울트라 (아이즈) | 가성비플러스 (티플러스) | 핀다이렉트 Speed (핀다이렉트) | **5/5**, 사업자 5종 |
+
+다른 요청에서도 확인했습니다. `3만원 이하 + 데이터 우선`은 4/5 → 5/5(찬스모바일 중복 제거),
+`무제한 5만원 이하`는 이미 5/5라 **결과가 바뀌지 않았습니다**(억지로 손대지 않습니다).
+
+**이 과정에서 드러난 회귀 2건도 고쳤습니다.** 둘 다 이번 작업에서 제가 만든 것입니다.
+- `sms_count`가 `SLIM_FIELDS`에 없어, 리포트가 적은 `문자 300건`을 평가가 "데이터에 없는 기능"으로
+  잡았습니다(테더링과 같은 종류의 비대칭). 추가했습니다.
+- 요금 조건 줄의 `월 7,000원 (할인 없음)` 문구가 혜택 쪽 프로모션(`모요 프로모션 페이백/할인`)과
+  어긋나는 말로 읽혀 평가가 떨어뜨렸습니다. `월 7,000원 · 정상가와 동일`로 바꿨습니다.
+- 두 건을 고친 뒤 재현 입력은 다시 `attempt=1`, `passed=True`입니다(고치기 전 `attempt=3`).
+
 ---
 
 ## 2. 변경 파일
@@ -138,17 +187,20 @@ agent/agents/profiling.py             PROFILING_PROMPT 예산 하한·필수/선
                                       _apply_reference_fee, _drop_placeholder_text,
                                       _POST_NORMALIZE_REPAIRS (정규화가 선호 완화를 되돌리던 문제)
 agent/agents/recommend.py             _reference_verdict / _known_reference_axes /
-                                      REFERENCE_CONFIRM_NOTES, 세 분기에서 reference_verdict 반환
+                                      REFERENCE_CONFIRM_NOTES, 세 분기에서 reference_verdict 반환,
+                                      _dedupe_by_name -> _dedupe_identical_offers(_offer_key),
+                                      _diverse_selection / _offer_character / _data_band,
+                                      trace 에 diversification 추가
 agent/state.py                        PipelineState 에 reference_verdict 추가
 backend/main.py                       응답에 referenceVerdict 추가
 backend/plans.py                      six_month_cost -> total_cost, COMPARE_MONTHS 를 mcda 에서 import,
                                       effectiveTotal 을 benefit_deductible_won 기준으로,
                                       benefitDeductible/benefitValueEstimated/benefitConditionalCount 추가
-test_service_process.py               import 변경 + 테스트 7개 추가
+test_service_process.py               import 변경 + 테스트 10개 추가
 frontend/src/types.ts                 PlanItem 에 필드 3개 추가, ReferenceVerdict 타입 추가
 frontend/src/components/BrowseScreen.tsx        '6개월' 하드코딩 제거, 차감 표시 기준 변경
 frontend/src/components/HomeScreen.tsx          폴백 6 -> 12
-frontend/src/components/RecommendationTrace.tsx 폴백 6 -> 12, 4번 절 문구 재작성
+frontend/src/components/RecommendationTrace.tsx 폴백 6 -> 12, 4번 절 문구 재작성, 선정 기준 문구 표시
 frontend/src/components/ReportScreen.tsx        혜택 블록 재작성(추정·조건 안내)
 frontend/src/components/ResultScreen.tsx        차감 표시 기준·라벨 변경, 현재 요금제 판정 배너 추가
 HANDOFF.md                            (신규)
@@ -164,7 +216,7 @@ HANDOFF.md                            (신규)
 
 | 명령 | 결과 |
 |---|---|
-| `python -B -m unittest test_service_process` | **OK — 19개** (기존 12 + 신규 7) |
+| `python -B -m unittest test_service_process` | **OK — 22개** (기존 12 + 신규 10) |
 | `python -m unittest discover -s crawler/src -p "test_*.py"` | **OK — 34개** |
 | `python backend/plans.py` | `self-check ok: 2759 plans` |
 | `python -m agent.data` | `self-check ok: 1555 candidates` |
@@ -173,7 +225,7 @@ HANDOFF.md                            (신규)
 | `python -m agent.usage` | `self-check ok` |
 | `cd frontend && npm run build` | `tsc --noEmit` 통과, `✓ built in 2.44s` |
 
-**신규 테스트 7개** (`test_service_process.py`)
+**신규 테스트 10개** (`test_service_process.py`)
 - `test_compare_period_is_single_source_of_truth` — `compareMonths == rankingMonths == BENEFIT_AMORTIZE_MONTHS`
 - `test_benefit_is_not_deducted_without_confirmed_usage` — 구독형 혜택은 총비용에서 빠지지 않는다
 - `test_benefit_axis_is_neutral_when_not_requested` — 혜택 미요청 시 혜택 축이 전 후보 0.5
@@ -181,6 +233,9 @@ HANDOFF.md                            (신규)
 - `test_keep_current_plan_is_distinguished_from_cannot_tell` — 유지/전환/판단불가 3상태, 후보 0건은 유지가 아니다
 - `test_current_fee_is_not_turned_into_a_budget_cap` — 현재 납부액이 예산 상한이 되지 않는다
 - `test_recommend_exposes_reference_verdict_through_api` — API 응답에 referenceVerdict 가 나간다
+- `test_same_name_different_offer_is_not_deleted` — 이름이 같아도 조건이 다르면 지우지 않는다
+- `test_top5_does_not_repeat_the_same_kind_of_plan` — 상위 5개의 성격이 겹치지 않는다(회귀 지점 포함)
+- `test_diversity_never_invents_choices_it_does_not_have` — 겹치는 후보뿐이면 억지로 만들지 않는다
 
 > 기존 테스트 중 스펙이 바뀐 것은 **기준을 느슨하게 만든 게 아니라 새 스펙으로 다시 쓴 것**입니다.
 > - `plans.py`: 6개월 총비용 기대값 → 12개월 기대값(계산식 그대로 노출)
@@ -333,8 +388,10 @@ LLM 판정이 아니라 코드 판정이고, 리포트는 그 결과를 따르�
    후처리로 문장을 지우는 방식은 넣지 않았습니다(멀쩡한 비교 문장까지 지울 위험).
 2. **후보 0건일 때 `blockers`가 화면에서 어떻게 보이는지 확인 못 함** (시나리오 3).
    서버는 `{'field','label','value','candidates','minimum_fee'}`를 내려보냅니다.
-3. **비슷한 추천 반복 완화** (후순위 2, 미착수). `_dedupe_by_name`은 이름이 같으면 실납부가 가장 싼
-   1건만 남깁니다. 가입 조건·혜택이 다른 동명 상품이 지워지는지는 점검하지 않았습니다.
+3. **리포트 단계가 가끔 재시도를 한두 번 태운다.** 검증은 최종적으로 통과하지만
+   `gpt-4o-mini`가 후보 데이터에 없는 표현을 쓰면 평가가 되돌립니다(요청당 10~20초 추가).
+   재현: `월 3만원 이하 20GB 이상으로 추천해줘. 넷플릭스 포함이면 좋겠어.` (attempt 2~3 관측)
+
 
 ---
 

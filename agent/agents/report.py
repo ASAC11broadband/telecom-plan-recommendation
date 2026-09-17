@@ -317,7 +317,9 @@ def _ensure_promo_notices(report: str, recommendations: list[dict[str, Any]]) ->
             timing = f"할인 {period}개월 후" if period is not None else "할인 기간 미확인 · 할인 종료 후"
             detail = f"현재 월 {fee:,}원, {timing} 월 {int(regular):,}원"
         else:
-            detail = f"월 {fee:,}원 (할인 없음)"
+            # "할인 없음"이라고 쓰면 혜택 쪽 프로모션(페이백 등)과 어긋나는 말로 읽힌다.
+            # 여기서 말하는 것은 요금 자체가 정상가라는 사실뿐이다.
+            detail = f"월 {fee:,}원 · 정상가와 동일"
         notice = (f"\n\n요금 조건: {detail}. "
                   f"가입 조건은 사업자 고지를 확인해 주세요.\n\n")
         report = report[:end].rstrip() + notice + report[end:]

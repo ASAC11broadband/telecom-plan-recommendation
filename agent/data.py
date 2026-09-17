@@ -851,6 +851,9 @@ SLIM_FIELDS = (
     "tethering_gb",
     "voice",
     "sms_unlimited",
+    # 문자 건수는 voice 처럼 사람이 읽는 대응 필드가 없다. 빼 두면 리포트가 적은
+    # '문자 300건'을 평가가 "데이터에 없는 기능"으로 잡는다(실측: 재시도 1회 소모).
+    "sms_count",
     "is_online_only",
     "plan_category",
     "monthly_fee",
