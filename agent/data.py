@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .mcda import COMPARE_MONTHS
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"  # CSV 는 프로젝트 루트의 data/ 에 둔다
 
@@ -273,6 +275,8 @@ def load() -> None:
                     # 택1 혜택. 같은 select_group 안에서는 하나만 실제로 받는다.
                     "selectable": bool(row.get("is_selectable")),
                     "select_group": _opt_text(row.get("select_group")),
+                    # 카드 실적·별도 가입 같은 추가 조건. 자동 차감 여부를 여기서 가른다.
+                    "condition": _opt_text(row.get("benefit_condition")),
                 }
             )
         plans["included_benefits"] = plans["plan_id"].map(benefit_lists).apply(
@@ -289,7 +293,11 @@ def load() -> None:
             + " | "
             + plans["included_benefits"].apply(" | ".join)
         )
-        plans["benefit_value_won"] = plans["benefit_details"].map(monthly_benefit_value)
+        summaries = plans["benefit_details"].map(benefit_summary)
+        plans["benefit_value_won"] = summaries.map(lambda s: s["monthly_won"])
+        plans["benefit_deductible_won"] = summaries.map(lambda s: s["deductible_won"])
+        plans["benefit_value_estimated"] = summaries.map(lambda s: s["estimated"])
+        plans["benefit_conditional_count"] = summaries.map(lambda s: s["conditional"])
         _plans = plans
 
 
@@ -309,10 +317,18 @@ def _opt_text(value) -> str:
 
 
 # 페이백·사은품은 일시금이라 월 단위 비교에 그대로 더하면 과대평가된다.
-# 비교 구간(6개월)으로 나눠 월 환산한다. backend.plans.COMPARE_MONTHS 와 같은 값이다.
-# 일시금 혜택을 월로 펴 바를 때 쓰는 기본 구간. backend.plans.COMPARE_MONTHS 와 같은 값이다.
-BENEFIT_AMORTIZE_MONTHS = 6
+# 비교 구간으로 나눠 월 환산한다. 구간은 agent.mcda.COMPARE_MONTHS 하나로 통일돼 있다
+# (추천 가격 효용·화면 총비용·혜택 월 환산이 같은 기간을 써야 서로 비교된다).
+BENEFIT_AMORTIZE_MONTHS = COMPARE_MONTHS
 _ONE_OFF_CATEGORIES = {"사은품/페이백"}
+# 현금으로 돌려받는 혜택. 사용자가 그 서비스를 쓰는지와 무관하게 납부 총액이 줄어든다.
+_CASH_CATEGORIES = {"사은품/페이백"}
+# 기간을 '끝이 없다'고 못 박은 표현. '기간 미상'과 구분해야 한다.
+_INDEFINITE_RE = re.compile(r"평생|무기한|무제한\s*제공|계속\s*제공|약정\s*내내")
+# 추가 실적·별도 가입이 필요한 혜택. 자동으로 절약액에서 빼면 안 된다.
+_CONDITIONAL_RE = re.compile(
+    r"카드|실적|제휴|결합|약정|가입\s*시|신규|번호이동|응모|추첨|이벤트|선착순|별도\s*신청|쿠폰"
+)
 
 # benefit_value_won 은 한 컬럼에 두 단위가 섞여 있다.
 #   '네이버페이 매달 3.4만원 페이백 (6개월)' -> 204,000 (총액)
@@ -326,47 +342,84 @@ _BENEFIT_MONTHS_RE = re.compile(r"(\d+)\s*개월")
 _MONEY_UNIT = {"만원": 10_000, "천원": 1_000, "원": 1}
 
 
+def _benefit_duration(
+    name: str, basis: str, months: int | None, one_off: bool = False
+) -> tuple[int | None, bool]:
+    """(제공 개월 수, 확인됨) — 기간 미상과 무기한 제공은 다른 값이다.
+
+    미상이면 (None, False). 무기한이면 (비교 구간, True) — 비교 구간 내내 받는다.
+    일시금은 (1, True) — 한 번 받고 끝이라 기간이 확인된 것과 같다.
+    """
+    if months is not None and months > 0:
+        return months, True
+    if _INDEFINITE_RE.search(name):
+        return BENEFIT_AMORTIZE_MONTHS, True
+    matched = _BENEFIT_MONTHS_RE.search(name)
+    if matched and int(matched.group(1)) > 0:
+        return int(matched.group(1)), True
+    if basis == "one_off" or one_off:
+        return 1, True
+    return None, False
+
+
 def _monthly_worth(
     name: str, worth: float, one_off: bool, basis: str = "", months: int | None = None
 ) -> float:
-    """혜택 하나가 한 달에 얼마짜리인지.
+    """혜택 하나가 비교 구간 동안 한 달 평균 얼마짜리인지.
 
     0. 크롤러가 단위를 적어 뒀으면 그것을 믿는다(benefit_value_basis). 수집 시점에
        판정한 값이라 이름 파싱보다 정확하다.
-    1. 이름이 '매달 N원'이라고 말하면 그 값이 곧 월 가치다.
-    2. 이름에 기간이 있으면 총액을 그 기간으로 나눈다. 6 으로 고정해서 나누면
-       12개월 페이백이 두 배로 부풀려진다(실측: 2.0배).
-    3. 기간을 모르는 일시금은 비교 구간으로 편다.
+    1. 이름이 '매달 N원'이라고 말하면 그 값이 곧 한 달 지급액이다.
+    2. 이름에 기간이 있으면 총액을 그 기간으로 나눠 한 달 지급액을 구한다.
+    3. 그렇게 구한 월 지급액을 '받는 개월 수 / 비교 구간'만큼만 인정한다.
+       6개월만 주는 페이백을 12개월 비교에 그대로 곱하면 지급액이 두 배가 된다.
+    4. 기간을 모르면 구간 내내 받는다고 보되, 호출자가 추정임을 표시한다.
     """
+    per_month = None
     if basis == "monthly":
-        return worth  # 이미 한 달치다. 기간(months)은 얼마나 오래 받는지일 뿐이다.
-    if basis == "one_off":
-        return worth / BENEFIT_AMORTIZE_MONTHS
+        per_month = worth  # 이미 한 달치다.
+    elif basis == "one_off":
+        per_month = worth  # 일시금 총액. 아래에서 기간 1개월로 펴진다.
+    else:
+        matched = _RECURRING_AMOUNT_RE.search(name)
+        if matched:
+            amount = float(matched.group(1).replace(",", "")) * _MONEY_UNIT[matched.group(2)]
+            if amount > 0:
+                per_month = amount
+        if per_month is None:
+            matched_months = _BENEFIT_MONTHS_RE.search(name)
+            if matched_months and int(matched_months.group(1)) > 0:
+                per_month = worth / int(matched_months.group(1))
+        if per_month is None:
+            per_month = worth
 
-    matched = _RECURRING_AMOUNT_RE.search(name)
-    if matched:
-        amount = float(matched.group(1).replace(",", "")) * _MONEY_UNIT[matched.group(2)]
-        if amount > 0:
-            return amount
-
-    months = _BENEFIT_MONTHS_RE.search(name)
-    if months and int(months.group(1)) > 0:
-        return worth / int(months.group(1))
-
-    return worth / BENEFIT_AMORTIZE_MONTHS if one_off else worth
+    duration, _known = _benefit_duration(name, basis, months, one_off)
+    if duration is None:
+        return per_month  # 기간 미상 — 구간 내내로 본다(추정)
+    return per_month * min(duration, BENEFIT_AMORTIZE_MONTHS) / BENEFIT_AMORTIZE_MONTHS
 
 
-def monthly_benefit_value(details: object) -> int:
-    """요금제 하나가 매달 돌려주는 혜택의 원화 가치.
+def benefit_summary(details: object) -> dict:
+    """혜택 금액을 '참고값'과 '실제로 빼도 되는 금액'으로 갈라 월 환산한다.
 
     - value_won 이 비어 있는 혜택은 0 원이 아니라 '가치 미상'이라 합계에서 빠진다.
     - 택1(select_group)은 그룹당 가장 비싼 하나만 센다. 전부 더하면 실제보다 부풀려진다.
-    - 총액인지 월액인지는 이름 문자열로 판별한다(_monthly_worth 참고).
+    - 총액인지 월액인지, 몇 달 주는지는 크롤러 컬럼과 이름 문자열로 판별한다(_monthly_worth).
+
+    deductible_won 은 납부 총액에서 빼도 되는 금액만 담는다. 조건은 두 가지다.
+      (1) 현금으로 돌려받는 혜택일 것 — 구독형(넷플릭스 등)은 사용자가 그 서비스를
+          실제로 쓰고 직접 결제 중일 때만 절약이 된다. 이용 여부는 수집 데이터에 없다.
+      (2) 카드 실적·별도 가입 같은 추가 조건이 없을 것.
+    나머지는 monthly_won 에만 남아 화면에 '조건 확인이 필요한 참고값'으로 표시된다.
     """
+    empty = {"monthly_won": 0, "deductible_won": 0, "estimated": False, "conditional": 0}
     if not isinstance(details, list):
-        return 0
-    total = 0.0
-    best_in_group: dict[str, float] = {}
+        return empty
+
+    totals = {"monthly_won": 0.0, "deductible_won": 0.0}
+    groups: dict[str, dict[str, float]] = {}
+    estimated = False
+    conditional = 0
     for detail in details:
         if not isinstance(detail, dict):
             continue
@@ -377,18 +430,47 @@ def monthly_benefit_value(details: object) -> int:
         if worth <= 0:
             continue
         name = str(detail.get("name") or "")
-        one_off = bool(_ONE_OFF_CATEGORIES.intersection(detail.get("categories") or []))
+        categories = detail.get("categories") or []
+        basis = str(detail.get("value_basis") or "")
+        one_off = bool(_ONE_OFF_CATEGORIES.intersection(categories))
         worth = _monthly_worth(
-            name, worth, one_off,
-            basis=str(detail.get("value_basis") or ""),
-            months=detail.get("months"),
+            name, worth, one_off, basis=basis, months=detail.get("months")
         )
+        _, known_duration = _benefit_duration(name, basis, detail.get("months"), one_off)
+        if not known_duration:
+            estimated = True
+
+        condition = str(detail.get("condition") or "")
+        has_condition = bool(_CONDITIONAL_RE.search(f"{condition} {name}"))
+        if has_condition:
+            conditional += 1
+        is_cash = bool(_CASH_CATEGORIES.intersection(categories))
+        deductible = worth if (is_cash and not has_condition and known_duration) else 0.0
+
         group = detail.get("select_group") or ""
         if detail.get("selectable") and group:
-            best_in_group[group] = max(best_in_group.get(group, 0.0), worth)
+            # 택1은 그룹당 하나. 참고값이 가장 큰 것을 대표로 삼고 그 항목의 차감액을 쓴다.
+            best = groups.get(group)
+            if best is None or worth > best["monthly_won"]:
+                groups[group] = {"monthly_won": worth, "deductible_won": deductible}
         else:
-            total += worth
-    return int(round(total + sum(best_in_group.values())))
+            totals["monthly_won"] += worth
+            totals["deductible_won"] += deductible
+
+    for picked in groups.values():
+        totals["monthly_won"] += picked["monthly_won"]
+        totals["deductible_won"] += picked["deductible_won"]
+    return {
+        "monthly_won": int(round(totals["monthly_won"])),
+        "deductible_won": int(round(totals["deductible_won"])),
+        "estimated": estimated,
+        "conditional": conditional,
+    }
+
+
+def monthly_benefit_value(details: object) -> int:
+    """요금제 하나의 혜택 월 환산 참고값. 납부액에서 빼도 되는 금액이 아니다."""
+    return benefit_summary(details)["monthly_won"]
 
 
 # 사용자가 혜택 이름 뒤에 붙이는 수식어. 붙은 채로 substring 매칭하면 무조건 0건이 된다.
@@ -524,11 +606,20 @@ def filter_candidates(profile: dict) -> list[dict]:
         normalized = df["mvno_brand"].fillna("").astype(str).str.strip().str.casefold()
         df = df[normalized == brand]
 
+    # 혜택 조건은 필수일 때만 후보를 지운다. '넷플릭스면 좋겠어'(선호)까지 필터로 걸면
+    # 포함하지 않은 상품이 통째로 사라져 알뜰폰＋별도 구독 같은 대안을 비교할 수 없다.
+    # 선호는 mcda._benefit_fit 이 점수로만 반영한다. hard_constraints 가 아예 없는
+    # 호출(직접 dict 를 넘기는 테스트·스크립트)은 예전처럼 필수로 본다.
+    hard = profile.get("hard_constraints")
+    benefit_is_hard = not hard or bool(
+        {"wanted_benefits", "wanted_benefit_categories"}.intersection(hard)
+    )
+
     benefit_masks = [
         df["benefit_search_text"].map(lambda text, value=benefit: has_benefit(text, value))
-        for benefit in profile.get("wanted_benefits") or []
+        for benefit in (profile.get("wanted_benefits") or [] if benefit_is_hard else [])
     ]
-    for category in profile.get("wanted_benefit_categories") or []:
+    for category in (profile.get("wanted_benefit_categories") or [] if benefit_is_hard else []):
         normalized = normalize_benefit_category(category)
         if normalized is None:
             return []
@@ -727,6 +818,10 @@ def _row_summary(r) -> dict:
         "benefit_categories": list(r["benefit_categories"]),
         "benefit_details": list(r["benefit_details"]),
         "benefit_value_won": int(r["benefit_value_won"]),
+        # 납부 총액에서 실제로 빼도 되는 부분만. 구독형·조건부 혜택은 여기 들어오지 않는다.
+        "benefit_deductible_won": int(r["benefit_deductible_won"]),
+        "benefit_value_estimated": bool(r["benefit_value_estimated"]),
+        "benefit_conditional_count": int(r["benefit_conditional_count"]),
         "age_condition": r["age_condition"] if pd.notna(r["age_condition"]) else "",
         "signup_notice": r["signup_notice"] if pd.notna(r.get("signup_notice")) else "",
         "plan_category": r["plan_category"] if pd.notna(r.get("plan_category")) else "",
@@ -738,13 +833,26 @@ def _row_summary(r) -> dict:
 
 # LLM 에게 보여줄 필드. 필터용 파생 숫자(data_gb/qos_mbps/voice_minutes 등)는
 # 사람이 읽는 data/voice 와 같은 사실의 중복 표현이라 판정을 헷갈리게 해서 뺀다.
+#
+# 다만 사람이 읽는 대응 필드가 아예 없는 사실(테더링·문자·사업자 유형·망 세대 등)까지
+# 빼면 안 된다. Report Agent 는 후보 원본 전체를 받아 쓰는데 Evaluation Agent 는 이
+# 목록만 받으므로, 여기 없는 사실을 리포트가 인용하면 평가가 "데이터에 없는 기능을
+# 단정했다"고 오판한다. 실제로 테더링 40GB 를 적은 멀쩡한 리포트가 재시도 2회를
+# 태우고도 미통과로 끝났다. 두 에이전트가 보는 사실의 범위를 같게 맞춘다.
 SLIM_FIELDS = (
     "plan_id",
     "plan_name",
     "carrier",
+    "carrier_type",
+    "network_gen",
     "data",
     "data_tier_label",
+    "daily_data_gb",
+    "tethering_gb",
     "voice",
+    "sms_unlimited",
+    "is_online_only",
+    "plan_category",
     "monthly_fee",
     "discounted_fee",
     "discount_type",
@@ -894,21 +1002,29 @@ if __name__ == "__main__":
     assert budget_blocker["minimum_fee"] > 30000
     assert diagnose_empty({"budget_max_won": 30000}) == []  # 후보가 있으면 병목도 없다
 
+    assert BENEFIT_AMORTIZE_MONTHS == COMPARE_MONTHS == 12
     assert monthly_benefit_value([{"name": "A", "value_won": 12000, "categories": ["멤버십"]}]) == 12000
     assert monthly_benefit_value([{"name": "A", "value_won": None, "categories": []}]) == 0
+    # 일시금은 비교 구간(12개월)으로 편다. 60,000원 -> 월 5,000원.
     assert monthly_benefit_value(
         [{"name": "페이백", "value_won": 60000, "categories": ["사은품/페이백"]}]
-    ) == 10000
-    # benefit_value_won 은 총액과 월액이 섞여 있다. 기간을 6으로 고정해 나누면
-    # 12개월 페이백이 정확히 두 배로 부풀려진다(실측 확인).
-    assert _monthly_worth("네이버페이 매달 3.4만원 페이백 (6개월)", 204_000, True) == 34_000
+    ) == 5000
+
+    # 월 지급액·제공 기간·일시금을 각각 구분한다. 비교 구간은 12개월.
+    # 6개월만 주는 페이백을 12개월 내내 받는 것으로 계산하면 지급액이 두 배가 된다.
+    assert _monthly_worth("네이버페이 매달 3.4만원 페이백 (6개월)", 204_000, True) == 17_000
     assert _monthly_worth("네이버페이 매달 8천원 페이백 (12개월)", 96_000, True) == 8_000
+    # 평생 제공은 구간 내내 받는다. '기간 미상'과 같은 값이 나오더라도 의미가 다르다.
     assert _monthly_worth("네이버페이 매달 5천원 페이백 (평생)", 5_000, True) == 5_000
+    assert _benefit_duration("네이버페이 매달 5천원 페이백 (평생)", "", None) == (12, True)
+    assert _benefit_duration("넷플릭스", "", None) == (None, False)
+    assert _benefit_duration("페이백 (6개월)", "", None) == (6, True)
     assert _monthly_worth("넷플릭스", 17_000, False) == 17_000
-    assert round(_monthly_worth("마트 상품권 2만원", 20_000, True)) == 3_333
+    assert round(_monthly_worth("마트 상품권 2만원", 20_000, True)) == 1_667
     # 크롤러가 단위를 적어 주면 이름 파싱 없이 그대로 쓴다(새 스키마).
     assert _monthly_worth("아무 이름", 8_000, True, basis="monthly", months=12) == 8_000
-    assert round(_monthly_worth("아무 이름", 20_000, True, basis="one_off")) == 3_333
+    assert _monthly_worth("아무 이름", 8_000, True, basis="monthly", months=6) == 4_000
+    assert round(_monthly_worth("아무 이름", 20_000, True, basis="one_off")) == 1_667
     # 옛 스키마(총액 저장)와 새 스키마(월액 저장)가 같은 월 가치로 수렴해야 한다.
     assert _monthly_worth("네이버페이 매달 8천원 페이백 (12개월)", 96_000, True) == _monthly_worth(
         "네이버페이 매달 8천원 페이백 (12개월)", 8_000, True, basis="monthly", months=12
@@ -920,5 +1036,31 @@ if __name__ == "__main__":
         ]
     )
     assert picked == 13500, picked
+
+    # 차감 가능한 금액과 참고값을 가른다.
+    cash = benefit_summary(
+        [{"name": "페이백 (12개월)", "value_won": 120_000, "categories": ["사은품/페이백"]}]
+    )
+    assert cash["deductible_won"] == 10_000 and cash["estimated"] is False
+
+    # 구독형은 이용 여부를 확인할 수 없어 차감하지 않는다.
+    ott = benefit_summary([{"name": "넷플릭스", "value_won": 17_000, "categories": ["영상/OTT"]}])
+    assert ott["monthly_won"] == 17_000 and ott["deductible_won"] == 0
+    assert ott["estimated"] is True  # 제공 기간 미확인
+
+    # 카드 실적·가입 조건이 붙은 현금 혜택도 자동 차감하지 않는다.
+    carded = benefit_summary(
+        [{
+            "name": "페이백 (12개월)", "value_won": 120_000, "categories": ["사은품/페이백"],
+            "condition": "제휴카드 전월 실적 30만원",
+        }]
+    )
+    assert carded["deductible_won"] == 0 and carded["conditional"] == 1
+
     assert any(row["benefit_value_won"] > 0 for row in anyone)
+    assert any(row["benefit_deductible_won"] > 0 for row in anyone)
+    # 차감액은 언제나 참고값 이하다
+    assert all(
+        row["benefit_deductible_won"] <= row["benefit_value_won"] for row in anyone
+    )
     print(f"self-check ok: {len(c)} candidates")

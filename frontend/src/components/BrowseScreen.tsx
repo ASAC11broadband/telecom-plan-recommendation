@@ -83,8 +83,8 @@ const SORTS: [string, string][] = [
   ['fee_desc', '월 요금 높은순'],
   ['data_desc', '데이터 많은순'],
   ['qos_desc', '소진 후 속도 빠른순'],
-  ['total_asc', '6개월 총비용 낮은순'],
-  ['effective_asc', '혜택 차감 참고값 낮은순'],
+  ['total_asc', '총비용 낮은순'],
+  ['effective_asc', '현금성 혜택 차감 참고값 낮은순'],
 ];
 
 const EMPTY = EMPTY_FILTERS;
@@ -272,8 +272,8 @@ export function BrowseScreen({
                   <th>데이터</th>
                   <th>다 쓴 뒤</th>
                   <th>음성</th>
-                  <th>6개월 총비용</th>
-                  <th>혜택 차감 참고값</th>
+                  <th>{data?.plans[0]?.compareMonths ?? 12}개월 총비용</th>
+                  <th>현금성 혜택 차감 참고값</th>
                   <th>액션</th>
                 </tr>
               </thead>
@@ -325,7 +325,7 @@ export function BrowseScreen({
                       <td>{plan.call}</td>
                       <td className="num">{plan.total}</td>
                       <td className="num">
-                        {plan.benefitValue > 0
+                        {plan.benefitDeductible > 0
                           ? plan.benefitExceedsFee
                             ? '0원*'
                             : plan.effectiveTotal

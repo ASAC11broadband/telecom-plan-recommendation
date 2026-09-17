@@ -33,7 +33,7 @@ export function RecommendationTrace({ result }: { result: RecommendResponse }) {
   const conditions = describeProfile(trace.rankingProfile ?? result.profile);
   const estimated = result.plans.some((p) => p.costIsEstimate);
   const months = result.plans[0]?.rankingMonths ?? 12;
-  const compareMonths = result.plans[0]?.compareMonths ?? 6;
+  const compareMonths = result.plans[0]?.compareMonths ?? 12;
 
   return (
     <details className="card recommendation-trace">
@@ -138,11 +138,12 @@ export function RecommendationTrace({ result }: { result: RecommendResponse }) {
       )}
 
       <div className="trace-sec">
-        <div className="section-label">4. 비용을 두 가지로 보는 이유</div>
+        <div className="section-label">4. 비용 비교 기준</div>
         <p className="trace-note">
-          순위는 할인이 끝난 뒤까지 포함한 <b>{months}개월 평균 월요금</b>으로 매기고, 카드에 적힌
-          총비용은 지금 당장 얼마 나가는지 보는 <b>{compareMonths}개월</b> 기준입니다. 그래서 더 싼
-          요금제가 아래 순위일 수 있습니다.
+          순위의 가격 평가도 카드의 총비용도 <b>{compareMonths}개월</b> 기준입니다. 할인이 끝난 뒤의
+          정가까지 합산하므로, 지금 당장 싼 단기 프로모션 상품이 아래 순위일 수 있습니다.
+          {months !== compareMonths &&
+            ` (순위 평가는 ${months}개월 평균 월요금 기준입니다.)`}
           {estimated && ' *표시는 할인 기간이 공개되지 않아 현재 요금이 유지된다고 가정한 경우입니다.'}
         </p>
       </div>

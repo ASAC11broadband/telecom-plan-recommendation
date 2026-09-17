@@ -1,23 +1,25 @@
 # -*- coding: utf-8 -*-
 """CSV 요금제 행(agent.data._row_summary 결과)을 화면이 쓰는 PlanItem 으로 옮긴다.
 
-여기서만 하는 일: 6개월 총비용 계산, 표시 문자열 조립, 해시태그 규칙.
+여기서만 하는 일: 비교 구간 총비용 계산, 표시 문자열 조립, 해시태그 규칙.
 필터링·랭킹은 agent 쪽 담당.
 """
 
 from __future__ import annotations
 
-from agent.mcda import _effective_monthly_fee, _PRICE_HORIZON_MONTHS
+from agent.mcda import COMPARE_MONTHS, _effective_monthly_fee, _PRICE_HORIZON_MONTHS
 
-# 비교 구간 6개월. 알뜰폰 이용자는 대부분 프로모션이 끝날 때쯤 다른 요금제로 갈아타므로
-# 프로모션 종료 후 정가까지 합산하는 12개월 비교는 실제 지출과 오히려 멀어진다. 의도된 값이다.
-COMPARE_MONTHS = 6
+__all__ = ["COMPARE_MONTHS", "total_cost", "to_plan_item", "to_plan_items"]
 
 
-def six_month_cost(row: dict, months: int = COMPARE_MONTHS) -> int:
-    """할인 기간이 비교 구간보다 짧으면 남은 달은 정가로 계산한다.
+def total_cost(row: dict, months: int = COMPARE_MONTHS) -> int:
+    """비교 구간 총 납부액. 할인 기간이 구간보다 짧으면 남은 달은 정가로 계산한다.
+
+    구간은 agent.mcda.COMPARE_MONTHS 하나뿐이다. 추천의 가격 평가와 화면의 총비용이
+    같은 기간을 써야 "순위는 A가 위인데 총비용은 B가 싸다"는 설명이 성립한다.
 
     discount_period_months 가 없으면 할인 무기한으로 본다(약정 할인 등).
+    그 경우 costIsEstimate 로 추정임을 함께 내보낸다.
     """
     discounted = int(row["discounted_fee"])
     regular = int(row["monthly_fee"])
@@ -114,17 +116,20 @@ def to_plan_item(
     expected_rank: float | None = None,
     first_rank_acceptability: float | None = None,
 ) -> dict:
-    total = six_month_cost(row)
+    total = total_cost(row)
     period = row.get("discount_period_months")
     is_promo = row["discounted_fee"] < row["monthly_fee"]
     benefit_value = int(row.get("benefit_value_won") or 0)
-    # 혜택을 반영한 실부담. 페이백·사은품이 월 20,000원인 상품을 요금만으로 비교하면
-    # 순위가 뒤집힌다. 다만 값이 수집된 혜택만 반영되므로 표시는 하되 랭킹에는 쓰지 않는다.
+    # 납부 총액에서 빼는 것은 '조건 없는 현금성 혜택'뿐이다(agent.data.benefit_summary).
+    # 넷플릭스 같은 구독형은 사용자가 그 서비스를 실제로 쓰고 직접 결제 중일 때만 절약이
+    # 되는데 이용 여부는 수집 데이터에 없다. 확정 절약액으로 빼면 OTT 를 안 보는 사용자의
+    # 실부담이 실제보다 싸게 보이고, 알뜰폰＋별도 구독 조합과의 비교도 무너진다.
+    # benefit_value_won 은 조건을 확인해야 하는 참고값으로 표시만 한다.
     #
     # 페이백이 요금보다 큰 상품이 실제로 있다(월 7,000원 요금에 월 34,000원 페이백).
-    # 그대로 빼면 "실부담 -258,000원"이 되는데, 이런 페이백은 유지 기간·결제수단 같은
-    # 조건이 붙고 그 조건은 수집 데이터에 없다. 0 원에서 끊고 별도 플래그로 알린다.
-    raw_effective = total - benefit_value * COMPARE_MONTHS
+    # 그대로 빼면 "실부담 -258,000원"이 되므로 0 원에서 끊고 별도 플래그로 알린다.
+    deductible = int(row.get("benefit_deductible_won") or 0)
+    raw_effective = total - deductible * COMPARE_MONTHS
     effective_total = max(0, raw_effective)
     return {
         "id": row["plan_id"],
@@ -158,6 +163,11 @@ def to_plan_item(
         "hash": _hashtags(row, is_cheapest),
         "benefit": _benefit_text(row, matched_benefits),
         "benefitValue": benefit_value,
+        "benefitDeductible": deductible,
+        # 제공 기간이 확인되지 않은 혜택이 섞여 있으면 월 환산액은 추정이다.
+        "benefitValueEstimated": bool(row.get("benefit_value_estimated")),
+        # 카드 실적·별도 가입 같은 조건이 붙은 혜택 수. 자동 차감하지 않은 것들이다.
+        "benefitConditionalCount": int(row.get("benefit_conditional_count") or 0),
         "criteriaFit": criteria_fit or {},
         "expectedRank": expected_rank,
         "firstRankAcceptability": first_rank_acceptability,
@@ -178,8 +188,8 @@ def to_plan_item(
         "isPromo": is_promo,
         # 할인이 비교 구간 안에 끝나면 화면에 "N+1개월차부터 정가" 경고를 띄운다
         "priceRisesAfter": int(period) if is_promo and period and int(period) < COMPARE_MONTHS else None,
-        # 비교 구간 밖에서 오르는 경우도 알려야 한다. 6개월 총비용만 보면 12개월 프로모션이
-        # 끝난 뒤 요금이 몇 배가 되는 상품을 "제일 싸다"고 읽게 된다.
+        # 비교 구간 밖에서 오르는 경우도 알려야 한다. 구간 안 총비용만 보면 구간이 끝난 뒤
+        # 요금이 몇 배가 되는 상품을 "제일 싸다"고 읽게 된다.
         "priceRisesLater": bool(is_promo and period and int(period) >= COMPARE_MONTHS),
         "promoDiscountRate": (
             round(1 - row["discounted_fee"] / row["monthly_fee"], 3) if row["monthly_fee"] else 0.0
@@ -308,10 +318,10 @@ SORTS = {
     "fee_asc": (lambda r: r["discounted_fee"], False),
     "fee_desc": (lambda r: r["discounted_fee"], True),
     "data_desc": (lambda r: (r["data_unlimited"], r.get("data_gb") or 0), True),
-    "total_asc": (lambda r: six_month_cost(r), False),
-    # 혜택 가치를 뺀 실부담. 페이백형 상품은 요금 순서와 결과가 크게 달라진다.
+    "total_asc": (lambda r: total_cost(r), False),
+    # 조건 없는 현금성 혜택만 뺀 실부담. 구독형·조건부 혜택은 빼지 않는다.
     "effective_asc": (
-        lambda r: six_month_cost(r) - int(r.get("benefit_value_won") or 0) * COMPARE_MONTHS,
+        lambda r: total_cost(r) - int(r.get("benefit_deductible_won") or 0) * COMPARE_MONTHS,
         False,
     ),
     "qos_desc": (lambda r: r.get("qos_mbps") or 0, True),
@@ -343,11 +353,12 @@ def facet_counts(rows: list[dict]) -> dict[str, dict[str, int]]:
 
 
 if __name__ == "__main__":
-    # 할인 기간이 비교 구간보다 짧으면 남은 달은 정가
-    assert six_month_cost({"discounted_fee": 19800, "monthly_fee": 24800, "discount_period_months": 7}) == 118800
-    assert six_month_cost({"discounted_fee": 19800, "monthly_fee": 24800, "discount_period_months": 2}) == 138800
-    # 할인 기간 미기재 = 무기한
-    assert six_month_cost({"discounted_fee": 17500, "monthly_fee": 17500, "discount_period_months": None}) == 105000
+    # 할인 기간이 비교 구간보다 짧으면 남은 달은 정가 (구간 12개월)
+    assert COMPARE_MONTHS == 12
+    assert total_cost({"discounted_fee": 19800, "monthly_fee": 24800, "discount_period_months": 7}) == 19800 * 7 + 24800 * 5
+    assert total_cost({"discounted_fee": 19800, "monthly_fee": 24800, "discount_period_months": 2}) == 19800 * 2 + 24800 * 10
+    # 할인 기간 미기재 = 무기한 (costIsEstimate 로 추정임을 표시한다)
+    assert total_cost({"discounted_fee": 17500, "monthly_fee": 17500, "discount_period_months": None}) == 17500 * 12
 
     from agent.data import get_plan, all_plans
 
@@ -367,14 +378,23 @@ if __name__ == "__main__":
     assert _tethering_label({"tethering_gb": None}) == "확인 필요"
     assert _tethering_label({"tethering_gb": 10.0}) == "10GB"
 
-    # 혜택 가치를 반영한 실부담은 요금 합계와 달라야 한다
-    valued = next(r for r in rows if r.get("benefit_value_won"))
-    item_valued = to_plan_item(valued)
+    # 차감 가능한 현금성 혜택이 있으면 실부담이 요금 합계보다 작다
+    deductible_row = next(r for r in rows if r.get("benefit_deductible_won"))
+    item_valued = to_plan_item(deductible_row)
     assert item_valued["effectiveTotalNum"] < item_valued["totalNum"]
-    assert item_valued["benefitValue"] > 0
+    assert item_valued["benefitDeductible"] > 0
+
+    # 구독형·조건부 혜택은 금액이 잡혀 있어도 납부액에서 빼지 않는다
+    subscription_only = next(
+        r for r in rows if r.get("benefit_value_won") and not r.get("benefit_deductible_won")
+    )
+    item_sub = to_plan_item(subscription_only)
+    assert item_sub["effectiveTotalNum"] == item_sub["totalNum"], item_sub["name"]
+    assert item_sub["benefitValue"] > 0
+
     # 실부담은 음수가 되지 않는다 (월 7,000원 요금에 월 34,000원 페이백인 상품이 실재한다)
     assert all(to_plan_item(r)["effectiveTotalNum"] >= 0 for r in rows)
-    generous = to_plan_item({**valued, "benefit_value_won": 10**7})
+    generous = to_plan_item({**deductible_row, "benefit_deductible_won": 10**7})
     assert generous["effectiveTotalNum"] == 0 and generous["benefitExceedsFee"] is True
 
     # 비교 구간 밖에서 오르는 프로모션도 알린다
@@ -386,6 +406,9 @@ if __name__ == "__main__":
     }
     assert to_plan_item(long_promo)["priceRisesAfter"] is None
     assert to_plan_item(long_promo)["priceRisesLater"] is True
+    # 제공 기간이 확인되지 않은 할인은 추정으로 표시한다
+    assert to_plan_item({**long_promo, "discount_period_months": None})["costIsEstimate"] is True
+    assert to_plan_item({**long_promo, "discount_period_months": 3})["priceRisesAfter"] == 3
     assert _data_label({"data_unlimited": True, "data": "무제한 (QoS 1Mbps)"}) == "무제한"
     assert _data_label({"data_unlimited": False, "data_gb": 4.5, "data": "x"}) == "4.5GB"
     assert _data_label({"data_unlimited": False, "data_gb": 20.0, "data": "x"}) == "20GB"

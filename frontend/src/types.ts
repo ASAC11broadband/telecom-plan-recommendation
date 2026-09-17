@@ -36,6 +36,12 @@ export interface PlanItem {
   benefit: string;
   /** 수집된 혜택의 월 환산 원화 가치. 0 은 '혜택 없음'이 아니라 '금액 미확인'. */
   benefitValue: number;
+  /** 납부 총액에서 실제로 빼도 되는 부분(조건 없는 현금성 혜택)만. */
+  benefitDeductible: number;
+  /** 제공 기간이 확인되지 않은 혜택이 섞여 있으면 월 환산액은 추정이다. */
+  benefitValueEstimated: boolean;
+  /** 카드 실적·별도 가입 조건이 붙어 자동 차감하지 않은 혜택 수. */
+  benefitConditionalCount: number;
   /** 축별 충족도 0~1. price/data/qos/benefit/voice/tethering */
   criteriaFit: Record<string, number>;
   expectedRank: number | null;

@@ -35,7 +35,12 @@ _GOAL_UNIT = 0.12
 _MAX_BOOSTED_SHARE = 0.60
 
 _WEIGHT_DATA_PATH = Path(__file__).resolve().parent / "weight_bootstrap.json"
-_PRICE_HORIZON_MONTHS = 12
+
+# 비용 비교 기간. 추천의 가격 효용, 화면의 총비용, 혜택 월 환산이 모두 이 값을 쓴다.
+# 예전에는 랭킹만 12개월이고 화면은 6개월이라 같은 상품의 "총비용"이 화면마다 달랐다.
+# 기준을 하나로 두지 않으면 어느 쪽이 맞는지 사용자가 판단할 수 없다.
+COMPARE_MONTHS = 12
+_PRICE_HORIZON_MONTHS = COMPARE_MONTHS
 _DATA_OVERSUPPLY_FLOOR = 0.8
 
 # '무제한' 요청에 대한 등급별 충족도. agent.data.data_tier 와 짝이다.
@@ -140,25 +145,6 @@ def _full_speed_coverage(plan: dict, target_gb: float | None) -> float:
     return _COVERAGE_FLOOR + (1.0 - _COVERAGE_FLOOR) * covered
 
 
-def _benefit_value_utility(candidates: list[dict]) -> list[float]:
-    """요청한 혜택이 없을 때의 혜택 축. 월 환산 원화 가치를 우선하고 개수로 보완한다.
-
-    예전에는 전 후보 0.5 상수라 축 자체가 아무것도 구분하지 못했다. 혜택상세 CSV 의
-    benefit_value_won(828개 요금제)을 쓰되, 금액이 수집되지 않은 요금제(대부분의 MNO
-    상품)끼리는 값이 전부 0 이라 다시 상수가 된다. 그래서 개수를 더해 최소한
-    '혜택 있음 > 혜택 없음'은 구분되게 한다.
-
-    두 항 모두 log 라서 금액이 있으면 금액이 지배한다(20,000원 -> 9.9, 혜택 3개 -> 1.4).
-    별도 가중치 상수를 두지 않아도 되는 이유다.
-    """
-    scores = [
-        math.log1p(max(0.0, float(p.get("benefit_value_won") or 0)))
-        + math.log1p(len(p.get("included_benefits") or []) + int(p.get("ott_option_count") or 0))
-        for p in candidates
-    ]
-    return _minmax(scores)
-
-
 def _benefit_fit(plan: dict, profile: object | dict | None) -> float:
     wanted_names = list(_profile_value(profile, "wanted_benefits") or [])
     wanted_categories = list(_profile_value(profile, "wanted_benefit_categories") or [])
@@ -245,10 +231,15 @@ def _utility_rows(
     requested_benefits = bool(_profile_value(profile, "wanted_benefits")) or bool(
         _profile_value(profile, "wanted_benefit_categories")
     )
+    # 혜택을 요청하지 않았으면 혜택 축은 순위를 바꾸지 않는다(통화 축과 같은 규칙).
+    # 예전에는 혜택 금액·개수를 효용으로 썼는데, '혜택은 상관없어'라고 말한 사용자에게도
+    # 페이백이 크거나 혜택 개수가 많은 상품이 위로 올라왔다. 수집된 혜택 금액은 사용자가
+    # 그 서비스를 실제로 쓰는지·지급 조건을 맞추는지가 확인돼야 절약액이 되는 값이라,
+    # 요청이 없을 때 순위 근거로 쓸 수 없다. 상수 축은 _discriminating 이 걸러 낸다.
     benefit_utility = (
         [_benefit_fit(p, profile) for p in candidates]
         if requested_benefits
-        else _benefit_value_utility(candidates)
+        else [0.5] * len(candidates)
     )
 
     columns = {
@@ -444,25 +435,27 @@ if __name__ == "__main__":
         "구분되지 않는 축의 우선순위는 순위를 바꾸지 않아야 한다"
     )
 
-    # 혜택 축은 요청이 없으면 개수가 아니라 원화 가치로 갈린다
+    # 혜택을 요청하지 않았으면 혜택 금액도 개수도 순위를 바꾸지 않는다.
+    # 수집된 혜택 금액은 사용자가 그 서비스를 실제로 쓰는지 확인돼야 절약액이 된다.
     valued = [
         {"plan_id": "rich", "discounted_fee": 20_000, "monthly_fee": 20_000, "data_gb": 10,
-         "benefit_value_won": 20_000},
+         "benefit_value_won": 20_000, "included_benefits": ["OTT", "멤버십", "데이터쉐어링"]},
         {"plan_id": "poor", "discounted_fee": 20_000, "monthly_fee": 20_000, "data_gb": 10,
-         "benefit_value_won": 0},
+         "benefit_value_won": 0, "included_benefits": []},
     ]
     benefit_column = [row[benefit_index] for row in _utility_rows(valued, None)]
-    assert benefit_column == [1.0, 0.0], benefit_column
-
-    # 금액이 수집되지 않은 상품끼리는 개수로라도 갈려야 한다 (MNO 상품은 대부분 금액이 없다)
-    unpriced = [
-        {"plan_id": "some", "discounted_fee": 20_000, "monthly_fee": 20_000, "data_gb": 10,
-         "included_benefits": ["OTT", "멤버십", "데이터쉐어링"]},
-        {"plan_id": "none", "discounted_fee": 20_000, "monthly_fee": 20_000, "data_gb": 10,
-         "included_benefits": []},
+    assert benefit_column == [0.5, 0.5], benefit_column
+    assert "benefit" not in _discriminating(_utility_rows(valued, None))
+    # 혜택이 많은 쪽이 비싼 상황: 혜택 때문에 순위가 뒤집히면 안 된다
+    tilted = [
+        {**valued[0], "discounted_fee": 25_000, "monthly_fee": 25_000},
+        valued[1],
     ]
-    unpriced_column = [row[benefit_index] for row in _utility_rows(unpriced, None)]
-    assert unpriced_column == [1.0, 0.0], unpriced_column
+    assert rank_smaa2(evaluate_mcda(tilted))[0].plan_id == "poor", "혜택이 가격을 이기면 안 된다"
+
+    # 혜택을 요청하면 그때는 요청과 일치하는지로 갈린다
+    asked = [row[benefit_index] for row in _utility_rows(valued, {"wanted_benefits": ["OTT"]})]
+    assert asked == [1.0, 0.0], asked
 
     # '무제한' 요청: 소진 후 등급이 같아도 전속으로 버티는 양이 순위를 갈라야 한다
     unlimited_ask = [

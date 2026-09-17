@@ -458,9 +458,9 @@ function PlanCard({
         <span className="k">{plan.compareMonths}개월 총비용</span>
         <span className="v num">{plan.total}</span>
       </div>
-      {plan.benefitValue > 0 && (
+      {plan.benefitDeductible > 0 && (
         <div className="total-row sub">
-          <span className="k">혜택 차감 참고값</span>
+          <span className="k">현금성 혜택 차감 참고값</span>
           <span className="v num">
             {plan.benefitExceedsFee ? '0원 (혜택이 요금 초과)' : plan.effectiveTotal}
           </span>
@@ -496,9 +496,9 @@ export function CompareTable({ plans }: { plans: PlanItem[] }) {
     ['가입 조건', (p) => p.ageCondition || '수집된 제한 없음'],
     ['비용 계산 안내', (p) => p.costIsEstimate ? '할인 기간 미확인 · 현재가 유지 가정' : `${p.compareMonths}개월 기준`],
     ['주요 혜택', (p) => p.benefit],
-    ['혜택 월 환산', (p) => (p.benefitValue ? `${p.benefitValue.toLocaleString()}원` : '확인 필요')],
+    ['혜택 월 환산 (참고값)', (p) => (p.benefitValue ? `${p.benefitValue.toLocaleString()}원${p.benefitValueEstimated ? ' (추정)' : ''}` : '확인 필요')],
     [`${plans[0].compareMonths}개월 총비용`, (p) => p.total],
-    [`${plans[0].compareMonths}개월 혜택 차감 참고값`, (p) => p.effectiveTotal],
+    [`${plans[0].compareMonths}개월 현금성 혜택 차감 참고값`, (p) => (p.benefitDeductible ? p.effectiveTotal : '해당 없음')],
   ];
 
   return (

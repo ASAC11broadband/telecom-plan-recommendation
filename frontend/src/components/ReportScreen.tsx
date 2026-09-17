@@ -280,22 +280,31 @@ export function ReportScreen({
             {plan.benefitValue > 0 && (
               <>
                 <div className="r">
-                  <span>혜택 월 환산 가치</span>
-                  <span className="v num">-{plan.benefitValue.toLocaleString()}원 / 월</span>
+                  <span>혜택 월 환산 가치{plan.benefitValueEstimated ? ' (추정)' : ''}</span>
+                  <span className="v num">{plan.benefitValue.toLocaleString()}원 / 월</span>
                 </div>
-                <div className="r">
-                  <span>{cost.months}개월 혜택 차감 참고값</span>
-                  <span className="v num">
-                    {plan.benefitExceedsFee ? '0원 (혜택이 요금을 초과)' : plan.effectiveTotal}
-                  </span>
-                </div>
+                {plan.benefitDeductible > 0 && (
+                  <div className="r">
+                    <span>{cost.months}개월 현금성 혜택 차감 참고값</span>
+                    <span className="v num">
+                      {plan.benefitExceedsFee ? '0원 (혜택이 요금을 초과)' : plan.effectiveTotal}
+                    </span>
+                  </div>
+                )}
               </>
             )}
           </div>
           {plan.benefitValue > 0 && (
             <p style={{ marginTop: 8, fontSize: 'var(--fs-11)', color: 'var(--t3)' }}>
-              혜택 차감값은 납부할 금액이 아닙니다. 혜택을 실제 이용하고 지급 조건을 충족한다는
-              가정의 참고값이며, 금액 미확인 혜택은 합계에서 제외했습니다.
+              혜택 월 환산 가치는 납부액 할인이 아닙니다. 해당 서비스를 실제 이용하고 직접
+              결제 중일 때만 절약이 되므로 총비용에서 빼지 않았습니다. 금액 미확인 혜택은
+              합계에서 제외했습니다.
+              {plan.benefitValueEstimated &&
+                ' 제공 기간이 확인되지 않은 혜택이 있어 월 환산액은 추정입니다.'}
+              {plan.benefitConditionalCount > 0 &&
+                ` 카드 실적·별도 가입 같은 조건이 붙은 혜택 ${plan.benefitConditionalCount}건은 차감하지 않았습니다.`}
+              {plan.benefitDeductible > 0 &&
+                ` 차감 참고값에는 조건 없는 현금성 혜택 월 ${plan.benefitDeductible.toLocaleString()}원만 반영했습니다.`}
               {plan.benefitExceedsFee &&
                 ' 이 요금제는 환산한 혜택 금액이 요금보다 커서 0원으로 표시했습니다. 페이백은 유지 기간·결제수단 같은 조건이 붙는 경우가 많으니 반드시 확인하세요.'}
             </p>

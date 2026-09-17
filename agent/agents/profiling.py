@@ -54,6 +54,9 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   '초이스90', '너겟59', '스마트 20GB' 의 숫자를 budget 필드로 옮기지 마라.
 - N만원대 → budget_min_won=N0,000, budget_max_won=N9,999
 - N만원 이하/이상 → budget_max_won/budget_min_won
+- 'N만원 이하'는 상한만 말한 것이다. budget_min_won 은 null로 둔다. 상한과 같은 값을
+  하한에 복사하면 정확히 그 금액인 상품만 남는다. 하한은 '이상/부터/N만원대'처럼
+  사용자가 직접 아래쪽 경계를 말했을 때만 채운다.
 - N만원 정도·내외·안팎 → N만원 ±5,000원
 - 데이터 NGB 이상은 min_data_gb, 데이터 NGB 이하·미만·최대 NGB는 max_data_gb에 저장한다.
   데이터 NGB 정도·쯤·내외·전후처럼 목표량을 말하면 target_data_gb에 저장하고
@@ -167,6 +170,19 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - sms와 carrier는 점수 우선순위가 아니다. '문자가 중요하다'만으로 sms_unlimited를 추측하지 말고,
   선호 통신사 이름 없이 '통신사가 중요하다'고만 하면 carrier 조건도 추측하지 않는다.
 - 구체적인 금액·사용량·통신사·혜택 등 필터 조건은 기본적으로 Hard Constraint다.
+- 다만 말투가 희망이면 Hard Constraint가 아니다. 값은 해당 필드에 그대로 저장하되
+  hard_constraints 목록에서는 뺀다. 그 조건을 만족하지 않는 상품도 후보로 남기고
+  점수에서만 유리하게 본다.
+  희망: '가능하면', '되도록', '웬만하면', '있으면 좋겠다', '~면 좋겠어', '선호해', '괜찮을 것 같아'
+  필수: '~만', '반드시', '꼭', '무조건', '있어야 해', '필수', '아니면 안 돼'
+  예) '넷플릭스 포함이면 좋겠어' → wanted_benefits=['넷플릭스'], hard_constraints에 넣지 않음
+      '넷플릭스 포함 요금제만 원해' → wanted_benefits=['넷플릭스'], hard_constraints에 포함
+      '넷플릭스 이용 중이야' → 혜택 요구가 아니다. wanted_benefits를 채우지 않는다.
+      '혜택은 상관없어' → 혜택 필드를 모두 비우고 notes에만 적는다.
+- '가능하면 데이터가 넉넉했으면 좋겠어'처럼 수치 없는 여유 희망은 min_data_gb를 만들지 말고
+  priorities에 data를 넣어 가중치로만 반영한다.
+- 필수 조건이라는 이유로 같은 축을 priorities에도 넣지 않는다. 두 곳은 서로 다른 뜻이다
+  (필터 대 정렬 가중치).
 - 가장 싼 것·데이터 많은 순 같은 정렬 표현은 조건 필드가 아니라 priorities에만 저장한다.
 - 가격대·연령·브랜드 변환처럼 정해진 정규화는 assumptions에 반복 기록하지 않는다.
 
@@ -222,9 +238,22 @@ _BUDGET_MAX_RE = re.compile(
 )
 _BUDGET_UNIT = {"만원": 10_000, "천원": 1_000, "원": 1}
 
+# 하한을 말하는 표현. 'N만원대'는 하한과 상한을 동시에 뜻하므로 여기 포함한다.
+_BUDGET_MIN_RE = re.compile(
+    r"[\d,]+(?:\.\d+)?\s*(?:만원|천원|원)\s*(?:이상|부터|넘|초과)"
+    r"|[\d,]+\s*만원\s*대"
+    r"|최소\s*[\d,]+\s*(?:만원|천원|원)",
+    re.IGNORECASE,
+)
+
 
 def _repair_budget_bounds(profile: UserProfile, query: str) -> UserProfile:
-    """'N만원 이하'의 경계를 확정하고 의미 없는 하한 0을 지운다."""
+    """'N만원 이하'의 경계를 확정하고 사용자가 말하지 않은 하한을 지운다.
+
+    '3만원 이하로 추천해줘'에 LLM 이 'N만원대' 규칙을 섞어 쓰면 budget_min_won=30,000 이
+    함께 붙는다. 상한을 30,000 으로 못 박고 나면 하한과 상한이 같아져 정확히 30,000원인
+    상품만 남는다(실측: 후보 578건 -> 4건). 사용자는 하한을 말한 적이 없다.
+    """
     updates: dict[str, object] = {}
     matches = list(_BUDGET_MAX_RE.finditer(query or ""))
     if matches:
@@ -234,6 +263,8 @@ def _repair_budget_bounds(profile: UserProfile, query: str) -> UserProfile:
         if matches[-1].group(0).rstrip().endswith("미만"):
             limit -= 1
         updates["budget_max_won"] = limit
+        if profile.budget_min_won is not None and not _BUDGET_MIN_RE.search(query or ""):
+            updates["budget_min_won"] = None
     if profile.budget_min_won == 0:
         updates["budget_min_won"] = None
     return profile.model_copy(update=updates) if updates else profile
@@ -578,12 +609,77 @@ def core_signal_missing(profile: UserProfile | None) -> bool:
     return not (has_data or has_fee or has_reference)
 
 
+# "~면 좋겠어" 류. 조건을 말하긴 했지만 못 맞추면 탈락시킬 정도는 아니라는 뜻이다.
+_BENEFIT_WISH_RE = re.compile(
+    r"면\s*좋(?:겠|을)|있으면\s*좋|가능하면|되도록|웬만하면|선호|괜찮을\s*것\s*같",
+)
+# "~만", "반드시" 류. 못 맞추면 후보에서 빼라는 뜻이다.
+_BENEFIT_MUST_RE = re.compile(
+    r"만\s*(?:원해|원합|주세|보여|추천|찾|골라|해\s*줘)|반드시|무조건|필수|꼭\s|있어야",
+)
+_BENEFIT_FIELDS = ("wanted_benefits", "wanted_benefit_categories")
+
+
+def _apply_benefit_constraint_strength(profile: UserProfile, query: str) -> UserProfile:
+    """혜택 조건이 필수인지 선호인지를 말투로 갈라 hard_constraints 를 고친다.
+
+    '넷플릭스 포함이면 좋겠어'까지 필수 필터가 되면 포함하지 않은 상품이 후보에서 통째로
+    사라진다. 사용자가 원한 건 가점이지 배제가 아니다. 반대로 '넷플릭스 포함만 원해'는
+    필터여야 한다. 둘 다 아니면 LLM 이 정한 값을 그대로 둔다.
+    """
+    if not any(getattr(profile, field, None) for field in _BENEFIT_FIELDS):
+        return profile
+    text = query or ""
+    must, wish = _BENEFIT_MUST_RE.search(text), _BENEFIT_WISH_RE.search(text)
+    if must or not wish:
+        if not must:
+            return profile
+        missing = [f for f in _BENEFIT_FIELDS if getattr(profile, f, None) and f not in profile.hard_constraints]
+        if not missing:
+            return profile
+        return profile.model_copy(update={"hard_constraints": [*profile.hard_constraints, *missing]})
+    relaxed = [field for field in profile.hard_constraints if field not in _BENEFIT_FIELDS]
+    if len(relaxed) == len(profile.hard_constraints):
+        return profile
+    return profile.model_copy(update={"hard_constraints": relaxed})
+
+
+# 수치 없이 "데이터가 넉넉했으면" 하는 희망. 필터 조건은 못 되지만 버리면 안 된다.
+_DATA_WISH_RE = re.compile(
+    r"(?:데이터|용량)[^.\n]{0,12}(?:넉넉|여유|충분|많[았으은]|빵빵)"
+    r"|(?:넉넉|여유|충분)[^.\n]{0,10}(?:데이터|용량)",
+)
+
+
+def _apply_soft_data_preference(profile: UserProfile, query: str) -> UserProfile:
+    """'가능하면 데이터가 넉넉했으면' 을 가중치 보정으로 남긴다.
+
+    수치가 없으니 min_data_gb 를 만들 수 없고, LLM 은 조건 필드에 못 넣으면 그냥 버린다.
+    그러면 예산만 맞는 10GB 요금제가 상위를 채운다 — 사용자가 말한 것이 사라진 것이다.
+    필터가 아니라 data 축 가중치로만 반영한다(필수 조건이 아니므로 후보는 그대로 둔다).
+    """
+    if not _DATA_WISH_RE.search(query or ""):
+        return profile
+    if any(
+        value is not None
+        for value in (profile.min_data_gb, profile.target_data_gb, profile.data_unlimited)
+    ):
+        return profile  # 사용자가 수치나 무제한을 말했으면 그쪽이 우선이다
+    priorities = list(profile.priorities or [])
+    if "data" in priorities:
+        return profile
+    return profile.model_copy(update={"priorities": [*priorities, "data"]})
+
+
 # 구조화 출력을 사용자 발화로 되짚어 고치는 보정들. 순서대로 적용한다.
 # 프롬프트 지시만으로는 같은 오추출이 계속 재발해서 코드로 못 박는 자리다.
 _REPAIRS = (
     _drop_phantom_budget,
     _repair_budget_bounds,
+    _apply_benefit_constraint_strength,
     _drop_inferred_priorities,
+    # _drop_inferred_priorities 다음에 와야 한다. 앞에 두면 방금 넣은 data 가 지워진다.
+    _apply_soft_data_preference,
     _apply_user_age,
     _apply_explicit_qos_requirement,
     _apply_benefit_preference_question,
@@ -714,6 +810,44 @@ if __name__ == "__main__":
     assert _repair_budget_bounds(UserProfile(budget_max_won=39999), "3만원대로").budget_max_won == 39999
     # 직접 선택 입력이 만드는 문장. 천 단위 쉼표를 놓치면 상한이 0원이 된다.
     assert _repair_budget_bounds(UserProfile(), "월 예산 30,000원 이하").budget_max_won == 30000
+
+    # '3만원 이하'에 하한이 붙으면 정확히 3만원인 상품만 남는다 (후보 578건 -> 4건)
+    both = _repair_budget_bounds(
+        UserProfile(budget_min_won=30000, budget_max_won=39999), "월 데이터 20GB 이상, 요금 3만원 이하로 추천해줘"
+    )
+    assert both.budget_min_won is None and both.budget_max_won == 30000, both
+    # 사용자가 직접 말한 하한은 지운다
+    kept_min = _repair_budget_bounds(
+        UserProfile(budget_min_won=20000, budget_max_won=30000), "2만원 이상 3만원 이하로"
+    )
+    assert kept_min.budget_min_won == 20000 and kept_min.budget_max_won == 30000, kept_min
+    assert _repair_budget_bounds(UserProfile(budget_min_won=30000), "3만원대로").budget_min_won == 30000
+
+    # 혜택 조건의 세기: 희망은 선호, '~만'은 필수
+    wish = _apply_benefit_constraint_strength(
+        UserProfile(wanted_benefits=["넷플릭스"], hard_constraints=["wanted_benefits"]),
+        "넷플릭스 포함이면 좋겠어",
+    )
+    assert wish.wanted_benefits == ["넷플릭스"], wish
+    assert "wanted_benefits" not in wish.hard_constraints, wish.hard_constraints
+    must = _apply_benefit_constraint_strength(
+        UserProfile(wanted_benefits=["넷플릭스"], hard_constraints=[]),
+        "넷플릭스 포함 요금제만 원해",
+    )
+    assert "wanted_benefits" in must.hard_constraints, must.hard_constraints
+    # 혜택 조건이 없으면 아무것도 하지 않는다
+    assert _apply_benefit_constraint_strength(UserProfile(), "넷플릭스 이용 중이야").hard_constraints == []
+
+    # 수치 없는 데이터 여유 희망은 버리지 말고 가중치로 남긴다
+    wish = _apply_soft_data_preference(UserProfile(), "월 3만원 이하로. 가능하면 데이터가 넉넉했으면 좋겠어")
+    assert wish.priorities == ["data"], wish.priorities
+    assert wish.min_data_gb is None, "희망은 필터가 아니다"
+    # 수치를 말했으면 그쪽이 우선이라 가중치를 덧붙이지 않는다
+    assert _apply_soft_data_preference(UserProfile(min_data_gb=20), "데이터 넉넉하게 20GB 이상").priorities is None
+    assert _apply_soft_data_preference(UserProfile(), "3만원 이하").priorities is None
+    # 보정 순서: 정렬 요구 제거가 먼저, 데이터 희망 반영이 나중
+    order = list(_REPAIRS)
+    assert order.index(_drop_inferred_priorities) < order.index(_apply_soft_data_preference)
 
     # 예산 문장은 정렬 요구가 아니다 (priorities 가 붙으면 가중치가 한 축으로 쏠린다)
     assert _drop_inferred_priorities(UserProfile(priorities=["price"]), "월 3만원 이하로 추천해주세요").priorities is None

@@ -38,6 +38,15 @@ REPORT_PROMPT = """\
 - ranked_recommendations의 요금제는 모두 사용자의 필수 조건을 이미 통과한 후보다.
   하위 순위를 두고 예산 초과·데이터 부족 같은 조건 미달이라고 쓰지 마라. 순위 차이는
   조건 충족 여부가 아니라 제공량·가격·혜택의 우열로 설명한다.
+  20GB 이상을 요청한 사용자에게 20GB 이상을 주는 상품을 추천해 놓고 '데이터가 부족하다'고
+  쓰는 것은 사실과 어긋난다. 부족하다고 쓸 수 있는 경우는 단 하나,
+  profile.estimated_monthly_data_gb(예상 사용량)보다 제공량이 적을 때뿐이며 그때는
+  기준이 된 예상 사용량을 함께 밝힌다.
+- '완벽히 충족', '가장 우수', '최고', '모든 면에서'처럼 단정하는 표현은 후보 데이터로
+  그 자리에서 확인되는 경우에만 쓴다. 확인할 수 없으면 비교 대상과 범위를 좁혀
+  '이 추천 5개 중에서는 데이터가 가장 많다'처럼 근거가 보이게 쓴다.
+- 사용자가 혜택을 요청하지 않았으면(wanted_benefits와 wanted_benefit_categories가 모두 비었으면)
+  혜택이 적다·없다는 것을 단점으로 쓰지 않는다. 요청하지 않은 항목이라 순위와 무관하다.
 - 순위는 그대로 유지하되 앞 단계의 내부 계산 문구는 인용하지 않고 사용자 관점의 이유로 다시 설명한다.
 - matched_benefits가 있으면 사용자가 요청한 조건과 직접 일치하는 실제 혜택명이다.
   각 상품 설명 첫 문장에 이 혜택명을 생략하거나 일반화하지 말고 그대로 적는다.
@@ -55,14 +64,21 @@ REPORT_PROMPT = """\
 
 [리포트 작성 규칙]
 1. 한국어 Markdown으로 바로 사용자에게 보여 줄 최종 답변만 작성한다.
-2. 화면에 요금제 비교표가 별도로 있으므로 표를 만들거나 스펙을 길게 반복하지 않는다.
+2. 화면의 요금제 카드에 요금·데이터·통화·문자·혜택이 이미 표로 나와 있다. 표를 만들지 말고
+   카드에 적힌 스펙을 그대로 나열하지 않는다. "180GB의 데이터와 무제한 음성 및 SMS를
+   제공합니다" 같은 문장은 카드와 중복이라 쓰지 않는다.
 3. 반드시 `### 추천 결론` 제목으로 시작하고 전체 결과를 1~2문장으로 요약한다.
 4. ranked_recommendations의 모든 상품을 순위대로 다루며 제목을 반드시
    `### 1순위 — 요금제명`, `### 2순위 — 요금제명` 형식으로 작성한다.
-   각 상품은 2~3개의 짧은 문장으로 다음 내용을 자연스럽게 설명한다.
-   - 사용자의 조건을 어떻게 만족하는지
-   - 가격·데이터·혜택을 종합했을 때 이 순위로 선정된 이유
-   - 다른 후보와 비교한 장점 또는 주의할 트레이드오프
+   각 상품은 1~2문장으로 짧게 쓰고, 다음 두 가지만 담는다.
+   - 차별점: 다른 추천 후보와 견주어 이 상품에만 있는 점 (스펙 나열이 아니라 비교)
+   - 주의사항: 가입 전에 걸릴 수 있는 것 (할인 종료, 가입 조건, 소진 후 속도, 미수집 항목)
+   둘 중 하나가 없으면 그 문장은 빼고 짧게 끝낸다. 분량을 채우려 같은 말을 늘리지 않는다.
+   '이 요금제는 ~을 제공합니다'로 시작하지 마라. 그 자리에는 비교나 주의가 와야 한다.
+   나쁜 예: "이 요금제는 20GB의 데이터와 500분의 음성을 제공합니다."
+            (카드에 그대로 있는 값이라 읽는 사람이 얻는 것이 없다)
+   좋은 예: "같은 20GB 후보 중 유일하게 통화가 무제한입니다. 다만 소진 후 속도는 미수집입니다."
+   숫자를 쓰더라도 '다른 후보는 20GB인데 이것만 120GB'처럼 비교의 근거일 때만 쓴다.
    내부 계산 용어인 가중치, 기대순위, 수용도, 점수, 백분율은 절대 쓰지 않는다.
 5. 할인 가격과 정상가가 다르면 해당 상품마다 할인 기간과 종료 후 정상가를 정확히 안내한다.
    예산 조건은 할인 가격을 기준으로 통과했으므로, 할인 종료 후 정상가가 예산보다 높더라도
@@ -272,18 +288,29 @@ def _rank_reasons(report: str, recommendations: list[dict[str, Any]]) -> list[st
 
 
 def _ensure_promo_notices(report: str, recommendations: list[dict[str, Any]]) -> str:
-    """필수 요금 조건은 LLM의 문장 생략 여부에 맡기지 않고 원본으로 붙인다."""
+    """요금 조건은 LLM의 문장 생략 여부에 맡기지 않고 원본 값으로 붙인다.
+
+    상품 설명을 차별점·주의사항 중심으로 짧게 쓰게 하면서 금액을 본문에서 빼면,
+    코드 검증(_report_errors 의 '할인가 누락')에 걸려 리포트 단계가 통째로 재시도된다.
+    할인 중이 아닌 상품에도 같은 줄을 붙여 금액은 항상 확정 값으로 남긴다.
+    """
     by_rank = {int(plan['rank']): plan for plan in recommendations}
     for heading in reversed(list(_RANK_HEADING.finditer(report))):
         plan = by_rank.get(int(heading.group(1)))
-        if not plan or plan.get('monthly_fee') == plan.get('discounted_fee'):
+        if not plan:
             continue
         following = re.search(r'^###\s', report[heading.end():], re.MULTILINE)
         end = heading.end() + following.start() if following else len(report)
-        period = plan.get('discount_period_months')
-        timing = f"할인 {period}개월 후" if period is not None else "할인 기간 미확인 · 할인 종료 후"
-        notice = (f"\n\n요금 조건: 현재 월 {plan['discounted_fee']:,}원, {timing} "
-                  f"월 {plan['monthly_fee']:,}원. 가입 조건은 사업자 고지를 확인해 주세요.\n\n")
+        fee = int(plan.get('discounted_fee') or 0)
+        regular = plan.get('monthly_fee')
+        if regular is not None and int(regular) != fee:
+            period = plan.get('discount_period_months')
+            timing = f"할인 {period}개월 후" if period is not None else "할인 기간 미확인 · 할인 종료 후"
+            detail = f"현재 월 {fee:,}원, {timing} 월 {int(regular):,}원"
+        else:
+            detail = f"월 {fee:,}원 (할인 없음)"
+        notice = (f"\n\n요금 조건: {detail}. "
+                  f"가입 조건은 사업자 고지를 확인해 주세요.\n\n")
         report = report[:end].rstrip() + notice + report[end:]
     return report
 

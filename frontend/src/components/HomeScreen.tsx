@@ -40,7 +40,7 @@ export function HomeScreen({ onNavigate }: { onNavigate: (s: ScreenType) => void
           <ul className="entry-list">
             <li>채팅 또는 직접 선택 입력</li>
             <li>추천 사유 자연어 설명</li>
-            <li>{stats?.compareMonths ?? 6}개월 기준 총비용 비교</li>
+            <li>{stats?.compareMonths ?? 12}개월 기준 총비용 비교</li>
           </ul>
           <button className="btn btn-primary btn-block" onClick={() => onNavigate('s-input')}>
             AI 추천 시작

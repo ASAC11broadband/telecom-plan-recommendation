@@ -13,7 +13,7 @@ from agent.agents.evaluation import _ranking_errors, evaluation_node
 from agent.agents.profiling import _apply_user_age
 from backend.main import app, _llm_calls, LLM_CALLS_PER_MINUTE
 from backend.analysis import analysis_snapshot
-from backend.plans import to_plan_item, six_month_cost
+from backend.plans import COMPARE_MONTHS, to_plan_item, total_cost
 
 
 class ServiceProcessTests(unittest.TestCase):
@@ -78,7 +78,48 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertTrue(item['costIsEstimate'])
         self.assertIn('확인 필요', item['priceNote'])
         self.assertEqual(item['rankingAverageFee'], 1000)
-        self.assertEqual(six_month_cost({**row, 'discount_period_months': 2}), 82000)
+        self.assertEqual(total_cost({**row, 'discount_period_months': 2}), 1000 * 2 + 20000 * (COMPARE_MONTHS - 2))
+
+    def test_compare_period_is_single_source_of_truth(self):
+        """추천 가격 평가와 화면 총비용이 같은 기간을 써야 서로 비교된다."""
+        from agent.data import BENEFIT_AMORTIZE_MONTHS
+        item = to_plan_item(self.rows[0])
+        self.assertEqual(item['compareMonths'], item['rankingMonths'])
+        self.assertEqual(BENEFIT_AMORTIZE_MONTHS, COMPARE_MONTHS)
+
+    def test_benefit_is_not_deducted_without_confirmed_usage(self):
+        """이용 여부·지급 조건이 확인되지 않은 혜택은 납부액에서 빼지 않는다."""
+        subscription = next(
+            r for r in self.rows
+            if r['benefit_value_won'] and not r['benefit_deductible_won']
+        )
+        item = to_plan_item(subscription)
+        self.assertGreater(item['benefitValue'], 0)
+        self.assertEqual(item['benefitDeductible'], 0)
+        self.assertEqual(item['effectiveTotalNum'], item['totalNum'])
+
+    def test_benefit_axis_is_neutral_when_not_requested(self):
+        """'혜택은 상관없어' 사용자에게 혜택 금액·개수가 순위를 바꾸면 안 된다."""
+        from agent.mcda import CRITERIA, _discriminating, _utility_rows
+        rows = [r for r in self.rows if r['benefit_value_won']][:20]
+        rows += [r for r in self.rows if not r['benefit_value_won']][:20]
+        utilities = _utility_rows(rows, UserProfile(budget_max_won=50000))
+        self.assertNotIn('benefit', _discriminating(utilities))
+        index = CRITERIA.index('benefit')
+        self.assertEqual({round(row[index], 6) for row in utilities}, {0.5})
+
+    def test_preferred_benefit_does_not_remove_candidates(self):
+        """선호로 말한 혜택은 필터가 아니다 (알뜰폰＋별도 구독 비교가 가능해야 한다)."""
+        hard = filter_candidates({
+            'budget_max_won': 50000, 'wanted_benefits': ['넷플릭스'],
+            'hard_constraints': ['budget_max_won', 'wanted_benefits'],
+        })
+        soft = filter_candidates({
+            'budget_max_won': 50000, 'wanted_benefits': ['넷플릭스'],
+            'hard_constraints': ['budget_max_won'],
+        })
+        self.assertGreater(len(soft), len(hard))
+        self.assertTrue(any(r['carrier_type'] == 'MVNO' for r in soft))
 
     def test_manual_current_plan_no_longer_crashes_api(self):
         state = {'profile': UserProfile(reference_fee_won=50000), 'reference': {'discounted_fee': 50000},
