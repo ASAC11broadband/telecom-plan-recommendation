@@ -21,15 +21,34 @@ import math
 
 CRITERIA = ("price", "data", "qos", "benefit", "voice", "tethering")
 
-# 우선순위 1단계당/비교 목표당 얼마나 가산할지. 예전 감마분포 버전이 균등 alpha=1.0
-# 기준(합계 len(CRITERIA))에 +10.0/+12.0을 더하던 것과 같은 비율로, 합계가 1인
-# 실측 가중치 벡터에 맞게 축소했다.
-_PRIORITY_UNIT = 10.0 / len(CRITERIA)
-_GOAL_UNIT = 12.0 / len(CRITERIA)
+# 우선순위 1단계당/비교 목표당 얼마나 가산할지.
+#
+# 실측 가중치 벡터는 합이 1.0 이다. 여기에 10.0/6 = 1.667 을 더하면 우선순위를 하나만
+# 말해도 그 축이 재정규화 뒤 81% 를 먹는다(price 0.483 -> 0.815). 예전 감마분포 버전은
+# alpha 합계가 6 이라 같은 +10 이 1.6배 기울기였는데, 합계 1 벡터에 그대로 옮기면서
+# 2.7배로 증폭됐다. 실제로 "3만원 이하" 사용자에게 10GB/10원 요금제가 1순위로 올라왔다.
+# 합계 1 기준으로 다시 맞춘다: 우선순위 1개 -> 해당 축 약 0.53, 3개 -> 약 0.6/0.3/0.2 비율.
+_PRIORITY_UNIT = 0.10
+_GOAL_UNIT = 0.12
+# 한 축이 결정을 독점하지 못하게 하는 상한. SMAA-2 는 가중치 불확실성을 탐색하는 방법인데
+# 한 축이 이 이상을 먹으면 나머지 표본이 의미를 잃는다.
+_MAX_BOOSTED_SHARE = 0.60
 
 _WEIGHT_DATA_PATH = Path(__file__).resolve().parent / "weight_bootstrap.json"
 _PRICE_HORIZON_MONTHS = 12
 _DATA_OVERSUPPLY_FLOOR = 0.8
+
+# '무제한' 요청에 대한 등급별 충족도. agent.data.data_tier 와 짝이다.
+# 완전 무제한이 1.0 이지만 소진 후 HD 가 되는 QoS형과의 차이는 크지 않다 — 실제 체감은
+# 오히려 후자가 빠른 경우가 많다.
+_UNLIMITED_TIER_FIT = {
+    "unlimited_full": 1.0,
+    "qos_hd": 0.95,
+    "qos_sd": 0.80,
+    "qos_lite": 0.60,
+    "qos_text": 0.0,
+    "capped": 0.0,
+}
 
 
 def _load_base_weights() -> list[list[float]]:
@@ -52,6 +71,9 @@ class MCDAResult:
     smaa2_expected_rank: float
     smaa2_score: int
     favorable_weights: tuple[float, ...]
+    # 축별 효용(0~1). SMAA-2 계산에는 쓰지 않고 "왜 이 순위인지"를 화면에 보여주는 용도다.
+    # 후보가 2천 건이면 smaa2_score 는 상위 5개가 전부 100 으로 포화해 변별력이 없다.
+    utilities: tuple[float, ...] = ()
 
 
 def _minmax(values: list[float], *, cost: bool = False) -> list[float]:
@@ -105,6 +127,38 @@ def _target_data_fit(value: float, target: float) -> float:
     return 1.0 - (1.0 - _DATA_OVERSUPPLY_FLOOR) * (ratio - 1.0)
 
 
+# 기본 제공량이 예상 사용량을 못 채워도 QoS 로 계속 쓸 수는 있다. 그래서 0 으로 떨어뜨리지
+# 않고 이 값까지만 깎는다.
+_COVERAGE_FLOOR = 0.6
+
+
+def _full_speed_coverage(plan: dict, target_gb: float | None) -> float:
+    """예상 사용량 중 몇 할을 '전속'으로 쓸 수 있는지. 목표가 없으면 등급만 본다."""
+    if target_gb is None or float(target_gb) <= 0 or plan.get("data_unlimited"):
+        return 1.0
+    covered = min(1.0, float(plan.get("data_gb") or 0) / float(target_gb))
+    return _COVERAGE_FLOOR + (1.0 - _COVERAGE_FLOOR) * covered
+
+
+def _benefit_value_utility(candidates: list[dict]) -> list[float]:
+    """요청한 혜택이 없을 때의 혜택 축. 월 환산 원화 가치를 우선하고 개수로 보완한다.
+
+    예전에는 전 후보 0.5 상수라 축 자체가 아무것도 구분하지 못했다. 혜택상세 CSV 의
+    benefit_value_won(828개 요금제)을 쓰되, 금액이 수집되지 않은 요금제(대부분의 MNO
+    상품)끼리는 값이 전부 0 이라 다시 상수가 된다. 그래서 개수를 더해 최소한
+    '혜택 있음 > 혜택 없음'은 구분되게 한다.
+
+    두 항 모두 log 라서 금액이 있으면 금액이 지배한다(20,000원 -> 9.9, 혜택 3개 -> 1.4).
+    별도 가중치 상수를 두지 않아도 되는 이유다.
+    """
+    scores = [
+        math.log1p(max(0.0, float(p.get("benefit_value_won") or 0)))
+        + math.log1p(len(p.get("included_benefits") or []) + int(p.get("ott_option_count") or 0))
+        for p in candidates
+    ]
+    return _minmax(scores)
+
+
 def _benefit_fit(plan: dict, profile: object | dict | None) -> float:
     wanted_names = list(_profile_value(profile, "wanted_benefits") or [])
     wanted_categories = list(_profile_value(profile, "wanted_benefit_categories") or [])
@@ -147,7 +201,16 @@ def _utility_rows(
         target_data = _profile_value(profile, "estimated_monthly_data_gb")
 
     if _profile_value(profile, "data_unlimited") is True:
-        data_utility = [1.0 if p.get("data_unlimited") else 0.0 for p in candidates]
+        # '무제한'은 0/1 이 아니다. 완전 무제한의 소진 후 속도는 중앙 0.1Mbps 인데
+        # QoS형 100GB+5Mbps 는 3~10Mbps 로 오히려 빠르다. 등급으로 점수를 매긴다.
+        #
+        # 등급만 보면 '4.5GB + 소진 후 1Mbps'가 '120GB + 소진 후 5Mbps'와 같은 취급을
+        # 받는다. 예상 사용량을 알면 전속으로 얼마나 버티는지를 함께 본다.
+        data_utility = [
+            _UNLIMITED_TIER_FIT.get(p.get("data_tier"), 0.0)
+            * _full_speed_coverage(p, target_data)
+            for p in candidates
+        ]
     elif explicit_min_data is not None:
         data_utility = [
             1.0
@@ -179,15 +242,27 @@ def _utility_rows(
         # 요구량이 없으면 통화량이 많다는 이유만으로 순위를 바꾸지 않는다.
         voice_utility = [0.5] * len(candidates)
 
+    requested_benefits = bool(_profile_value(profile, "wanted_benefits")) or bool(
+        _profile_value(profile, "wanted_benefit_categories")
+    )
+    benefit_utility = (
+        [_benefit_fit(p, profile) for p in candidates]
+        if requested_benefits
+        else _benefit_value_utility(candidates)
+    )
+
     columns = {
         "price": price_utility,
         "data": data_utility,
         "qos": _minmax([float(p.get("qos_mbps") or 0) for p in candidates]),
-        "benefit": [_benefit_fit(p, profile) for p in candidates],
+        "benefit": benefit_utility,
         "voice": voice_utility,
         "tethering": _minmax([float(p.get("tethering_gb") or 0) for p in candidates]),
     }
     return [[columns[name][i] for name in CRITERIA] for i in range(len(candidates))]
+
+
+_GOAL_CRITERIA = {"cheaper": "price", "more_data": "data", "faster_qos": "qos"}
 
 
 def _boosted(vector: list[float], priorities: list[str], comparison_goals: list[str]) -> list[float]:
@@ -198,24 +273,47 @@ def _boosted(vector: list[float], priorities: list[str], comparison_goals: list[
         extra = max(0, len(priorities) - position) * _PRIORITY_UNIT
         boosted[CRITERIA.index(name)] += extra
 
-    goal_criteria = {
-        "cheaper": "price",
-        "more_data": "data",
-        "faster_qos": "qos",
-    }
     for goal in comparison_goals:
-        criterion = goal_criteria.get(goal)
+        criterion = _GOAL_CRITERIA.get(goal)
         if criterion:
             boosted[CRITERIA.index(criterion)] += _GOAL_UNIT
 
     total = sum(boosted)
-    return [value / total for value in boosted]
+    normalized = [value / total for value in boosted]
+
+    # 상한을 넘은 축은 초과분을 나머지 축에 원래 비율대로 돌려준다.
+    highest = max(normalized)
+    if highest > _MAX_BOOSTED_SHARE:
+        index = normalized.index(highest)
+        spare = highest - _MAX_BOOSTED_SHARE
+        rest = sum(value for i, value in enumerate(normalized) if i != index) or 1.0
+        normalized = [
+            _MAX_BOOSTED_SHARE if i == index else value + spare * value / rest
+            for i, value in enumerate(normalized)
+        ]
+    return normalized
 
 
 def _weight_samples(priorities: list[str], comparison_goals: list[str]) -> list[list[float]]:
     if not priorities and not comparison_goals:
         return [list(vector) for vector in _BASE_WEIGHTS]
     return [_boosted(vector, priorities, comparison_goals) for vector in _BASE_WEIGHTS]
+
+
+def _discriminating(utilities: list[list[float]]) -> set[str]:
+    """후보 사이에서 실제로 값이 갈리는 축만 돌려준다.
+
+    요청한 혜택이 없으면 benefit 효용은 전 후보 같은 값이다. 이런 상수 축에 우선순위를
+    얹으면 가중치의 대부분이 아무것도 구분하지 못하는 축으로 빠지고, 남은 자투리로만
+    순위가 정해진다. ('혜택 비슷한 걸로' 요청에 0.5GB 요금제가 1순위로 올라온 원인)
+    """
+    if len(utilities) < 2:
+        return set(CRITERIA)
+    return {
+        name
+        for index, name in enumerate(CRITERIA)
+        if max(row[index] for row in utilities) - min(row[index] for row in utilities) > 1e-9
+    }
 
 
 def evaluate_mcda(
@@ -232,7 +330,15 @@ def evaluate_mcda(
     if len(plan_ids) != len(set(plan_ids)):
         raise ValueError("MCDA 후보의 plan_id는 서로 달라야 합니다.")
     utilities = _utility_rows(candidates, profile)
-    weights = _weight_samples(priorities or [], comparison_goals or [])
+    usable = _discriminating(utilities)
+    weights = _weight_samples(
+        [name for name in (priorities or []) if name in usable],
+        [
+            goal
+            for goal in (comparison_goals or [])
+            if _GOAL_CRITERIA.get(goal, "price") in usable
+        ],
+    )
     samples = len(weights)
     n = len(candidates)
     rank_counts = [[0] * n for _ in candidates]
@@ -266,6 +372,7 @@ def evaluate_mcda(
                 value / favorable_counts[i] if favorable_counts[i] else 0.0
                 for value in favorable_weight_sums[i]
             ),
+            utilities=tuple(utilities[i]),
         )
         for i, candidate in enumerate(candidates)
     ]
@@ -314,4 +421,63 @@ if __name__ == "__main__":
     assert [round(row[data_index], 2) for row in rows] == [1.0, 0.9, 0.8]
     assert [row[benefit_index] for row in rows] == [1.0, 0.0, 1.0]
     assert [row[voice_index] for row in rows] == [1.0, 1.0, 1.0]
+
+    # 우선순위 하나가 결정을 독점하면 안 된다 (예전 스케일에서 price 가 0.815 를 먹었다)
+    price_index = CRITERIA.index("price")
+    boosted_one = _weight_samples(["price"], [])[0]
+    assert 0.45 < boosted_one[price_index] <= _MAX_BOOSTED_SHARE, boosted_one[price_index]
+    assert boosted_one[price_index] > _BASE_WEIGHTS[0][price_index], "우선순위는 반영돼야 한다"
+    assert abs(sum(boosted_one) - 1.0) < 1e-9
+    for vector in _weight_samples(["price", "data", "qos"], ["cheaper"]):
+        assert max(vector) <= _MAX_BOOSTED_SHARE + 1e-9
+        assert abs(sum(vector) - 1.0) < 1e-9
+
+    # 전 후보가 같은 값인 축은 우선순위를 얹어도 가중치를 가져가지 않는다
+    flat = [
+        {"plan_id": "a", "discounted_fee": 10_000, "monthly_fee": 10_000, "data_gb": 5},
+        {"plan_id": "b", "discounted_fee": 30_000, "monthly_fee": 30_000, "data_gb": 90},
+    ]
+    assert "voice" not in _discriminating(_utility_rows(flat, None))
+    assert "price" in _discriminating(_utility_rows(flat, None))
+    flat_priority = evaluate_mcda(flat, ["voice"])
+    assert rank_smaa2(flat_priority) == rank_smaa2(evaluate_mcda(flat)), (
+        "구분되지 않는 축의 우선순위는 순위를 바꾸지 않아야 한다"
+    )
+
+    # 혜택 축은 요청이 없으면 개수가 아니라 원화 가치로 갈린다
+    valued = [
+        {"plan_id": "rich", "discounted_fee": 20_000, "monthly_fee": 20_000, "data_gb": 10,
+         "benefit_value_won": 20_000},
+        {"plan_id": "poor", "discounted_fee": 20_000, "monthly_fee": 20_000, "data_gb": 10,
+         "benefit_value_won": 0},
+    ]
+    benefit_column = [row[benefit_index] for row in _utility_rows(valued, None)]
+    assert benefit_column == [1.0, 0.0], benefit_column
+
+    # 금액이 수집되지 않은 상품끼리는 개수로라도 갈려야 한다 (MNO 상품은 대부분 금액이 없다)
+    unpriced = [
+        {"plan_id": "some", "discounted_fee": 20_000, "monthly_fee": 20_000, "data_gb": 10,
+         "included_benefits": ["OTT", "멤버십", "데이터쉐어링"]},
+        {"plan_id": "none", "discounted_fee": 20_000, "monthly_fee": 20_000, "data_gb": 10,
+         "included_benefits": []},
+    ]
+    unpriced_column = [row[benefit_index] for row in _utility_rows(unpriced, None)]
+    assert unpriced_column == [1.0, 0.0], unpriced_column
+
+    # '무제한' 요청: 소진 후 등급이 같아도 전속으로 버티는 양이 순위를 갈라야 한다
+    unlimited_ask = [
+        {"plan_id": "small", "discounted_fee": 100, "monthly_fee": 100, "data_gb": 4.5,
+         "qos_mbps": 1.0, "data_tier": "qos_lite"},
+        {"plan_id": "large", "discounted_fee": 7000, "monthly_fee": 7000, "data_gb": 120,
+         "qos_mbps": 5.0, "data_tier": "qos_hd"},
+        {"plan_id": "lite_large", "discounted_fee": 100, "monthly_fee": 100, "data_gb": 120,
+         "qos_mbps": 1.0, "data_tier": "qos_lite"},
+    ]
+    ask = {"data_unlimited": True, "estimated_monthly_data_gb": 128.7}
+    data_column = [row[data_index] for row in _utility_rows(unlimited_ask, ask)]
+    assert data_column[0] < data_column[2] < data_column[1], data_column
+    # 예상 사용량을 모르면 등급만 본다 (같은 등급끼리는 동점)
+    no_target = [row[data_index] for row in _utility_rows(unlimited_ask, {"data_unlimited": True})]
+    assert no_target[0] == no_target[2] < no_target[1], no_target
+    assert len(evaluate_mcda(valued)[0].utilities) == len(CRITERIA)
     print("self-check ok: SMAA-2 ranking (bootstrap weights)")

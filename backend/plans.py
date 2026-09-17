@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from agent.mcda import _effective_monthly_fee, _PRICE_HORIZON_MONTHS
+
 # 비교 구간 6개월. 알뜰폰 이용자는 대부분 프로모션이 끝날 때쯤 다른 요금제로 갈아타므로
 # 프로모션 종료 후 정가까지 합산하는 12개월 비교는 실제 지출과 오히려 멀어진다. 의도된 값이다.
 COMPARE_MONTHS = 6
@@ -22,7 +24,7 @@ def six_month_cost(row: dict, months: int = COMPARE_MONTHS) -> int:
     period = row.get("discount_period_months")
     if period is None:
         return discounted * months
-    promo = min(int(period), months)
+    promo = max(0, min(int(period), months))
     return discounted * promo + regular * max(0, months - promo)
 
 
@@ -39,7 +41,7 @@ def _price_note(row: dict) -> str:
     period = row.get("discount_period_months")
     if row["discounted_fee"] >= row["monthly_fee"]:
         return "프로모션 없음 · 정가 동일"
-    promo = f"프로모션 {period}개월" if period else "약정 할인 유지"
+    promo = f"프로모션 {period}개월" if period is not None else "할인 기간 확인 필요"
     return f"정가 {row['monthly_fee']:,}원 · {promo}"
 
 
@@ -53,10 +55,20 @@ def _data_label(row: dict) -> str:
 
 
 def _qos_label(row: dict) -> str:
+    """소진 후 속도. 값이 없는 것은 '없음'이 아니라 '미수집'이다(822건).
+
+    자료에 없는 것을 '속도 제어 없음'으로 단정하면 사용자는 종량 과금이 없다고 읽는다.
+    """
     if row.get("qos_mbps") is None:
-        return "-"
+        return "확인 필요"
     mbps = row["qos_mbps"]
     return f"+{mbps:g}Mbps" if mbps >= 1 else f"+{mbps * 1000:g}Kbps"
+
+
+def _tethering_label(row: dict) -> str:
+    """테더링. 전체의 72%(1,981건)가 미수집이라 '미제공'으로 단정할 수 없다."""
+    gb = row.get("tethering_gb")
+    return f"{gb:g}GB" if gb is not None else "확인 필요"
 
 
 def _hashtags(row: dict, is_cheapest: bool = False) -> list[str]:
@@ -66,13 +78,18 @@ def _hashtags(row: dict, is_cheapest: bool = False) -> list[str]:
     if row.get("age_condition"):
         tags.append("#청년요금제" if "이하" in str(row["age_condition"]) else "#가입조건")
     if row.get("data_unlimited"):
-        tags.append("#완전무제한")
+        tags.append("#기본량무제한")
+    elif row.get("data_tier") == "qos_hd":
+        # 소진 후에도 HD 시청이 되는 상품. 완전 무제한(소진 후 100Kbps)보다 빠르다.
+        tags.append("#소진후HD")
     if row.get("ott_option_count"):
         tags.append("#OTT결합")
     if row.get("voice_unlimited"):
         tags.append("#통화무제한")
+    if row.get("benefit_value_won"):
+        tags.append("#혜택환산")
     if is_cheapest:
-        tags.append("#최저가")
+        tags.append("#목록내최저가")
     return tags
 
 
@@ -93,10 +110,22 @@ def to_plan_item(
     reason: str = "",
     matched_benefits: list[str] | None = None,
     is_cheapest: bool = False,
+    criteria_fit: dict | None = None,
+    expected_rank: float | None = None,
+    first_rank_acceptability: float | None = None,
 ) -> dict:
     total = six_month_cost(row)
     period = row.get("discount_period_months")
     is_promo = row["discounted_fee"] < row["monthly_fee"]
+    benefit_value = int(row.get("benefit_value_won") or 0)
+    # 혜택을 반영한 실부담. 페이백·사은품이 월 20,000원인 상품을 요금만으로 비교하면
+    # 순위가 뒤집힌다. 다만 값이 수집된 혜택만 반영되므로 표시는 하되 랭킹에는 쓰지 않는다.
+    #
+    # 페이백이 요금보다 큰 상품이 실제로 있다(월 7,000원 요금에 월 34,000원 페이백).
+    # 그대로 빼면 "실부담 -258,000원"이 되는데, 이런 페이백은 유지 기간·결제수단 같은
+    # 조건이 붙고 그 조건은 수집 데이터에 없다. 0 원에서 끊고 별도 플래그로 알린다.
+    raw_effective = total - benefit_value * COMPARE_MONTHS
+    effective_total = max(0, raw_effective)
     return {
         "id": row["plan_id"],
         "rank": rank,
@@ -115,19 +144,46 @@ def to_plan_item(
         "data": _data_label(row),
         "dataNum": row.get("data_gb"),
         "dataUnlimited": row["data_unlimited"],
+        # 소진 후에 무엇을 할 수 있는지가 실제 체감을 가른다. agent.data.data_tier 참고.
+        "dataTier": row.get("data_tier", "capped"),
+        "dataTierLabel": row.get("data_tier_label", ""),
+        "effectiveUnlimited": bool(row.get("effective_unlimited")),
+        "dailyDataGb": row.get("daily_data_gb"),
         "qos": _qos_label(row),
+        "qosKnown": row.get("qos_mbps") is not None,
         "call": row["voice"],
         "sms": "무제한" if row["sms_unlimited"] else "기본",
+        "tethering": _tethering_label(row),
         "tetheringGb": row.get("tethering_gb"),
         "hash": _hashtags(row, is_cheapest),
         "benefit": _benefit_text(row, matched_benefits),
+        "benefitValue": benefit_value,
+        "criteriaFit": criteria_fit or {},
+        "expectedRank": expected_rank,
+        "firstRankAcceptability": first_rank_acceptability,
+        "rankingMonths": _PRICE_HORIZON_MONTHS,
+        "rankingAverageFee": round(_effective_monthly_fee(row)),
+        "costIsEstimate": bool(is_promo and period is None),
+        "dataWarnings": (["로밍 속도 혼입이 의심되어 국내 QoS 값에서 제외했습니다. 원문 확인이 필요합니다."]
+                         if row.get("qos_source_suspect") else []),
+        "signupNotice": row.get("signup_notice", ""),
         "total": f"{total:,}원",
         "totalNum": total,
+        "effectiveTotalNum": effective_total,
+        "effectiveTotal": f"{effective_total:,}원",
+        # 혜택 금액이 요금을 넘어선 경우. 조건을 확인해야 한다는 신호로만 쓴다.
+        "benefitExceedsFee": raw_effective < 0,
         "compareMonths": COMPARE_MONTHS,
         "promoMonths": int(period) if period else 0,
         "isPromo": is_promo,
         # 할인이 비교 구간 안에 끝나면 화면에 "N+1개월차부터 정가" 경고를 띄운다
         "priceRisesAfter": int(period) if is_promo and period and int(period) < COMPARE_MONTHS else None,
+        # 비교 구간 밖에서 오르는 경우도 알려야 한다. 6개월 총비용만 보면 12개월 프로모션이
+        # 끝난 뒤 요금이 몇 배가 되는 상품을 "제일 싸다"고 읽게 된다.
+        "priceRisesLater": bool(is_promo and period and int(period) >= COMPARE_MONTHS),
+        "promoDiscountRate": (
+            round(1 - row["discounted_fee"] / row["monthly_fee"], 3) if row["monthly_fee"] else 0.0
+        ),
         "isOnlineOnly": bool(row.get("is_online_only")),
         "hasAddon": bool(row.get("ott_option_count")),
         "ageCondition": row.get("age_condition", ""),
@@ -159,6 +215,9 @@ def to_plan_items(rows: list[dict], ranked: list[dict] | None = None) -> list[di
                 reason=scored.get("reason", ""),
                 matched_benefits=scored.get("matched_benefits", []),
                 is_cheapest=row["discounted_fee"] == cheapest,
+                criteria_fit=scored.get("criteria_fit", {}),
+                expected_rank=scored.get("expected_rank"),
+                first_rank_acceptability=scored.get("first_rank_acceptability"),
             )
         )
     return items
@@ -204,15 +263,45 @@ def _has_flag(row: dict, key: str) -> bool:
         return bool(row.get("ott_option_count"))
     if key == "promo":
         return row["discounted_fee"] < row["monthly_fee"]
+    if key == "no_age_limit":
+        return not row.get("age_condition")
+    if key == "benefit_value":
+        return bool(row.get("benefit_value_won"))
     return False
+
+
+_PRICE_BANDS = {
+    "lt10k": (0, 9_999),
+    "10to20k": (10_000, 19_999),
+    "20to30k": (20_000, 29_999),
+    "30to50k": (30_000, 49_999),
+    "gte50k": (50_000, 10**9),
+}
+
+
+def _in_price(row: dict, key: str) -> bool:
+    band = _PRICE_BANDS.get(key)
+    return bool(band) and band[0] <= row["discounted_fee"] <= band[1]
+
+
+def _in_tier(row: dict, key: str) -> bool:
+    """소진 후 무엇이 되는지로 거른다. '무제한' 라벨보다 이쪽이 체감에 가깝다."""
+    return row.get("data_tier") == key
+
+
+def _in_gen(row: dict, key: str) -> bool:
+    return str(row.get("network_gen") or "") == key
 
 
 # 그룹 안에서는 OR, 그룹 사이에서는 AND. 시안의 체크박스 동작 그대로.
 FILTER_GROUPS = {
     "networks": (["SKT", "KT", "LGU+", "MNO"], _in_network),
     "data": (["lt3", "3to10", "10to20", "gte20", "unlimited"], _in_data_bucket),
+    "tier": (["unlimited_full", "qos_hd", "qos_sd", "qos_lite", "qos_text", "capped"], _in_tier),
+    "price": (list(_PRICE_BANDS), _in_price),
+    "gen": (["5G", "LTE"], _in_gen),
     "voice": (["unlimited", "quota", "none"], _in_voice),
-    "flags": (["online_only", "addon", "promo"], _has_flag),
+    "flags": (["online_only", "addon", "promo", "no_age_limit", "benefit_value"], _has_flag),
 }
 
 SORTS = {
@@ -220,6 +309,12 @@ SORTS = {
     "fee_desc": (lambda r: r["discounted_fee"], True),
     "data_desc": (lambda r: (r["data_unlimited"], r.get("data_gb") or 0), True),
     "total_asc": (lambda r: six_month_cost(r), False),
+    # 혜택 가치를 뺀 실부담. 페이백형 상품은 요금 순서와 결과가 크게 달라진다.
+    "effective_asc": (
+        lambda r: six_month_cost(r) - int(r.get("benefit_value_won") or 0) * COMPARE_MONTHS,
+        False,
+    ),
+    "qos_desc": (lambda r: r.get("qos_mbps") or 0, True),
 }
 
 
@@ -265,6 +360,32 @@ if __name__ == "__main__":
     throttled = next(r for r in rows if not r["data_unlimited"] and r.get("qos_mbps") and r.get("data_gb"))
     assert "소진" not in to_plan_item(throttled)["data"]
     assert to_plan_item(throttled)["data"].endswith("GB")
+
+    # 자료에 없는 값은 '없음'이 아니라 '확인 필요'다
+    assert _qos_label({"qos_mbps": None}) == "확인 필요"
+    assert _qos_label({"qos_mbps": 5.0}) == "+5Mbps"
+    assert _tethering_label({"tethering_gb": None}) == "확인 필요"
+    assert _tethering_label({"tethering_gb": 10.0}) == "10GB"
+
+    # 혜택 가치를 반영한 실부담은 요금 합계와 달라야 한다
+    valued = next(r for r in rows if r.get("benefit_value_won"))
+    item_valued = to_plan_item(valued)
+    assert item_valued["effectiveTotalNum"] < item_valued["totalNum"]
+    assert item_valued["benefitValue"] > 0
+    # 실부담은 음수가 되지 않는다 (월 7,000원 요금에 월 34,000원 페이백인 상품이 실재한다)
+    assert all(to_plan_item(r)["effectiveTotalNum"] >= 0 for r in rows)
+    generous = to_plan_item({**valued, "benefit_value_won": 10**7})
+    assert generous["effectiveTotalNum"] == 0 and generous["benefitExceedsFee"] is True
+
+    # 비교 구간 밖에서 오르는 프로모션도 알린다
+    long_promo = {
+        "plan_id": "x", "plan_name": "x", "carrier": "x", "carrier_type": "MVNO", "host_mno": "KT",
+        "mvno_brand": "", "data": "10GB", "data_gb": 10.0, "data_unlimited": False,
+        "voice": "무제한", "voice_unlimited": True, "sms_unlimited": False,
+        "monthly_fee": 17600, "discounted_fee": 10, "discount_period_months": 12,
+    }
+    assert to_plan_item(long_promo)["priceRisesAfter"] is None
+    assert to_plan_item(long_promo)["priceRisesLater"] is True
     assert _data_label({"data_unlimited": True, "data": "무제한 (QoS 1Mbps)"}) == "무제한"
     assert _data_label({"data_unlimited": False, "data_gb": 4.5, "data": "x"}) == "4.5GB"
     assert _data_label({"data_unlimited": False, "data_gb": 20.0, "data": "x"}) == "20GB"

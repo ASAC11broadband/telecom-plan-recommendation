@@ -10,9 +10,10 @@ Next.js SSR이라 requests로 받은 HTML에 데이터가 그대로 들어있다
    있어서 생략하면 MVNO 쪽 혜택이 통째로 빈다.
    - 브랜드명은 <title>의 "[핀다이렉트] …"에만 있다.
    - 사은품·페이백은 <a href="/gift-group/...">의 aria-label에 이름이 있고 본문에
-     "대상:"/"시기:" 조건이 따라온다. "매달 N원 페이백 (M개월)"처럼 1회분 금액만
-     적힌 라벨은 총액으로 환산한다(_recurring_payback_won). "페이백"이라는 말이
-     없는 변형("Npay 5천원 (7만)")은 아직 못 잡는다 - docs/수정이력.md 34번.
+     "대상:"/"시기:" 조건이 따라온다. "매달 N원 페이백 (M개월)"은 한 달치 금액과
+     개월 수를 따로 싣는다(_recurring_payback). 총액으로 접으면 기간이 사라져서
+     소비하는 쪽이 개월 수를 추측하게 된다. "페이백"이라는 말이 없는 변형
+     ("Npay 5천원 (7만)")은 아직 못 잡는다 - docs/수정이력.md 34번.
    - 목록 카드의 "페이백 포함 월 X원"이 실제 청구액과 다를 수 있다(모요가 체감가를
      보여줌). "N개월 이후 Y원"의 Y로 대체하려다 되돌렸다 - parse_card_only 참고.
 """
@@ -84,12 +85,26 @@ def _get(url: str) -> str:
 
 _SUBSCRIBER_RE = re.compile(r"([\d,]+)\+?\s*명이\s*선택")
 
-_KRW_RE = re.compile(r"([\d,.]+)\s*(만|천)?\s*원")
-_KRW_UNIT = {None: 1, "천": 1_000, "만": 10_000}
+# "3만4천원"처럼 만·천이 이어 붙는 표기가 있다. 조각을 따로 읽으면 "4천원"만 잡혀
+# 34,000원이 4,000원이 된다(모요가 표기를 바꾸면서 실제로 그랬다). 한 덩어리로 읽는다.
+# 만·천·원 자리를 한 번에 읽는다. 세 자리 모두 선택이라 숫자가 없는 "원"에도
+# 걸리므로, 값을 만들기 전에 숫자가 하나라도 잡혔는지 확인한다.
+_KRW_RE = re.compile(r"(?:([\d,.]+)\s*만)?(?:\s*([\d,.]+)\s*천)?(?:\s*([\d,.]+))?\s*원")
+
+
+def _to_float(text):
+    if not text:
+        return 0.0
+    try:
+        return float(text.replace(",", "").rstrip("."))
+    except ValueError:
+        return 0.0
 
 
 def _parse_krw(text: str):
-    """사은품 이름에서 금액을 뽑는다. '19.2만원' -> 192000, '5천원' -> 5000.
+    """사은품 이름에서 금액을 뽑는다.
+
+    '19.2만원' -> 192000, '5천원' -> 5000, '3만4천원' -> 34000.
 
     사은품명은 대체로 "총액(월별 분할)" 형태라("네이버페이 19.2만원(매월 3.2만원씩)")
     **금액이 여러 개면 가장 큰 값**을 쓴다. 등장 순서로 고르면 사이트가 "매월
@@ -97,28 +112,39 @@ def _parse_krw(text: str):
     """
     amounts = []
     for m in _KRW_RE.finditer(text or ""):
-        try:
-            value = float(m.group(1).replace(",", "").rstrip("."))
-        except ValueError:
-            continue
-        amounts.append(int(value * _KRW_UNIT[m.group(2)]))
+        if not any(m.groups()):
+            continue  # 숫자 없이 "원"만 걸린 경우
+        value = (
+            _to_float(m.group(1)) * 10_000
+            + _to_float(m.group(2)) * 1_000
+            + _to_float(m.group(3))
+        )
+        if value > 0:
+            amounts.append(int(value))
     return max(amounts) if amounts else None
 
 
 # "네이버페이 매달 2만원 페이백 (6개월)"처럼 한 달치 금액만 적힌 링크가 있다.
-# 그대로 _parse_krw에 넘기면 실제 가치의 6분의 1로 저평가되므로 총액으로 바로잡는다.
-# "평생"처럼 개월 수가 없으면 총액을 낼 수 없어 한 달치만 남긴다.
-_RECURRING_PAYBACK_RE = re.compile(r"매달\s*([\d,.]+\s*(?:만|천)?\s*원)\s*(?:씩)?\s*페이백.*?(\d+)\s*개월")
+#
+# 예전에는 이걸 총액(2만 x 6)으로 접어서 benefit_value_won 에 넣었다. 그러면 기간이
+# 사라지고, 같은 컬럼에 "평생 5천원"(월액)과 "6개월 12만원"(총액)이 섞인다. 실제로
+# 소비하는 쪽이 전부 6으로 나누다가 12개월 페이백을 정확히 두 배로 계산했다.
+# 이제는 접지 않는다 - 한 달치 금액과 개월 수를 따로 넘긴다.
+# 금액 부분은 "3만4천원"처럼 여러 자리가 이어질 수 있어 원까지 통째로 잡는다.
+_RECURRING_PAYBACK_RE = re.compile(
+    r"매(?:달|월)\s*([\d,.만천\s]*원)\s*(?:씩)?\s*페이백(?:.*?(\d+)\s*개월)?"
+)
 
 
-def _recurring_payback_won(label: str):
+def _recurring_payback(label: str):
+    """(한 달치 금액, 개월 수). 반복 페이백이 아니면 (None, "")."""
     m = _RECURRING_PAYBACK_RE.search(label or "")
     if not m:
-        return None
+        return None, ""
     per_month = _parse_krw(m.group(1))
     if per_month is None:
-        return None
-    return per_month * int(m.group(2))
+        return None, ""
+    return per_month, int(m.group(2)) if m.group(2) else ""
 
 
 def fetch_list_pages() -> list[str]:
@@ -453,9 +479,14 @@ def parse_detail(plan_id: str, plan_name: str):
     # 멤버십까지 전부 같은 링크라, 링크 종류로 카테고리를 정하면 MVNO 혜택이
     # 통째로 사은품으로 몰린다. 이름 기반 규칙을 쓰고 단서가 없을 때만 사은품이다.
     def add_gift(label: str, detail: str, condition: str):
+        per_month, months = _recurring_payback(label)
+        # 반복 페이백이면 한 달치 금액을, 아니면 일시금을 그대로 싣는다.
+        # 총액으로 접지 않으므로 기간(benefit_months)이 살아남는다.
         benefits.append(make_benefit_row(
             plan_id, "", plan_name, classify_benefit_name(label, "사은품/페이백"), label,
-            value_won=_recurring_payback_won(label) or _parse_krw(label) or "",
+            value_won=per_month if per_month is not None else (_parse_krw(label) or ""),
+            value_basis="monthly" if per_month is not None else "",
+            months=months,
             condition=condition, detail=detail, source_url=url,
         ))
 

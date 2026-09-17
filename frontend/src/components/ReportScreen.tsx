@@ -1,3 +1,4 @@
+import { RecommendationTrace } from './RecommendationTrace';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { PlanItem, Profile, RecommendResponse, ScreenType } from '../types';
@@ -21,12 +22,19 @@ function costRows(plan: PlanItem) {
 function verdicts(plan: PlanItem, profile: Profile | null) {
   const rows: [string, string][] = [];
   const p = profile ?? {};
-  const dataNeed = Math.max(p.min_data_gb ?? 0, p.estimated_monthly_data_gb ?? 0);
-  if (p.data_unlimited) rows.push(['데이터 충족도', '무제한 요구 충족']);
+  const dataNeed = p.min_data_gb ?? p.target_data_gb ?? p.estimated_monthly_data_gb ?? 0;
+  if (p.data_unlimited)
+    rows.push([
+      '데이터 충족도',
+      plan.dataUnlimited
+        ? '기본 제공량 무제한'
+        : `기본 ${plan.data} + ${plan.dataTierLabel} — 소진 후에도 계속 사용`,
+    ]);
   else if (dataNeed)
     rows.push([
       '데이터 충족도',
-      `${p.estimated_monthly_data_gb ? '예상 사용량 기준' : '요구량'} ${dataNeed}GB 대비 ${plan.data} 제공`,
+      `${p.min_data_gb ? '요구량' : '예상 사용량 기준'} ${dataNeed}GB 대비 ${plan.data} 제공` +
+        (plan.qosKnown && !plan.dataUnlimited ? ` (소진 후 ${plan.qos})` : ''),
     ]);
   if (p.max_data_gb)
     rows.push([
@@ -106,28 +114,52 @@ function overageRisks(plan: PlanItem, profile: Profile | null): [string, string,
   const rows: [string, string, string][] = [];
 
   if (plan.dataUnlimited) {
-    rows.push(['데이터', '무제한 — 초과 요금 없음', 'tag-green']);
-  } else if (plan.qos !== '-') {
-    rows.push(['데이터 소진 후', `${plan.qos} 속도로 계속 사용 · 추가 요금 없음`, 'tag-green']);
+    rows.push(['데이터', '수집 기준 기본량 무제한 · 이용 정책 확인', 'tag-green']);
+  } else if (plan.qosKnown) {
+    rows.push([
+      '데이터 소진 후',
+      `${plan.qos}로 계속 사용 가능 · 속도·과금 조건은 사업자 확인 (${plan.dataTierLabel})`,
+      plan.dataTier === 'qos_text' ? 'tag-amber' : 'tag-green',
+    ]);
   } else {
-    rows.push(['데이터 소진 후', '속도 제어 없음 · 초과분 종량 과금 발생', 'tag-amber']);
+    // 자료에 없는 것을 '속도 제어 없음'으로 단정하면 종량 과금이 없다고 읽힌다.
+    rows.push(['데이터 소진 후', '자료에서 확인되지 않음 · 사업자 고지 확인 필요', 'tag-amber']);
   }
 
-  const need = Math.max(profile?.min_data_gb ?? 0, profile?.estimated_monthly_data_gb ?? 0);
+  const need = profile?.min_data_gb ?? profile?.target_data_gb ?? profile?.estimated_monthly_data_gb ?? 0;
+  const label = profile?.min_data_gb ? '요구' : '예상 사용량';
   if (need && plan.dataNum !== null && !plan.dataUnlimited && plan.dataNum < need) {
-    rows.push(['요구 데이터', `요구 ${need}GB 대비 ${plan.dataNum}GB — 매월 부족`, 'tag-amber']);
+    rows.push([
+      '데이터 제공량',
+      plan.qosKnown && plan.dataTier !== 'qos_text' && plan.dataTier !== 'capped'
+        ? `${label} ${need}GB 대비 ${plan.dataNum}GB — 초과분은 ${plan.qos}로 사용`
+        : `${label} ${need}GB 대비 ${plan.dataNum}GB — 매월 부족`,
+      plan.qosKnown && plan.dataTier !== 'qos_text' && plan.dataTier !== 'capped'
+        ? 'tag-muted'
+        : 'tag-amber',
+    ]);
+  }
+  if (plan.dailyDataGb) {
+    rows.push(['일 제공량', `하루 ${plan.dailyDataGb}GB 초과 시 속도 제한`, 'tag-muted']);
   }
 
   rows.push(
     plan.call === '무제한'
-      ? ['음성통화', '무제한 — 초과 요금 없음', 'tag-green']
+      ? ['음성통화', '기본 음성 무제한 · 부가통화 조건 확인', 'tag-green']
       : ['음성통화', `기본 ${plan.call} 초과 시 종량 과금`, 'tag-amber']
   );
   rows.push(
     plan.sms === '무제한'
-      ? ['문자', '무제한 — 초과 요금 없음', 'tag-green']
+      ? ['문자', '기본 문자 무제한 · 이용 정책 확인', 'tag-green']
       : ['문자', '기본 제공량 초과 시 종량 과금', 'tag-muted']
   );
+  if (plan.priceRisesLater) {
+    rows.push([
+      '요금 인상',
+      `프로모션 ${plan.promoMonths}개월 뒤 월 ${plan.originalPrice.toLocaleString()}원`,
+      'tag-amber',
+    ]);
+  }
   return rows;
 }
 
@@ -158,6 +190,9 @@ export function ReportScreen({
   const plan = result.plans.find((item) => item.id === selectedPlanId) ?? result.plans[0];
   const alternatives = result.plans.filter((item) => item.id !== plan.id);
   const cost = costRows(plan);
+  // 섹션 번호는 렌더링되는 순서대로 매긴다. 조건부 섹션을 건너뛰면 01·02·03·04·06 이 된다.
+  let sectionNo = 0;
+  const nextNo = () => String(++sectionNo).padStart(2, '0');
   const meta = [
     plan.network ? `${plan.network}망` : '',
     plan.isOnlineOnly ? '온라인 전용' : '',
@@ -171,15 +206,12 @@ export function ReportScreen({
     <div className="body split">
       <div className="card" style={{ flex: 1 }}>
         <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--border)' }}>
-          <div
-            style={{ fontSize: 'var(--fs-11)', color: 'var(--t3)', cursor: 'pointer', marginBottom: 8 }}
-            onClick={() => onNavigate('s-result')}
-          >
+          <button className="linklike" onClick={() => onNavigate('s-result')}>
             ← 추천 결과로 돌아가기
-          </div>
+          </button>
           <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
             <span className="tag tag-accent">{plan.rank}순위</span>
-            <span className="tag tag-green">적합도 {plan.score}</span>
+            <span className={`tier-chip tier-${plan.dataTier}`}>{plan.dataTierLabel}</span>
           </div>
           <h2 style={{ fontSize: 19, fontWeight: 700 }}>{plan.name}</h2>
           <p style={{ fontSize: 'var(--fs-11)', color: 'var(--t3)', marginTop: 4 }}>{meta}</p>
@@ -187,7 +219,7 @@ export function ReportScreen({
 
         <div className="report-sec">
           <h4>
-            <span className="no">01</span>선택 요금제 요약
+            <span className="no">{nextNo()}</span>선택 요금제 요약
           </h4>
           <div className="mini-table">
             <div className="r">
@@ -205,11 +237,11 @@ export function ReportScreen({
 
         <div className="report-sec">
           <h4>
-            <span className="no">02</span>비용 산정 내역
+            <span className="no">{nextNo()}</span>비용 산정 내역
           </h4>
           <p>
             비교 기준은 {cost.months}개월입니다.{' '}
-            {cost.regularMonths === 0
+            {plan.costIsEstimate ? '할인 기간 미확인으로 현재 가격이 유지된다고 가정했습니다.' : cost.regularMonths === 0
               ? '비교 구간 전체에서 같은 가격이 유지됩니다.'
               : `할인 ${cost.promo}개월이 끝난 뒤 ${cost.regularMonths}개월은 정가로 계산했습니다.`}
           </p>
@@ -245,29 +277,61 @@ export function ReportScreen({
                 {Math.round(cost.total / cost.months).toLocaleString()}원
               </span>
             </div>
+            {plan.benefitValue > 0 && (
+              <>
+                <div className="r">
+                  <span>혜택 월 환산 가치</span>
+                  <span className="v num">-{plan.benefitValue.toLocaleString()}원 / 월</span>
+                </div>
+                <div className="r">
+                  <span>{cost.months}개월 혜택 차감 참고값</span>
+                  <span className="v num">
+                    {plan.benefitExceedsFee ? '0원 (혜택이 요금을 초과)' : plan.effectiveTotal}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
+          {plan.benefitValue > 0 && (
+            <p style={{ marginTop: 8, fontSize: 'var(--fs-11)', color: 'var(--t3)' }}>
+              혜택 차감값은 납부할 금액이 아닙니다. 혜택을 실제 이용하고 지급 조건을 충족한다는
+              가정의 참고값이며, 금액 미확인 혜택은 합계에서 제외했습니다.
+              {plan.benefitExceedsFee &&
+                ' 이 요금제는 환산한 혜택 금액이 요금보다 커서 0원으로 표시했습니다. 페이백은 유지 기간·결제수단 같은 조건이 붙는 경우가 많으니 반드시 확인하세요.'}
+            </p>
+          )}
           {plan.isPromo && (
             <p style={{ marginTop: 8, fontSize: 'var(--fs-11)', color: 'var(--amber)' }}>
               참고: {plan.promoMonths ? `할인 기간 ${plan.promoMonths}개월이 끝나면` : '할인이 끝나면'} 정가{' '}
               {plan.originalPrice.toLocaleString()}원으로 변경될 수 있습니다.
+              {plan.priceRisesLater &&
+                ` ${cost.months}개월 총비용에는 인상분이 포함되지 않았습니다.`}
             </p>
           )}
         </div>
 
         <div className="report-sec">
           <h4>
-            <span className="no">03</span>추천 요금제 선정 이유
+            <span className="no">{nextNo()}</span>추천 요금제 선정 이유
           </h4>
           <div className="md">
             <Markdown remarkPlugins={[remarkGfm]}>
               {plan.reason || '선정 사유가 제공되지 않았습니다.'}
             </Markdown>
           </div>
+          {result.report && (
+            <details className="report-full">
+              <summary>전체 추천 리포트 보기</summary>
+              <div className="md">
+                <Markdown remarkPlugins={[remarkGfm]}>{result.report}</Markdown>
+              </div>
+            </details>
+          )}
         </div>
 
         <div className="report-sec">
           <h4>
-            <span className="no">04</span>다른 추천 후보와 비교
+            <span className="no">{nextNo()}</span>다른 추천 후보와 비교
           </h4>
           {alternatives.length > 0 ? (
             <div className="mini-table">
@@ -290,7 +354,7 @@ export function ReportScreen({
         {result.referencePlan && (
           <div className="report-sec">
             <h4>
-              <span className="no">05</span>현재 요금제와 비교
+              <span className="no">{nextNo()}</span>현재 요금제와 비교
             </h4>
             <p>
               현재 이용 중인 “{result.referencePlan.name}”과 선택한 “{plan.name}”을 비교했습니다.
@@ -312,19 +376,18 @@ export function ReportScreen({
 
         <div className="report-sec" style={{ borderBottom: 'none' }}>
           <h4>
-            <span className="no">06</span>가입 전 확인
+            <span className="no">{nextNo()}</span>가입 전 확인
           </h4>
           <p>
             할인 기간과 종료 후 정상가, 가입 대상 조건을 통신사 공식 페이지에서 다시 확인해 주세요.
-            테더링 제공량은 {plan.tetheringGb !== null ? `${plan.tetheringGb}GB` : '자료에서 확인되지 않았으며'},
-            데이터 소진 후 속도는 {plan.qos === '-' ? '확인이 필요합니다' : `${plan.qos}입니다`}.
+            테더링 제공량은 {plan.tethering}, 데이터 소진 후 속도는 {plan.qos}입니다.
           </p>
-          <p>본 산정은 2026년 8월 21일 수집 데이터 기준이며 프로모션은 사업자 정책에 따라 변경될 수 있습니다.</p>
-          {result.evaluation && !result.evaluation.passed && result.evaluation.feedback && (
-            <p style={{ fontSize: 'var(--fs-11)', color: 'var(--t3)' }}>
-              검증 메모: {result.evaluation.feedback}
-            </p>
-          )}
+          {plan.signupNotice && <p>사업자 고지: {plan.signupNotice}</p>}
+          {plan.dataWarnings.map(warning => <p key={warning}>{warning}</p>)}
+          <RecommendationTrace result={result} />
+          <p>
+            본 산정은 {result.dataAsOf} 수집 데이터 기준이며 프로모션은 사업자 정책에 따라 변경될 수 있습니다.
+          </p>
         </div>
       </div>
 
@@ -359,11 +422,11 @@ export function ReportScreen({
           </div>
           <div className="spec-row">
             <span className="k">테더링</span>
-            <span className="v num">{plan.tetheringGb ? `${plan.tetheringGb}GB` : '미제공'}</span>
+            <span className="v num">{plan.tethering}</span>
           </div>
           <div className="spec-row">
             <span className="k">결합 부가서비스</span>
-            <span className="v">{plan.hasAddon ? plan.benefit : '없음'}</span>
+            <span className="v">{plan.benefit}</span>
           </div>
           <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)' }}>
             <a
@@ -401,7 +464,7 @@ export function ReportScreen({
           <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
             <strong style={{ fontSize: 'var(--fs-12)' }}>다른 후보</strong>
           </div>
-          {result.plans.slice(1).map((other) => (
+          {alternatives.map((other) => (
             <div className="spec-row" key={other.id}>
               <span className="k">
                 {other.rank}. {other.name}

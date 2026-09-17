@@ -42,56 +42,6 @@ export function Modal({
   );
 }
 
-export function CompareModal({ plans, onClose }: { plans: PlanItem[]; onClose: () => void }) {
-  const rows: [string, (p: PlanItem) => string][] = [
-    ['사업자 / 망', (p) => p.carrier],
-    ['월 요금', (p) => `${p.price}원`],
-    ['정가', (p) => `${p.originalPrice.toLocaleString()}원`],
-    ['프로모션 기간', (p) => (p.isPromo ? (p.promoMonths ? `${p.promoMonths}개월` : '약정 유지') : '없음')],
-    ['데이터', (p) => p.data],
-    ['소진 후 속도', (p) => p.qos],
-    ['음성통화', (p) => p.call],
-    ['문자', (p) => p.sms],
-    ['테더링', (p) => (p.tetheringGb ? `${p.tetheringGb}GB` : '미제공')],
-    ['부가 혜택', (p) => p.benefit],
-    [`${plans[0]?.compareMonths ?? 6}개월 총비용`, (p) => p.total],
-  ];
-
-  return (
-    <Modal
-      title="요금제 비교"
-      subtitle={`선택한 ${plans.length}건의 제공량과 ${plans[0]?.compareMonths ?? 6}개월 총비용을 비교합니다.`}
-      onClose={onClose}
-      width={860}
-    >
-      <div style={{ overflowX: 'auto' }}>
-        <table>
-          <thead>
-            <tr>
-              <th>항목</th>
-              {plans.map((p) => (
-                <th key={p.id}>{p.name}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(([label, get]) => (
-              <tr key={label}>
-                <td>{label}</td>
-                {plans.map((p) => (
-                  <td className="num" key={p.id}>
-                    {get(p)}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </Modal>
-  );
-}
-
 export function AiQueryModal({ plan, onClose }: { plan: PlanItem; onClose: () => void }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState<string | null>(null);

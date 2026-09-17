@@ -24,6 +24,7 @@ CONSTRAINT_FIELDS = (
     "min_data_gb",
     "max_data_gb",
     "data_unlimited",
+    "require_full_unlimited",
     "min_qos_mbps",
     "requires_qos",
     "min_tethering_gb",
@@ -62,6 +63,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   소진 후 데이터 사용 가능 여부를 요구하면 requires_qos=true로 저장한다.
   'QoS는 상관없음/없어도 됨'은 필수조건이 아니므로 requires_qos=null로 둔다.
 - 데이터 무제한은 data_unlimited=true, 통화 N분 이상과 통화 무제한은 해당 통화 필드에 저장한다.
+  '완전 무제한', '속도 제한 없는 무제한'처럼 QoS형(기본량 소진 후 속도 제한)을 명시적으로
+  배제할 때만 require_full_unlimited=true를 함께 저장한다. 그냥 '무제한'은 null로 둔다.
 - 무제한 상품을 명시적으로 제외할 때만 해당 unlimited 필드를 false로 저장한다.
 - 문자는 sms_unlimited만 구조화한다. 문자 건수 조건은 필드를 만들지 말고 notes에 기록한다.
 
@@ -82,6 +85,10 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   명시적으로 요청하면 age_condition='만 34세 이하'로 저장한다.
 - '나는 20대인데 추천해줘'처럼 나이만 밝히고 청년 상품군을 요청하지 않은 경우에는
   청년 전용 상품만 원한다고 단정하지 말고 age_condition을 설정하지 않는다.
+- 사용자가 나이를 밝히면 age_condition과 별개로 user_age에 만 나이를 저장한다.
+  '20대', '30대'처럼 구간만 알면 user_age=null로 두고 만 나이가 필요한 전용 상품은 제외한다.
+  '스물다섯', '25살', '만 24세'처럼 정확한 나이는 그대로 넣는다.
+  user_age는 연령 전용 요금제의 가입 자격 판정에만 쓰이므로 전용 상품을 원하는지와 무관하게 채운다.
 - 포괄적인 혜택 유형은 wanted_benefit_categories에 다음 정식 카테고리명으로 저장한다.
   OTT·영상 스트리밍='영상/OTT', 음악·오디오='음악/오디오', 도서·전자책='도서/콘텐츠',
   외부 제휴 서비스='제휴서비스', 여러 종류 중 선택='복합/선택혜택', AI 교육·모의고사='교육/AI서비스', 멤버십='멤버십',
@@ -154,6 +161,9 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 [우선순위·Hard Constraint]
 - priorities에는 사용자가 말한 정렬 기준 중 price/data/qos/benefit/voice/tethering만 저장한다.
   없으면 null이며 시스템 기본값을 넣지 않는다.
+- 예산·데이터량 같은 조건 문장은 정렬 기준이 아니다. '3만원 이하로 추천해줘'는 budget_max_won만
+  채우고 priorities에 price를 넣지 않는다. '제일 싼 걸로', '가격을 최우선으로'처럼 순서를
+  직접 요구할 때만 priorities에 넣는다.
 - sms와 carrier는 점수 우선순위가 아니다. '문자가 중요하다'만으로 sms_unlimited를 추측하지 말고,
   선호 통신사 이름 없이 '통신사가 중요하다'고만 하면 carrier 조건도 추측하지 않는다.
 - 구체적인 금액·사용량·통신사·혜택 등 필터 조건은 기본적으로 Hard Constraint다.
@@ -166,6 +176,11 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - 핵심 결과가 크게 달라질 때만 needs_user_input=true로 두고 followup_question 하나를 작성한다.
 - 언급되지 않은 모든 필드를 missing에 넣지 않는다.
 """
+
+
+AGE_UNKNOWN_ASSUMPTION = (
+    "나이를 알 수 없어 청년·시니어·키즈 같은 연령 전용 요금제는 후보에서 제외했습니다"
+)
 
 
 def _has_value(value: object) -> bool:
@@ -198,6 +213,73 @@ def _drop_phantom_budget(profile: UserProfile, query: str) -> UserProfile:
     if _MONEY.search(query or ""):
         return profile
     return profile.model_copy(update={"budget_min_won": None, "budget_max_won": None})
+
+
+# "3만원 이하" 는 30,000원까지 포함이다. LLM 이 'N만원대' 규칙(N9,999)을 섞어 쓰면서
+# 정확히 30,000원인 상품 8건이 조용히 탈락한다. 상한은 코드로 못 박는다.
+_BUDGET_MAX_RE = re.compile(
+    r"([\d,]+(?:\.\d+)?)\s*(만원|천원|원)\s*(?:이하|까지|안(?:쪽)?|미만)", re.IGNORECASE
+)
+_BUDGET_UNIT = {"만원": 10_000, "천원": 1_000, "원": 1}
+
+
+def _repair_budget_bounds(profile: UserProfile, query: str) -> UserProfile:
+    """'N만원 이하'의 경계를 확정하고 의미 없는 하한 0을 지운다."""
+    updates: dict[str, object] = {}
+    matches = list(_BUDGET_MAX_RE.finditer(query or ""))
+    if matches:
+        amount, unit = matches[-1].group(1).replace(",", ""), matches[-1].group(2)
+        limit = int(float(amount) * _BUDGET_UNIT[unit])
+        # '미만'만 경계를 뺀다. '이하/까지'는 그 금액을 포함한다.
+        if matches[-1].group(0).rstrip().endswith("미만"):
+            limit -= 1
+        updates["budget_max_won"] = limit
+    if profile.budget_min_won == 0:
+        updates["budget_min_won"] = None
+    return profile.model_copy(update=updates) if updates else profile
+
+
+# 순서를 직접 요구하는 표현. 조건 문장("3만원 이하로")은 정렬 기준이 아니다.
+_PRIORITY_PHRASE_RE = re.compile(
+    r"(?:제일|가장|최대한|무조건)\s*(?:싼|저렴|많|빠른|좋)"
+    r"|(?:싼|저렴한|비싼|많은|빠른|좋은)\s*(?:것|거|순|순서|쪽)"
+    r"|순으로|순서대로|우선|최우선|중요(?:해|하|시)|중심으로|위주로|따지"
+    r"|가성비",
+    re.IGNORECASE,
+)
+
+
+# 나이 표현. 연령 전용 요금제(331건)의 가입 자격 판정에만 쓴다.
+_AGE_BAND_RE = re.compile(r"(\d0)\s*대")
+_AGE_EXACT_RE = re.compile(r"(?:만\s*)?(\d{1,2})\s*(?:세|살)")
+
+
+def _apply_user_age(profile: UserProfile, query: str) -> UserProfile:
+    """사용자가 밝힌 나이를 확정적으로 보존한다. 없으면 건드리지 않는다."""
+    text = query or ""
+    exact = list(_AGE_EXACT_RE.finditer(text))
+    if exact:
+        age = int(exact[-1].group(1))
+        return profile.model_copy(update={"user_age": age}) if 5 <= age <= 99 else profile
+    band = _AGE_BAND_RE.search(text)
+    if band:
+        return profile.model_copy(update={"user_age": None, "age_condition": None,
+            "assumptions": [*profile.assumptions, "연령대만으로 만 나이를 확정하지 않아 연령 전용 상품은 제외했습니다."]})
+    return profile
+
+
+def _drop_inferred_priorities(profile: UserProfile, query: str) -> UserProfile:
+    """정렬 요구가 없는데 잡힌 priorities 를 버린다.
+
+    '월 3만원 이하로 추천해주세요' 가 priorities=['price'] 로 추출되면 가중치가 한 축으로
+    쏠려, 128GB 가 필요한 사용자에게 10GB/10원 요금제가 1순위로 올라간다. 예산은 제약이지
+    정렬 기준이 아니다.
+    """
+    if not profile.priorities:
+        return profile
+    if _PRIORITY_PHRASE_RE.search(query or ""):
+        return profile
+    return profile.model_copy(update={"priorities": None})
 
 
 _NAMED_VIDEO_APP = re.compile(
@@ -443,10 +525,16 @@ def _normalize_profile(profile: UserProfile) -> UserProfile:
     ]
     followup_question = profile.followup_question if profile.needs_user_input else None
 
+    assumptions = list(profile.assumptions)
+    if profile.user_age is None and profile.age_condition is None:
+        # 무엇을 왜 뺐는지 사용자가 볼 수 있어야 한다. 조용히 거르면 후보 수만 줄어 보인다.
+        assumptions.append(AGE_UNKNOWN_ASSUMPTION)
+
     return profile.model_copy(
         update={
             "hard_constraints": hard_constraints,
             "followup_question": followup_question,
+            "assumptions": assumptions,
             "estimated_monthly_data_gb": estimated_gb,
             "usage_estimate_notes": usage_notes,
         }
@@ -490,6 +578,22 @@ def core_signal_missing(profile: UserProfile | None) -> bool:
     return not (has_data or has_fee or has_reference)
 
 
+# 구조화 출력을 사용자 발화로 되짚어 고치는 보정들. 순서대로 적용한다.
+# 프롬프트 지시만으로는 같은 오추출이 계속 재발해서 코드로 못 박는 자리다.
+_REPAIRS = (
+    _drop_phantom_budget,
+    _repair_budget_bounds,
+    _drop_inferred_priorities,
+    _apply_user_age,
+    _apply_explicit_qos_requirement,
+    _apply_benefit_preference_question,
+    _apply_explicit_qos_min,
+    _apply_explicit_data_max,
+    _apply_smartchoice_usage_rule,
+    _repair_reference_plan_name,
+)
+
+
 def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     messages = [
         message
@@ -500,29 +604,11 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     prompt = PROFILING_PROMPT + "\n\n" + feedback_block(state)
     llm = get_llm(config).with_structured_output(UserProfile)
     query = user_query(state)
-    profile = _normalize_profile(
-        _repair_reference_plan_name(
-            _apply_smartchoice_usage_rule(
-                _apply_explicit_data_max(
-                    _apply_explicit_qos_min(
-                        _apply_benefit_preference_question(
-                            _apply_explicit_qos_requirement(
-                                _drop_phantom_budget(
-                                    llm.invoke([SystemMessage(content=prompt), *messages]), query
-                                ),
-                                query,
-                            ),
-                            query,
-                        ),
-                        query,
-                    ),
-                    query,
-                ),
-                query,
-            ),
-            query,
-        ),
-    )
+
+    profile = llm.invoke([SystemMessage(content=prompt), *messages])
+    for repair in _REPAIRS:
+        profile = repair(profile, query)
+    profile = _normalize_profile(profile)
     if core_signal_missing(profile) and not benefit_preference_missing(profile):
         profile = profile.model_copy(
             update={
@@ -620,9 +706,32 @@ if __name__ == "__main__":
     assert specific_benefit.comparison_goals is None
     assert specific_benefit.wanted_benefit_categories == ["영상/OTT"]
 
+    # 'N만원 이하'는 그 금액을 포함한다. 29,999 로 잘리면 정확히 30,000원인 상품이 탈락한다.
+    assert _repair_budget_bounds(UserProfile(budget_max_won=29999), "월 3만원 이하로").budget_max_won == 30000
+    assert _repair_budget_bounds(UserProfile(), "3만원까지 가능해").budget_max_won == 30000
+    assert _repair_budget_bounds(UserProfile(), "3만원 미만으로").budget_max_won == 29999
+    assert _repair_budget_bounds(UserProfile(budget_min_won=0), "아무 말").budget_min_won is None
+    assert _repair_budget_bounds(UserProfile(budget_max_won=39999), "3만원대로").budget_max_won == 39999
+    # 직접 선택 입력이 만드는 문장. 천 단위 쉼표를 놓치면 상한이 0원이 된다.
+    assert _repair_budget_bounds(UserProfile(), "월 예산 30,000원 이하").budget_max_won == 30000
+
+    # 예산 문장은 정렬 요구가 아니다 (priorities 가 붙으면 가중치가 한 축으로 쏠린다)
+    assert _drop_inferred_priorities(UserProfile(priorities=["price"]), "월 3만원 이하로 추천해주세요").priorities is None
+    for text in ("제일 싼 걸로", "가격을 최우선으로", "데이터 많은 순으로", "가성비 좋은 걸로"):
+        assert _drop_inferred_priorities(UserProfile(priorities=["price"]), text).priorities == ["price"], text
+
+    # 나이는 가입 자격 판정용으로만 보존한다
+    assert _apply_user_age(UserProfile(), "저는 20대예요").user_age is None
+    assert _apply_user_age(UserProfile(), "만 24세입니다").user_age == 24
+    assert _apply_user_age(UserProfile(), "28살이에요").user_age == 28
+    assert _apply_user_age(UserProfile(), "데이터 20GB 정도").user_age is None
+    assert _apply_user_age(UserProfile(user_age=30), "20대").user_age is None
+
     # hard_constraints 는 값이 있는 필터 필드만
     normalized = _normalize_profile(UserProfile(budget_max_won=30000, voice_unlimited=True))
     assert set(normalized.hard_constraints) == {"budget_max_won", "voice_unlimited"}
+    assert AGE_UNKNOWN_ASSUMPTION in normalized.assumptions
+    assert AGE_UNKNOWN_ASSUMPTION not in _normalize_profile(UserProfile(user_age=25)).assumptions
 
     music = _normalize_profile(UserProfile(wanted_benefits=["음악 혜택"]))
     assert music.wanted_benefits is None

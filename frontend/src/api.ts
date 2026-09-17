@@ -1,4 +1,11 @@
-import { BrowseFilters, ChatMessage, PlanPage, RecommendResponse, Stats } from './types';
+import {
+  BrowseFilters,
+  ChatMessage,
+  PlanItem,
+  PlanPage,
+  RecommendResponse,
+  Stats,
+} from './types';
 
 // LLM 4단계라 40초 안팎. 넉넉히 잡고 그 전까지는 로딩을 유지한다.
 const TIMEOUT_MS = 120_000;
@@ -14,7 +21,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => null);
-      throw new Error(detail?.detail || `요청 실패 (${res.status})`);
+      throw new Error(typeof detail?.detail === 'string' ? detail.detail : `입력 내용을 확인해 주세요 (${res.status})`);
     }
     return res.json();
   } catch (err) {
@@ -46,16 +53,20 @@ export function listPlans(params: {
   pageSize: number;
 }) {
   const query = new URLSearchParams({
-    networks: params.filters.networks.join(','),
-    data: params.filters.data.join(','),
-    voice: params.filters.voice.join(','),
-    flags: params.filters.flags.join(','),
     sort: params.sort,
     page: String(params.page),
     page_size: String(params.pageSize),
   });
+  // 필터 그룹 이름은 백엔드 FILTER_GROUPS 의 키와 1:1. 한쪽만 늘리면 조용히 무시된다.
+  for (const [group, keys] of Object.entries(params.filters)) {
+    if (keys.length > 0) query.set(group, keys.join(','));
+  }
   if (params.q) query.set('q', params.q);
   return call<PlanPage>(`/api/plans?${query}`);
+}
+
+export function fetchPlan(planId: string) {
+  return call<PlanItem>(`/api/plans/${encodeURIComponent(planId)}`);
 }
 
 export function ask(planId: string, question: string) {

@@ -20,8 +20,6 @@ const QUICK = [
   },
 ];
 
-const AGES = ['20대', '30대', '40대', '50대+'];
-
 /** 슬라이더 값을 그대로 자연어로 바꿔 채팅과 같은 입력 경로로 보낸다.
  *  UserProfile 을 직접 주입하는 두 번째 경로를 만들면 결과가 갈리므로 만들지 않는다. */
 function toSentence(data: number, call: number, budget: number, age: string) {
@@ -30,7 +28,7 @@ function toSentence(data: number, call: number, budget: number, age: string) {
       data >= 31 ? '데이터 무제한' : `데이터 월 ${data}GB 정도`,
       call >= 21 ? '통화 무제한' : call === 0 ? '통화는 거의 안 함' : `통화 월 ${call * 10}분 정도`,
       `월 예산 ${budget.toLocaleString()}원 이하`,
-      age,
+      age ? `만 ${age}세` : '나이는 미입력',
     ].join(', ') + '. 요금제 추천해줘'
   );
 }
@@ -53,41 +51,55 @@ export function InputScreen({
   const [data, setData] = useState(20);
   const [call, setCall] = useState(0);
   const [budget, setBudget] = useState(30000);
-  const [age, setAge] = useState('20대');
+  const [age, setAge] = useState('');
 
   const isChat = mode === 'chat';
   const profile = result?.profile ?? null;
 
-  // 추출된 프로필: 추천을 한 번 돌린 뒤에는 백엔드가 뽑은 값이 정답이다.
+  // 추출된 프로필. 아직 아무것도 말하지 않았으면 '미입력'이다.
+  // 슬라이더 기본값(20GB/3만원/20대)을 추출 결과처럼 보여주면 사용자는 자기가 하지 않은
+  // 말이 잡힌 줄 알고, 실제 추천 조건과도 어긋난다. 직접 선택 모드에서만 현재 값을 비춘다.
+  const formMode = !isChat && !profile;
   const shownData = profile
     ? profile.data_unlimited
       ? '무제한'
-      : profile.min_data_gb || profile.estimated_monthly_data_gb
-        ? `${profile.estimated_monthly_data_gb ? '예상 ' : ''}${Math.max(
-            profile.min_data_gb ?? 0,
-            profile.estimated_monthly_data_gb ?? 0,
-          )}GB${profile.max_data_gb ? ` 이상 · 최대 ${profile.max_data_gb}GB` : ''}`
-        : profile.max_data_gb
-          ? `최대 ${profile.max_data_gb}GB`
-          : '미확인'
-    : data >= 31
-      ? '무제한'
-      : `${data}GB`;
+      : profile.min_data_gb
+        ? `${profile.min_data_gb}GB 이상${profile.max_data_gb ? ` · 최대 ${profile.max_data_gb}GB` : ''}`
+        : profile.target_data_gb
+          ? `${profile.target_data_gb}GB 내외`
+          : profile.max_data_gb
+            ? `최대 ${profile.max_data_gb}GB`
+            : profile.estimated_monthly_data_gb
+              ? `월 ${profile.estimated_monthly_data_gb}GB 예상`
+              : '미확인'
+    : formMode
+      ? data >= 31
+        ? '무제한'
+        : `${data}GB`
+      : '미입력';
   const shownCall = profile
     ? profile.voice_unlimited
       ? '무제한'
       : profile.min_voice_minutes
         ? `월 ${profile.min_voice_minutes}분`
-        : '거의 없음'
-    : call >= 21
-      ? '무제한'
-      : call === 0
-        ? '거의 없음'
-        : `월 ${call * 10}분`;
+        : '미확인'
+    : formMode
+      ? call >= 21
+        ? '무제한'
+        : call === 0
+          ? '거의 없음'
+          : `월 ${call * 10}분`
+      : '미입력';
   const shownBudget = profile?.budget_max_won
     ? `${profile.budget_max_won.toLocaleString()}원 이하`
-    : `${budget.toLocaleString()}원 이하`;
-  const shownAge = profile?.age_condition || age;
+    : formMode
+      ? `${budget.toLocaleString()}원 이하`
+      : '미입력';
+  const shownAge = profile
+    ? profile.age_condition || (profile.user_age ? `만 ${profile.user_age}세` : '미확인')
+    : formMode
+      ? (age ? `만 ${age}세` : '미입력')
+      : '미입력';
 
   const submit = (value: string) => {
     if (!value.trim() || loading) return;
@@ -102,7 +114,7 @@ export function InputScreen({
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
             <strong style={{ fontSize: 'var(--fs-13)' }}>이용 패턴 입력</strong>
             <span style={{ fontSize: 'var(--fs-11)', color: 'var(--accent)' }}>
-              조건 입력 시 즉시 1차 추천 및 꼬리질문 진행
+                조건을 분석해 후보와 추가 질문을 함께 안내합니다
             </span>
           </div>
           <div className="toggle">
@@ -202,19 +214,9 @@ export function InputScreen({
             </Field>
             <div className="field">
               <div className="top">
-                <span className="k">연령대</span>
+                <label className="k" htmlFor="user-age">만 나이 (선택)</label>
               </div>
-              <div className="chip-row" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
-                {AGES.map((a) => (
-                  <button
-                    key={a}
-                    className={`chip ${age === a ? 'on' : ''}`}
-                    onClick={() => setAge(a)}
-                  >
-                    {a}
-                  </button>
-                ))}
-              </div>
+              <input id="user-age" type="number" min={5} max={99} value={age} onChange={e => setAge(e.target.value)} placeholder="미입력 시 연령 전용 상품 제외" />
             </div>
             <Field
               label="월 예산"
@@ -232,7 +234,7 @@ export function InputScreen({
             </Field>
             <button
               className="btn btn-primary btn-block"
-              disabled={loading}
+              disabled={loading || (!!age && (Number(age) < 5 || Number(age) > 99))}
               onClick={() => submit(toSentence(data, call, budget, age))}
             >
               추천 결과 보기
@@ -244,7 +246,7 @@ export function InputScreen({
       <div className="card" style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
         <div className="panel-head">
           <strong style={{ fontSize: 'var(--fs-13)' }}>추출된 프로필</strong>
-          <span style={{ fontSize: 'var(--fs-11)', color: 'var(--accent)' }}>실시간 동기화</span>
+          <span style={{ fontSize: 'var(--fs-11)', color: 'var(--accent)' }}>추천 요청 후 반영</span>
         </div>
         <div className="spec-row">
           <span className="k">데이터 사용량</span>

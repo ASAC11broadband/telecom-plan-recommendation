@@ -41,6 +41,13 @@ class UserProfile(BaseModel):
         None, description="최대 데이터량(GB). 무제한은 상한 조건에서 제외"
     )
     data_unlimited: Optional[bool] = Field(None, description="데이터 무제한 필수 여부. 언급 없으면 null")
+    require_full_unlimited: Optional[bool] = Field(
+        None,
+        description=(
+            "'기본 제공량 자체가 무제한'인 상품만 원하면 true. "
+            "'완전 무제한', '속도 제한 없는 무제한'처럼 QoS형을 명시적으로 배제할 때만 사용한다"
+        ),
+    )
     min_qos_mbps: Optional[float] = Field(None, description="데이터 소진 후 최소 요구 속도(Mbps). 언급 없으면 null")
     requires_qos: Optional[bool] = Field(
         None,
@@ -66,6 +73,13 @@ class UserProfile(BaseModel):
     age_condition: Optional[str] = Field(
         None,
         description="가입 대상 조건의 DB 표준값(예: 만 34세 이하, 만 65세 이상, 현역병사). 언급 없으면 null",
+    )
+    user_age: Optional[int] = Field(
+        None,
+        description=(
+            "사용자가 밝힌 본인 나이(만 나이). 연령 전용 요금제의 가입 자격 판정에만 쓴다. "
+            "'20대'처럼 범위만 말하면 만 나이를 확정하지 말고 null로 둔다. 언급 없으면 null"
+        ),
     )
     wanted_benefits: Optional[list[str]] = Field(
         None,
@@ -168,6 +182,12 @@ class ScoredPlan(BaseModel):
         default_factory=list,
         description="사용자가 요청한 혜택 조건과 직접 일치하는 실제 혜택명",
     )
+    criteria_fit: dict[str, float] = Field(
+        default_factory=dict,
+        description="축별 충족도(0~1). 총점 하나로는 후보 2천 건에서 상위권이 전부 100 으로 포화한다",
+    )
+    expected_rank: Optional[float] = None
+    first_rank_acceptability: Optional[float] = None
 
 
 class RankingResult(BaseModel):

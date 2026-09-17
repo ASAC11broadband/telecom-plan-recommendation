@@ -24,10 +24,10 @@ export function HomeScreen({ onNavigate }: { onNavigate: (s: ScreenType) => void
     <div className="body">
       <div className="hero">
         <div className="kicker">모모플랜 · MoMo Plan</div>
-        <h1>모르면 손해 보는 모든 요금제 비교</h1>
+        <h1>내 생활에 맞는 요금제,<br />추천의 근거까지 한눈에</h1>
         <p>
-          통신 3사와 알뜰폰 요금제 {stats ? stats.total.toLocaleString() : '2,759'}건을 같은 기준으로
-          정규화해, 이용 패턴에 맞는 요금제와 그 근거까지 보여드립니다.
+          통신 3사와 알뜰폰 요금제 {stats ? `${stats.total.toLocaleString()}건` : ''}을 같은 기준으로
+          비교하고, 내 사용량에 맞는 추천을 받아보세요. 관심 상품은 비교함에 모아 확인할 수 있습니다.
         </p>
       </div>
 
@@ -35,12 +35,12 @@ export function HomeScreen({ onNavigate }: { onNavigate: (s: ScreenType) => void
         <div className="card accent entry-card">
           <span className="tag tag-accent">AI 추천</span>
           <h3>AI에게 추천받기</h3>
-          <p>대화로 이용 패턴을 입력하면 최적 요금제와 추천 근거를 리포트로 제공합니다.</p>
+          <p>대화로 이용 패턴을 입력하면 조건에 맞는 후보와 선택 이유를 함께 보여드립니다.</p>
           <div className="hr" />
           <ul className="entry-list">
             <li>채팅 또는 직접 선택 입력</li>
             <li>추천 사유 자연어 설명</li>
-            <li>6개월 기준 총비용 산정</li>
+            <li>{stats?.compareMonths ?? 6}개월 기준 총비용 비교</li>
           </ul>
           <button className="btn btn-primary btn-block" onClick={() => onNavigate('s-input')}>
             AI 추천 시작
@@ -62,13 +62,21 @@ export function HomeScreen({ onNavigate }: { onNavigate: (s: ScreenType) => void
         </div>
       </div>
 
+      <div className="service-steps" aria-label="서비스 이용 순서">
+        <div><span>01</span><strong>탐색</strong><p>요금과 데이터 분포부터 확인</p></div>
+        <div><span>02</span><strong>추천</strong><p>내 사용량과 예산에 맞게 좁히기</p></div>
+        <div><span>03</span><strong>비교</strong><p>직접 찾은 상품과 추천 상품 함께 보기</p></div>
+        <div><span>04</span><strong>확인</strong><p>추천 이유와 가입 전 주의사항 확인</p></div>
+      </div>
       <div className="card">
         <div
           className="row-between"
           style={{ padding: '12px 20px', borderBottom: '1px solid var(--border)' }}
         >
-          <strong style={{ fontSize: 'var(--fs-13)' }}>데이터 커버리지</strong>
-          <span style={{ fontSize: 'var(--fs-11)', color: 'var(--t3)' }}>최종 수집 2026-08-21</span>
+          <strong style={{ fontSize: 'var(--fs-13)' }}>비교할 수 있는 요금제</strong>
+          <span style={{ fontSize: 'var(--fs-11)', color: 'var(--t3)' }}>
+            데이터 기준 {stats ? stats.dataAsOf : '—'}
+          </span>
         </div>
         <div className="coverage-grid">
           {cells.map(([value, label]) => (

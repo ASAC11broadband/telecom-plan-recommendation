@@ -8,8 +8,8 @@ import math
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from ..data import filter_candidates, find_plans_by_name
-from ..mcda import evaluate_mcda, rank_smaa2
+from ..data import diagnose_empty, filter_candidates, find_plans_by_name
+from ..mcda import CRITERIA, evaluate_mcda, rank_smaa2
 from ..schemas import ScoredPlan, UserProfile
 from ..state import PipelineState
 
@@ -81,7 +81,8 @@ def _apply_comparison(
         if reference.get("data_unlimited"):
             # 무제한보다 수치상 더 많은 데이터는 존재하지 않는다. 사용자의 의도는
             # 데이터 수준을 떨어뜨리지 않는 대안을 찾는 것으로 보고 무제한끼리 비교한다.
-            result = [p for p in result if p.get("data_unlimited")]
+            # 소진 후 속도가 쓸 만한 QoS형도 같은 수준으로 본다(agent.data 참고).
+            result = [p for p in result if p.get("effective_unlimited", p.get("data_unlimited"))]
         else:
             reference_data = _data_value(reference)
             result = [p for p in result if _data_value(p) > reference_data]
@@ -184,6 +185,33 @@ def _shortlist(
     return list(selected.values())
 
 
+def _with_reference_baseline(profile: UserProfile, reference: dict | None) -> UserProfile:
+    """기준 요금제가 있으면 그 제공량을 데이터 목표치의 기본값으로 삼는다.
+
+    '지금 쓰는 무제한 요금제보다 싼 걸로'라고만 하면 데이터 조건이 비어 있어, 예산만
+    맞추는 0.5GB 요금제가 1순위로 올라온다. 사용자가 원한 건 절약이지 다운그레이드가
+    아니다. 사용자가 데이터 조건을 직접 말했으면 그 값을 그대로 둔다.
+    """
+    if reference is None:
+        return profile
+    if any(
+        value is not None
+        for value in (
+            profile.data_unlimited,
+            profile.min_data_gb,
+            profile.target_data_gb,
+            profile.max_data_gb,
+            profile.estimated_monthly_data_gb,
+        )
+    ):
+        return profile
+    if reference.get("data_unlimited") or reference.get("effective_unlimited"):
+        return profile.model_copy(update={"data_unlimited": True})
+    if reference.get("data_gb"):
+        return profile.model_copy(update={"target_data_gb": float(reference["data_gb"])})
+    return profile
+
+
 def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
     profile = state.get("profile") or UserProfile()
     reference, question = _resolve_reference(profile)
@@ -197,13 +225,19 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             "messages": [AIMessage(content=question, name="recommend")],
         }
 
-    candidates = filter_candidates(profile.model_dump())
+    # 기준 요금제가 있으면 그 수준을 데이터 조건의 기본값으로 세운 뒤 후보를 거른다.
+    # 필터가 아니라 점수에만 반영하면 "무제한보다 싼 것" 요청에 0.5GB 요금제가 살아남는다.
+    ranking_profile = _with_reference_baseline(profile, reference)
+    candidates = filter_candidates(ranking_profile.model_dump())
     candidates = _apply_comparison(candidates, reference, profile.comparison_goals or [])
     if not candidates:
+        # 무엇을 고치면 되는지 함께 돌려준다. "없습니다"만으로는 사용자가 다음 수를 못 둔다.
+        blockers = diagnose_empty(ranking_profile.model_dump())
         return {
             "candidates": [],
             "ranked": [],
             "reference": reference,
+            "blockers": blockers,
             "clarification_question": None,
             "messages": [AIMessage(content="조건을 만족하는 요금제가 없습니다.", name="recommend")],
         }
@@ -214,7 +248,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
         ranking_candidates,
         profile.priorities,
         comparison_goals=profile.comparison_goals,
-        profile=profile,
+        profile=ranking_profile,
     )
     ranked = [
         ScoredPlan(
@@ -225,14 +259,26 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
                 f"가중치 조합에서 기대순위 {decision.smaa2_expected_rank:.2f}, "
                 f"1위 수용도 {decision.smaa2_first_rank_acceptability * 100:.1f}%입니다."
             ),
+            criteria_fit=dict(zip(CRITERIA, (round(value, 3) for value in decision.utilities))),
+            expected_rank=decision.smaa2_expected_rank,
+            first_rank_acceptability=decision.smaa2_first_rank_acceptability,
         )
         for decision in rank_smaa2(decisions)[:5]
     ]
 
     return {
         "candidates": candidates,
+        "recommendation_trace": {
+            "eligibleCount": len(candidates),
+            "rankedCount": len(ranking_candidates),
+            "shownCount": len(ranked),
+            "rankingProfile": ranking_profile.model_dump(exclude_none=True),
+            "referenceBaselineApplied": ranking_profile is not profile,
+            "deduplication": "동일 상품명은 현재 할인가가 가장 낮은 1건만 순위 계산",
+        },
         "ranked": ranked,
         "reference": reference,
+        "blockers": [],
         "clarification_question": None,
         "messages": [
             AIMessage(

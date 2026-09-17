@@ -154,6 +154,49 @@ def _speed_to_mbps(value) -> float | None:
     return None
 
 
+# ── 데이터 등급 ───────────────────────────────────────────────
+# 임계값은 usage.py 의 GB/h 계수를 회선 속도로 역산한 값이다.
+#   720p 1.95GB/h -> 4.44Mbps / 480p 0.6GB/h -> 1.37Mbps / 240p 0.2GB/h -> 0.46Mbps
+# KT 무제한의 100/200Kbps는 과거 수집기의 로밍 fallback 혼입 가능성이 있어
+# 국내 QoS 분석에서 제외한다. 화질 등급은 계산상 참고값이지 품질 보장이 아니다.
+QOS_HD_MBPS = 4.44
+QOS_SD_MBPS = 1.37
+QOS_LITE_MBPS = 0.46
+# 사용자가 "무제한"이라고 말할 때 받아들일 최소 소진 후 속도.
+# 1Mbps 면 소진 뒤에도 메신저·웹·음악·저화질 영상이 끊기지 않는다.
+UNLIMITED_QOS_MBPS = 1.0
+
+DATA_TIERS = {
+    "unlimited_full": "기본량 무제한",
+    "qos_hd": "소진 후 HD",
+    "qos_sd": "소진 후 480p",
+    "qos_lite": "소진 후 저화질",
+    "qos_text": "소진 후 문자·웹",
+    "capped": "소진 후 정책 미확인",
+}
+
+
+def data_tier(data_unlimited: object, qos_mbps: float | None) -> str:
+    """기본 제공량이 아니라 '소진한 뒤에 무엇을 할 수 있는가'로 나눈 등급."""
+    if bool(data_unlimited):
+        return "unlimited_full"
+    # 미수집(NaN)은 어떤 비교에도 False 라 조용히 마지막 등급으로 떨어진다. 먼저 걸러낸다.
+    if qos_mbps is None or qos_mbps != qos_mbps or qos_mbps <= 0:
+        return "capped"
+    if qos_mbps >= QOS_HD_MBPS:
+        return "qos_hd"
+    if qos_mbps >= QOS_SD_MBPS:
+        return "qos_sd"
+    if qos_mbps >= QOS_LITE_MBPS:
+        return "qos_lite"
+    return "qos_text"
+
+
+def is_effectively_unlimited(data_unlimited: object, qos_mbps: float | None) -> bool:
+    """사용자 표현 '무제한'이 가리키는 범위. 완전 무제한 + 쓸 만한 QoS 상품."""
+    return bool(data_unlimited) or (qos_mbps is not None and qos_mbps >= UNLIMITED_QOS_MBPS)
+
+
 def load() -> None:
     """CSV를 읽어 `_plans`를 채운다.
 
@@ -170,6 +213,20 @@ def load() -> None:
             return
         plans = pd.read_csv(PLANS_CSV, dtype={"plan_id": str})
         plans["qos_mbps"] = plans["data_throttle_speed"].map(_speed_to_mbps)
+        # 원본 CSV는 보존한다. 재수집 전에는 로밍 혼입 의심 값을 국내 속도로 쓰지 않는다.
+        plans["qos_source_suspect"] = (
+            (plans["carrier_type"] == "MNO") & (plans["host_mno"] == "KT")
+            & plans["data_unlimited"] & plans["qos_mbps"].isin([0.1, 0.2])
+        )
+        plans.loc[plans["qos_source_suspect"], "qos_mbps"] = float("nan")
+        plans["data_tier"] = [
+            data_tier(unlimited, qos)
+            for unlimited, qos in zip(plans["data_unlimited"], plans["qos_mbps"])
+        ]
+        plans["effective_unlimited"] = [
+            is_effectively_unlimited(unlimited, qos)
+            for unlimited, qos in zip(plans["data_unlimited"], plans["qos_mbps"])
+        ]
         benefits = pd.read_csv(BENEFITS_CSV, dtype={"plan_id": str})
         benefit_lists = (
             benefits.groupby("plan_id")["benefit_name"]
@@ -206,6 +263,16 @@ def load() -> None:
                 {
                     "name": str(row.get("benefit_name") or ""),
                     "categories": categories,
+                    # 혜택의 원화 가치. 크롤러가 값을 못 채운 혜택은 None 이고 0 원이 아니다.
+                    "value_won": _opt_int(row.get("benefit_value_won")),
+                    # 크롤러가 채우는 단위·기간. 옛 스키마의 CSV 에는 없어 빈값이 되고,
+                    # 그때는 이름 문자열에서 추론한다(_monthly_worth).
+                    "value_basis": _opt_text(row.get("benefit_value_basis")),
+                    "months": _opt_int(row.get("benefit_months")),
+                    "user_pay_won": _opt_int(row.get("user_pay_won")),
+                    # 택1 혜택. 같은 select_group 안에서는 하나만 실제로 받는다.
+                    "selectable": bool(row.get("is_selectable")),
+                    "select_group": _opt_text(row.get("select_group")),
                 }
             )
         plans["included_benefits"] = plans["plan_id"].map(benefit_lists).apply(
@@ -222,7 +289,106 @@ def load() -> None:
             + " | "
             + plans["included_benefits"].apply(" | ".join)
         )
+        plans["benefit_value_won"] = plans["benefit_details"].map(monthly_benefit_value)
         _plans = plans
+
+
+def _opt_int(value) -> int | None:
+    if value is None or pd.isna(value):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_text(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+# 페이백·사은품은 일시금이라 월 단위 비교에 그대로 더하면 과대평가된다.
+# 비교 구간(6개월)으로 나눠 월 환산한다. backend.plans.COMPARE_MONTHS 와 같은 값이다.
+# 일시금 혜택을 월로 펴 바를 때 쓰는 기본 구간. backend.plans.COMPARE_MONTHS 와 같은 값이다.
+BENEFIT_AMORTIZE_MONTHS = 6
+_ONE_OFF_CATEGORIES = {"사은품/페이백"}
+
+# benefit_value_won 은 한 컬럼에 두 단위가 섞여 있다.
+#   '네이버페이 매달 3.4만원 페이백 (6개월)' -> 204,000 (총액)
+#   '네이버페이 매달 5천원 페이백 (평생)'    ->   5,000 (월액)
+#   '넷플릭스'                              ->  17,000 (월 구독가)
+# 어느 쪽인지는 컬럼에 없고 이름 문자열에만 있다. 그래서 이름을 먼저 읽는다.
+_RECURRING_AMOUNT_RE = re.compile(
+    r"(?:매달|매월)\s*([\d.,]+)\s*(만원|천원|원)", re.IGNORECASE
+)
+_BENEFIT_MONTHS_RE = re.compile(r"(\d+)\s*개월")
+_MONEY_UNIT = {"만원": 10_000, "천원": 1_000, "원": 1}
+
+
+def _monthly_worth(
+    name: str, worth: float, one_off: bool, basis: str = "", months: int | None = None
+) -> float:
+    """혜택 하나가 한 달에 얼마짜리인지.
+
+    0. 크롤러가 단위를 적어 뒀으면 그것을 믿는다(benefit_value_basis). 수집 시점에
+       판정한 값이라 이름 파싱보다 정확하다.
+    1. 이름이 '매달 N원'이라고 말하면 그 값이 곧 월 가치다.
+    2. 이름에 기간이 있으면 총액을 그 기간으로 나눈다. 6 으로 고정해서 나누면
+       12개월 페이백이 두 배로 부풀려진다(실측: 2.0배).
+    3. 기간을 모르는 일시금은 비교 구간으로 편다.
+    """
+    if basis == "monthly":
+        return worth  # 이미 한 달치다. 기간(months)은 얼마나 오래 받는지일 뿐이다.
+    if basis == "one_off":
+        return worth / BENEFIT_AMORTIZE_MONTHS
+
+    matched = _RECURRING_AMOUNT_RE.search(name)
+    if matched:
+        amount = float(matched.group(1).replace(",", "")) * _MONEY_UNIT[matched.group(2)]
+        if amount > 0:
+            return amount
+
+    months = _BENEFIT_MONTHS_RE.search(name)
+    if months and int(months.group(1)) > 0:
+        return worth / int(months.group(1))
+
+    return worth / BENEFIT_AMORTIZE_MONTHS if one_off else worth
+
+
+def monthly_benefit_value(details: object) -> int:
+    """요금제 하나가 매달 돌려주는 혜택의 원화 가치.
+
+    - value_won 이 비어 있는 혜택은 0 원이 아니라 '가치 미상'이라 합계에서 빠진다.
+    - 택1(select_group)은 그룹당 가장 비싼 하나만 센다. 전부 더하면 실제보다 부풀려진다.
+    - 총액인지 월액인지는 이름 문자열로 판별한다(_monthly_worth 참고).
+    """
+    if not isinstance(details, list):
+        return 0
+    total = 0.0
+    best_in_group: dict[str, float] = {}
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        value = detail.get("value_won")
+        if not value or value <= 0:
+            continue
+        worth = float(value) - float(detail.get("user_pay_won") or 0)
+        if worth <= 0:
+            continue
+        name = str(detail.get("name") or "")
+        one_off = bool(_ONE_OFF_CATEGORIES.intersection(detail.get("categories") or []))
+        worth = _monthly_worth(
+            name, worth, one_off,
+            basis=str(detail.get("value_basis") or ""),
+            months=detail.get("months"),
+        )
+        group = detail.get("select_group") or ""
+        if detail.get("selectable") and group:
+            best_in_group[group] = max(best_in_group.get(group, 0.0), worth)
+        else:
+            total += worth
+    return int(round(total + sum(best_in_group.values())))
 
 
 # 사용자가 혜택 이름 뒤에 붙이는 수식어. 붙은 채로 substring 매칭하면 무조건 0건이 된다.
@@ -253,6 +419,35 @@ def has_benefit(search_text: str, benefit: object) -> bool:
     return bool(needle) and needle in haystack
 
 
+# 가입 자격 조건. 전체의 12%(331건)가 연령·신분 전용 상품이다.
+_AGE_LIMIT_RE = re.compile(r"만\s*(\d+)\s*세\s*(이하|이상|미만|초과)")
+
+
+def age_eligible(age_condition: object, user_age: int | None) -> bool:
+    """가입 자격을 만족하는지. 나이를 모르면 자격 조건이 붙은 상품은 통과시키지 않는다.
+
+    자격 없는 상품을 추천하면 사용자는 가입 단계에서 튕긴다. 조건이 비어 있는
+    상품(88%)은 누구나 가입 가능하므로 항상 통과한다.
+    """
+    condition = str(age_condition or "").strip()
+    if not condition or condition.casefold() == "nan":
+        return True
+    if user_age is None:
+        return False
+    matched = _AGE_LIMIT_RE.search(condition)
+    if not matched:
+        # '현역병사'처럼 나이로 판정할 수 없는 조건. 사용자가 직접 고르게 두고 자동 추천에서는 뺀다.
+        return False
+    limit, comparator = int(matched.group(1)), matched.group(2)
+    if comparator == "이하":
+        return user_age <= limit
+    if comparator == "미만":
+        return user_age < limit
+    if comparator == "이상":
+        return user_age >= limit
+    return user_age > limit
+
+
 def filter_candidates(profile: dict) -> list[dict]:
     """명시 조건을 그대로 적용하고 조건을 만족한 후보 전체를 반환한다."""
     load()
@@ -267,8 +462,11 @@ def filter_candidates(profile: dict) -> list[dict]:
 
     # unlimited 계열이 False 인 것은 "무제한이 필수는 아니다" 라는 뜻이지
     # "무제한이면 안 된다" 가 아니다. True 일 때만 필터한다. (sms/voice 도 동일)
+    #
+    # 일반 '무제한'은 기본량 무제한 또는 1Mbps 이상 QoS형이라는 서비스 정책이다.
+    # 1Mbps는 EDA로 입증한 정답이 아닌 명시적인 운영 기준이다.
     if profile.get("data_unlimited") is True:
-        df = df[df["data_unlimited"]]
+        df = df[df["effective_unlimited"]] if not profile.get("require_full_unlimited") else df[df["data_unlimited"]]
 
     # 사용자가 직접 말한 "NGB 이상"만 Hard Constraint로 적용한다.
     # "NGB 정도"와 앱 사용량 추정값은 목표치이므로 후보를 제거하지 않고
@@ -313,6 +511,13 @@ def filter_candidates(profile: dict) -> list[dict]:
     # 전체의 88% 가 여기 해당하므로 동일 조건만 남기면 후보가 사실상 사라진다.
     if profile.get("age_condition") is not None:
         df = df[df["age_condition"].isna() | (df["age_condition"] == profile["age_condition"])]
+    else:
+        # 나이를 모르면 전용 상품은 뺀다. 자격 없는 상품을 1순위로 올리면
+        # (키즈 요금제가 성인에게 추천된 적이 있다) 추천 전체를 못 믿게 된다.
+        user_age = profile.get("user_age")
+        df = df[
+            df["age_condition"].map(lambda value, age=user_age: age_eligible(value, age))
+        ]
 
     if profile.get("mvno_brand") is not None:
         brand = str(profile["mvno_brand"]).strip().casefold()
@@ -348,6 +553,62 @@ def filter_candidates(profile: dict) -> list[dict]:
         ]
 
     return [_row_summary(row) for _, row in df.iterrows()]
+
+
+# 사용자에게 보여줄 조건 이름. 필드명을 그대로 띄우면 읽을 수 없다.
+CONSTRAINT_LABELS = {
+    "budget_min_won": "최소 요금",
+    "budget_max_won": "예산 상한",
+    "min_data_gb": "최소 데이터",
+    "max_data_gb": "최대 데이터",
+    "data_unlimited": "데이터 무제한",
+    "require_full_unlimited": "완전 무제한만",
+    "min_qos_mbps": "소진 후 최소 속도",
+    "requires_qos": "소진 후 사용 가능",
+    "min_tethering_gb": "최소 테더링",
+    "min_voice_minutes": "최소 통화",
+    "voice_unlimited": "통화 무제한",
+    "sms_unlimited": "문자 무제한",
+    "carrier_type": "사업자 유형",
+    "host_mno": "통신망",
+    "mvno_brand": "알뜰폰 브랜드",
+    "network_gen": "네트워크 세대",
+    "age_condition": "가입 대상",
+    "wanted_benefits": "요청 혜택",
+    "wanted_benefit_categories": "요청 혜택 유형",
+    "min_discount_period_months": "최소 할인 기간",
+}
+
+
+def diagnose_empty(profile: dict) -> list[dict]:
+    """후보가 0건일 때 어느 조건이 막았는지 조건을 하나씩 빼 보고 알아낸다.
+
+    "조건에 맞는 요금제가 없습니다"만 띄우면 사용자는 무엇을 고쳐야 할지 모른다.
+    조건 하나를 풀었을 때 후보가 살아나면 그 조건이 병목이고, 예산이 병목이면
+    실제로 가능한 최저 금액까지 같이 알려 준다.
+    """
+    if filter_candidates(profile):
+        return []  # 후보가 있으면 병목도 없다
+
+    blockers: list[dict] = []
+    for field in CONSTRAINT_LABELS:
+        if profile.get(field) in (None, [], ""):
+            continue
+        relaxed = {key: value for key, value in profile.items() if key != field}
+        survivors = filter_candidates(relaxed)
+        if not survivors:
+            continue
+        entry = {
+            "field": field,
+            "label": CONSTRAINT_LABELS[field],
+            "value": profile[field],
+            "candidates": len(survivors),
+        }
+        if field == "budget_max_won":
+            # 이 조건만 걸림돌이면 얼마부터 가능한지가 유일하게 쓸모 있는 답이다.
+            entry["minimum_fee"] = min(row["discounted_fee"] for row in survivors)
+        blockers.append(entry)
+    return sorted(blockers, key=lambda item: -item["candidates"])
 
 
 def find_candidate(candidates: list[dict], plan_id: str) -> dict | None:
@@ -423,7 +684,7 @@ def _fmt(value) -> str:
 def _row_summary(r) -> dict:
     if r["data_unlimited"]:
         data = "무제한"
-        if pd.notna(r.get("data_throttle_speed")):
+        if pd.notna(r.get("data_throttle_speed")) and not r.get("qos_source_suspect", False):
             data += f" (QoS {r['data_throttle_speed']})"
     elif pd.notna(r.get("data_throttle_speed")):
         data = f"{_fmt(r['data_gb'])}GB + 소진 후 {r['data_throttle_speed']}"
@@ -440,7 +701,13 @@ def _row_summary(r) -> dict:
         "data": data,
         "data_gb": float(r["data_gb"]) if pd.notna(r["data_gb"]) else None,
         "data_unlimited": bool(r["data_unlimited"]),
+        "data_tier": r["data_tier"],
+        "data_tier_label": DATA_TIERS[r["data_tier"]],
+        "effective_unlimited": bool(r["effective_unlimited"]),
+        "daily_data_gb": float(r["daily_data_gb"]) if pd.notna(r.get("daily_data_gb")) else None,
         "qos_mbps": float(r["qos_mbps"]) if pd.notna(r["qos_mbps"]) else None,
+        "qos_source_suspect": bool(r.get("qos_source_suspect", False)),
+        "crawled_at": _opt_text(r.get("crawled_at")),
         "tethering_gb": float(r["tethering_gb"]) if pd.notna(r["tethering_gb"]) else None,
         "voice": "무제한"
         if r["voice_unlimited"]
@@ -459,7 +726,10 @@ def _row_summary(r) -> dict:
         "included_benefits": list(r["included_benefits"]),
         "benefit_categories": list(r["benefit_categories"]),
         "benefit_details": list(r["benefit_details"]),
+        "benefit_value_won": int(r["benefit_value_won"]),
         "age_condition": r["age_condition"] if pd.notna(r["age_condition"]) else "",
+        "signup_notice": r["signup_notice"] if pd.notna(r.get("signup_notice")) else "",
+        "plan_category": r["plan_category"] if pd.notna(r.get("plan_category")) else "",
         "source_url": r["source_url"] if pd.notna(r["source_url"]) else "",
         "is_online_only": bool(r["is_online_only"]),
         "ott_option_count": int(r["ott_option_count"]) if pd.notna(r["ott_option_count"]) else 0,
@@ -473,6 +743,7 @@ SLIM_FIELDS = (
     "plan_name",
     "carrier",
     "data",
+    "data_tier_label",
     "voice",
     "monthly_fee",
     "discounted_fee",
@@ -482,7 +753,10 @@ SLIM_FIELDS = (
     "included_benefits",
     "benefit_categories",
     "benefit_details",
+    "benefit_value_won",
     "age_condition",
+    "signup_notice",
+    "qos_source_suspect",
 )
 
 
@@ -544,9 +818,9 @@ if __name__ == "__main__":
     mixed_plan_ids = set(
         benefits_id
         for benefits_id in _plans[
-            _plans["included_benefits"].map(
-                lambda values: "티빙/지니/밀리" in values
-            )
+            _plans["included_benefits"].map(lambda values: "티빙/지니/밀리" in values)
+            # 가입 자격이 붙은 상품은 나이를 모르는 프로필에서 후보로 나오지 않는다
+            & _plans["age_condition"].isna()
         ]["plan_id"]
     )
     assert mixed_plan_ids
@@ -578,4 +852,73 @@ if __name__ == "__main__":
     assert ids(either) == ids(disney) | ids(books)
     assert ids(both) == ids(disney) & ids(books)
     assert normalize_benefit_category("도서.콘텐츠") == "도서/콘텐츠"
+
+    # 등급: 소진 후 무엇을 할 수 있는가로 나눈다
+    assert data_tier(True, 0.1) == "unlimited_full"
+    assert data_tier(False, 5.0) == "qos_hd"
+    assert data_tier(False, 3.0) == "qos_sd"
+    assert data_tier(False, 1.0) == "qos_lite"
+    assert data_tier(False, 0.4) == "qos_text"
+    assert data_tier(False, None) == "capped"
+    assert data_tier(False, float("nan")) == "capped"  # 미수집이 조용히 등급을 받으면 안 된다
+    tier_counts = pd.Series([r["data_tier"] for r in all_plans()]).value_counts()
+    assert tier_counts.get("capped", 0) > 500, tier_counts.to_dict()
+    assert is_effectively_unlimited(False, 5.0) and not is_effectively_unlimited(False, 0.4)
+
+    # '무제한' 요청은 완전 무제한과 QoS형을 함께 본다. 라벨만 보면 3만원 이하가 1건뿐이다.
+    strict = [r for r in all_plans() if r["data_unlimited"] and r["discounted_fee"] <= 30000]
+    loose = filter_candidates({"data_unlimited": True, "budget_max_won": 30000})
+    assert len(loose) > len(strict) * 50, (len(loose), len(strict))
+    assert all(r["effective_unlimited"] for r in loose)
+
+    # 가입 자격: 나이를 모르면 전용 상품은 후보에서 빠진다
+    assert age_eligible("", None) and age_eligible(None, None)
+    assert not age_eligible("만 12세 이하", None)
+    assert age_eligible("만 12세 이하", 10) and not age_eligible("만 12세 이하", 30)
+    assert age_eligible("만 65세 이상", 70) and not age_eligible("만 65세 이상", 30)
+    assert not age_eligible("현역병사", 22)  # 나이로 판정 불가 -> 자동 추천에서 제외
+    anyone = filter_candidates({"budget_max_won": 30000})
+    assert all(not row["age_condition"] for row in anyone)
+    youth = filter_candidates({"budget_max_won": 30000, "user_age": 28})
+    assert any(row["age_condition"] == "만 34세 이하" for row in youth)
+    assert not any(row["age_condition"] == "만 12세 이하" for row in youth)
+
+    # 혜택 가치: 택1은 그룹당 하나, 일시금은 월 환산, 값 없는 혜택은 0 원 취급하지 않는다
+    # 0건일 때 어느 조건이 막았는지 짚어 준다 (넷플릭스 혜택 요금제는 최저 59,000원이다)
+    impossible = {"budget_max_won": 30000, "wanted_benefits": ["넷플릭스"], "user_age": 28}
+    assert filter_candidates(impossible) == []
+    blockers = diagnose_empty(impossible)
+    fields = {item["field"] for item in blockers}
+    assert fields == {"budget_max_won", "wanted_benefits"}, fields
+    budget_blocker = next(item for item in blockers if item["field"] == "budget_max_won")
+    assert budget_blocker["minimum_fee"] > 30000
+    assert diagnose_empty({"budget_max_won": 30000}) == []  # 후보가 있으면 병목도 없다
+
+    assert monthly_benefit_value([{"name": "A", "value_won": 12000, "categories": ["멤버십"]}]) == 12000
+    assert monthly_benefit_value([{"name": "A", "value_won": None, "categories": []}]) == 0
+    assert monthly_benefit_value(
+        [{"name": "페이백", "value_won": 60000, "categories": ["사은품/페이백"]}]
+    ) == 10000
+    # benefit_value_won 은 총액과 월액이 섞여 있다. 기간을 6으로 고정해 나누면
+    # 12개월 페이백이 정확히 두 배로 부풀려진다(실측 확인).
+    assert _monthly_worth("네이버페이 매달 3.4만원 페이백 (6개월)", 204_000, True) == 34_000
+    assert _monthly_worth("네이버페이 매달 8천원 페이백 (12개월)", 96_000, True) == 8_000
+    assert _monthly_worth("네이버페이 매달 5천원 페이백 (평생)", 5_000, True) == 5_000
+    assert _monthly_worth("넷플릭스", 17_000, False) == 17_000
+    assert round(_monthly_worth("마트 상품권 2만원", 20_000, True)) == 3_333
+    # 크롤러가 단위를 적어 주면 이름 파싱 없이 그대로 쓴다(새 스키마).
+    assert _monthly_worth("아무 이름", 8_000, True, basis="monthly", months=12) == 8_000
+    assert round(_monthly_worth("아무 이름", 20_000, True, basis="one_off")) == 3_333
+    # 옛 스키마(총액 저장)와 새 스키마(월액 저장)가 같은 월 가치로 수렴해야 한다.
+    assert _monthly_worth("네이버페이 매달 8천원 페이백 (12개월)", 96_000, True) == _monthly_worth(
+        "네이버페이 매달 8천원 페이백 (12개월)", 8_000, True, basis="monthly", months=12
+    )
+    picked = monthly_benefit_value(
+        [
+            {"name": "A", "value_won": 9000, "selectable": True, "select_group": "g1", "categories": []},
+            {"name": "B", "value_won": 13500, "selectable": True, "select_group": "g1", "categories": []},
+        ]
+    )
+    assert picked == 13500, picked
+    assert any(row["benefit_value_won"] > 0 for row in anyone)
     print(f"self-check ok: {len(c)} candidates")

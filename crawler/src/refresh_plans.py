@@ -2,6 +2,10 @@
 
     python src/refresh_plans.py            # 수집부터 전부
     python src/refresh_plans.py --parse-only   # 이미 받아둔 캐시로 파싱·비교만
+    python src/refresh_plans.py --promote      # 크롤러 최종본 -> 추천 서비스 입력
+
+수집은 crawler/data/final/ 까지만 쓴다. 추천 서비스가 읽는 루트 data/ 는 promote 로만
+바뀐다 - 수집이 입력을 자동으로 갈아치우면 추천 결과가 매 수집마다 흔들려 비교가 안 된다.
 
 하는 일:
   ① 지금 최종본을 data/final/history/<그 데이터의 수집일>/ 로 백업
@@ -31,12 +35,17 @@ from datetime import date
 from pathlib import Path
 
 import merge_plans
-from schema import BASE_DIR, PLAN_COLUMNS, BENEFIT_COLUMNS, final_path
+from schema import BASE_DIR, PLAN_COLUMNS, BENEFIT_COLUMNS, final_path, serving_path
 
 REVIEW_DIR = BASE_DIR / "data" / "review"
 HISTORY_DIR = BASE_DIR / "data" / "final" / "history"
 PLAN_OUT = final_path("통신요금제_통합데이터_최종.csv")
 BENEFIT_OUT = final_path("통신요금제_혜택상세_최종.csv")
+# 추천 서비스가 읽는 고정 입력. 수집이 여기에 자동으로 쓰지 않는다 - promote 로만 바뀐다.
+SERVING_FILES = (
+    "통신요금제_통합데이터_최종.csv",
+    "통신요금제_혜택상세_최종.csv",
+)
 
 CRAWLERS = ("crawl_kt", "crawl_skt", "crawl_lguplus", "crawl_moyo")
 DATA_VERIFY_SCRIPT = BASE_DIR / "src" / "agents" / "data_verify.py"
@@ -285,10 +294,46 @@ def _selfcheck():
     print("diff_plans / _backup_date 점검 통과")
 
 
+def promote() -> int:
+    """크롤러 최종본을 추천 서비스 입력(루트 data/)으로 올린다.
+
+    수집이 자동으로 덮어쓰면 추천 결과가 매 수집마다 흔들려 비교가 불가능하다.
+    그래서 이 한 걸음만 사람이 직접 실행한다. 되돌릴 수 있게 기존 입력을 먼저 백업한다.
+    """
+    if not Path(PLAN_OUT).exists():
+        print(f"[중단] 크롤러 최종본이 없습니다: {PLAN_OUT}")
+        return 1
+
+    new_rows = _read_csv(PLAN_OUT)
+    current = _read_csv(serving_path(SERVING_FILES[0]))
+    print(f"현재 서비스 입력: {len(current)}행 -> 새 입력: {len(new_rows)}행")
+    if current:
+        kinds = Counter(c["change_type"] for c in diff_plans(current, new_rows, new_rows))
+        print(f"  신규 {kinds.get('신규', 0)} / 변경 {kinds.get('변경', 0)} / "
+              f"단종 {kinds.get('단종', 0)} / 범위이탈 {kinds.get('범위이탈', 0)}")
+
+    if "--yes" not in sys.argv:
+        print("\n실제로 바꾸려면 --yes 를 붙여 다시 실행하세요:")
+        print("  python src/refresh_plans.py --promote --yes")
+        return 0
+
+    backup_dir = HISTORY_DIR / f"serving_{date.today().isoformat()}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for name in SERVING_FILES:
+        source, dest = final_path(name), serving_path(name)
+        if Path(dest).exists():
+            shutil.copy2(dest, backup_dir / name)
+        shutil.copy2(source, dest)
+    print(f"\n[반영] 서비스 입력 교체 완료. 이전 입력 백업: {backup_dir}")
+    return 0
+
+
 def main() -> int:
     if "--self-check" in sys.argv:
         _selfcheck()
         return 0
+    if "--promote" in sys.argv:
+        return promote()
     parse_only = "--parse-only" in sys.argv
     run_date = date.today().isoformat()
     print(f"[갱신 시작] {run_date} (parse_only={parse_only})")
@@ -313,7 +358,8 @@ def main() -> int:
     else:
         _write_csv(new, PLAN_COLUMNS, PLAN_OUT)
         _write_csv(benefits, BENEFIT_COLUMNS, BENEFIT_OUT)
-        print(f"\n[반영] 요금제 {len(new)}행 / 혜택 {len(benefits)}행 저장")
+        print(f"\n[반영] 요금제 {len(new)}행 / 혜택 {len(benefits)}행 저장 -> {Path(PLAN_OUT).parent}")
+        print("  추천 서비스에 올리려면: python src/refresh_plans.py --promote")
 
     changes_path, summary_path = write_reports(
         run_date, status, prev, new, changes, violations)

@@ -8,11 +8,11 @@
 """
 import csv
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from schema import (PLAN_COLUMNS, BENEFIT_COLUMNS, classify_benefit_name,
-                    infer_benefit_search_categories, total_data_gb,
+                    infer_benefit_search_categories, total_data_gb, summarize_benefits,
                     interim_path, final_path)
 
 SITES = ("kt", "skt", "lguplus", "moyo")
@@ -141,6 +141,13 @@ def build(verbose: bool = True) -> tuple[list[dict], list[dict], Counter, list[d
         if verbose:
             print(f"  {Path(path).name}: {len(rows)}행 중 {len(kept)}행 유지 ({len(rows) - len(kept)}행 제외)")
 
+    # 혜택 재분류·중복 제거 후의 상세 행을 기준으로 요약도 다시 계산한다.
+    benefits_by_plan = defaultdict(list)
+    for benefit in benefits:
+        benefits_by_plan[benefit["plan_id"]].append(benefit)
+    for plan in plans:
+        plan.update(summarize_benefits(benefits_by_plan[plan["plan_id"]]))
+
     # 후처리는 build() 안에 둔다. main()에만 있었더니 refresh_plans가 build()만
     # 부르는 경로에서 통째로 빠졌다(discounted_fee 90행·age_condition 14행 결측).
     borrowed = borrow_age_condition(plans)
@@ -240,7 +247,7 @@ def main():
     print("  혜택 분류별:", dict(Counter(b["benefit_category"] for b in benefits)))
     orphans = {b["plan_id"] for b in benefits if b["plan_id"] not in plan_ids}
     print(f"  고아 혜택: {len(orphans)}건")
-    with_ott = sum(1 for p in plans if p["ott_option_count"] not in ("", "0"))
+    with_ott = sum(1 for p in plans if int(p["ott_option_count"] or 0) > 0)
     print(f"  OTT 혜택이 있는 요금제: {with_ott} / {len(plans)}")
     print(f"  실제 요금제 수(base_plan_id): {len({p['base_plan_id'] for p in plans})}")
 

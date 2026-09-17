@@ -31,7 +31,12 @@ RAW_CACHE_DIR = DATA_DIR / "raw_cache"   # 사이트 원본 HTML/JSON
 INTERIM_DIR = DATA_DIR / "interim"       # 사이트별 중간 CSV
 # 캐시/중간 결과는 crawler/data에 두되, 검증을 통과한 최종본은 애플리케이션이
 # 실제로 읽는 프로젝트 루트의 data/에 바로 반영한다.
-FINAL_DIR = PROJECT_DIR / "data"          # 합친 최종 CSV
+# 크롤러가 만든 최종 CSV. **추천 서비스가 읽는 루트 data/ 와 다른 곳이다.**
+# 예전에는 이 값이 PROJECT_DIR/"data" 라서 수집 파이프라인이 추천 모델의 입력을
+# 직접 덮어썼다. 수집 결과가 흔들리면 추천 결과도 같이 흔들려 비교가 불가능해진다.
+# 루트로의 반영은 사람이 promote 로 명시적으로 한다(refresh_plans.py 참고).
+FINAL_DIR = DATA_DIR / "final"            # 합친 최종 CSV (크롤러 출력)
+SERVING_DIR = PROJECT_DIR / "data"        # 추천 서비스가 읽는 고정 입력
 
 
 def cache_dir(site: str) -> Path:
@@ -44,6 +49,11 @@ def interim_path(name: str) -> Path:
 
 def final_path(name: str) -> Path:
     return FINAL_DIR / name
+
+
+def serving_path(name: str) -> Path:
+    """추천 서비스가 실제로 읽는 경로. 수집 파이프라인은 여기에 자동으로 쓰지 않는다."""
+    return SERVING_DIR / name
 
 
 PLAN_COLUMNS = [
@@ -160,7 +170,19 @@ BENEFIT_COLUMNS = [
     "benefit_name",        # 사이트에 적힌 혜택명 그대로
     "benefit_service",     # 정규화한 서비스명 (예: "넷플릭스"). 못 찾으면 빈값
     "benefit_tier",        # 구독 등급. 없으면 빈값
-    "benefit_value_won",   # 혜택 정가/시장가(원) - 모르면 빈값
+    # 혜택 정가/시장가(원) - 모르면 빈값. **1회 지급액 또는 한 달치 금액**이며
+    # 총액이 아니다. 총액으로 접으면 기간이 사라져서, 소비하는 쪽이 "6개월로 나누면
+    # 되겠지" 하고 12개월짜리 페이백을 두 배로 계산한다(실제로 그랬다).
+    "benefit_value_won",
+    # 이 금액을 어떻게 받는가. monthly = 매달 반복, one_off = 한 번만.
+    # 빈값이면 판단 불가이므로 소비하는 쪽이 보수적으로 처리해야 한다.
+    "benefit_value_basis",
+    # 반복 혜택이 몇 개월 제공되는지. 빈값 = 무기한/평생 또는 미상.
+    # one_off 에는 의미가 없어 비워 둔다.
+    "benefit_months",
+    # 추가데이터 혜택이 몇 GB인지. 1,077행 중 1,029건이 이름 문자열에만 있었다.
+    # 데이터 혜택이 아니면 빈값.
+    "benefit_data_gb",
     "user_pay_won",        # 사용자 실부담금(원). 0이면 완전 무료
     "is_selectable",       # true면 같은 select_group 안에서 택1
     "select_group",
@@ -202,6 +224,8 @@ SERVICE_ALIASES = [
     ("폰케어", ("폰케어",)),
     ("삼성 디바이스", ("삼성",)),
     ("애플 디바이스", ("애플",)),
+    ("토스미·오픽미", ("토스미", "오픽미")),
+    ("SNOW", ("snow 앱", "스노우 앱")),
 ]
 
 
@@ -222,6 +246,41 @@ BENEFIT_TIERS = ("광고형 스탠다드", "광고형", "프리미엄", "스탠�
 # "유튜브 프리미엄"/"YouTube Premium"의 '프리미엄'은 등급이 아니라 상품명 자체다.
 # 이걸 등급으로 뽑으면 "넷플릭스 프리미엄"(진짜 상위 등급)과 같은 층위로 묶여버린다.
 _PRODUCT_NAME_PREMIUM_RE = re.compile(r"유튜브\s*프리미엄|YouTube\s*Premium", re.IGNORECASE)
+
+
+# 통신사 멤버십 등급. 혜택명에만 있고 benefit_tier 는 비어 있었다(350행 전부).
+# 긴 것부터 찾아야 VVIP 가 VIP 로 잘리지 않는다.
+MEMBERSHIP_TIERS = ("VVIP", "VIP", "골드", "실버", "일반")
+
+# "공유데이터 100GB", "데이터쿠폰 20GB", "추가 데이터 10GB 증정" 등.
+_BENEFIT_GB_RE = re.compile(r"([\d.]+)\s*GB", re.IGNORECASE)
+
+
+def extract_data_gb(benefit_name: str, benefit_category: str = "") -> object:
+    """추가데이터 혜택의 GB 수량. 데이터 혜택이 아니면 빈 문자열.
+
+    수량이 이름에만 있으면 소비하는 쪽이 정규식을 다시 짜야 하고, 표기가 바뀌면
+    조용히 0 이 된다. 수집 시점에 뽑아 컬럼으로 박는다.
+    """
+    if benefit_category and benefit_category != "추가데이터":
+        return ""
+    matched = _BENEFIT_GB_RE.search(benefit_name or "")
+    if not matched:
+        return ""
+    try:
+        value = float(matched.group(1).rstrip("."))
+    except ValueError:
+        return ""
+    return value if value > 0 else ""
+
+
+def extract_membership_tier(benefit_name: str) -> str:
+    """혜택명에서 멤버십 등급만 뽑는다. 없으면 빈 문자열."""
+    text = (benefit_name or "").upper()
+    for tier in MEMBERSHIP_TIERS:
+        if tier.upper() in text:
+            return tier
+    return ""
 
 
 def extract_tier(benefit_name: str, benefit_service: str = "") -> str:
@@ -291,7 +350,7 @@ def classify_benefit_name(name: str, default: str = "기타") -> str:
     넷플릭스(구독)·폰케어(보험)·삼성 디바이스(기기)가 섞여 있다. 그래서 그룹
     카테고리는 default로만 쓰고, 이름에 단서가 있으면 그걸 우선한다.
     """
-    text = name or ""
+    text = _clean(name or "")
     folded = text.casefold()
 
     # 기존 통합 카테고리를 폴백으로 다시 남기지 않는다. 이름에 더 구체적인 단서가
@@ -540,20 +599,62 @@ def agreement_discount(fee):
     return round(fee * 0.75), "선택약정 25% 할인"
 
 
+# 혜택 금액이 "매달 얼마"인지 "한 번에 얼마"인지, 몇 개월 제공되는지.
+# 사이트마다 표기가 달라 한 곳에서만 판정한다.
+#   "네이버페이 매달 3.4만원 페이백 (6개월)" -> monthly, 6
+#   "네이버페이 매달 5천원 페이백 (평생)"    -> monthly, ""   (무기한)
+#   "넷플릭스"                              -> monthly, ""   (구독 정가)
+#   "3대 마트 상품권, 네이버페이 2만원"       -> one_off, ""
+_RECURRING_WORDS = re.compile(r"매달|매월|월정액|월 ?할인|구독")
+_ONE_OFF_WORDS = re.compile(r"상품권|사은품|증정|지급|쿠폰|캐시백|유심|배송비|이벤트")
+_MONTHS_RE = re.compile(r"(\d+)\s*개월")
+_INDEFINITE_RE = re.compile(r"평생|무기한|계속|약정\s*기간\s*내")
+
+
+def parse_value_period(benefit_name: str, months: object = "") -> tuple[str, object]:
+    """(benefit_value_basis, benefit_months) 를 돌려준다.
+
+    기간을 이름 문자열에만 남겨두면 소비하는 쪽이 파싱을 다시 해야 하고, 표기가
+    바뀌면 조용히 틀린다. 수집 시점에 한 번만 판정해서 컬럼으로 박는다.
+    """
+    text = benefit_name or ""
+    if not months:
+        matched = _MONTHS_RE.search(text)
+        # '평생'이 함께 적혀 있으면 개월 수는 다른 뜻이다(예: 최초 N개월 안내).
+        months = int(matched.group(1)) if matched and not _INDEFINITE_RE.search(text) else ""
+
+    if _RECURRING_WORDS.search(text):
+        return "monthly", months
+    if _ONE_OFF_WORDS.search(text):
+        return "one_off", ""
+    # 서비스명만 적힌 구독 혜택(넷플릭스 등)은 월 정가로 본다.
+    return ("monthly", months) if normalize_service(text) else ("", months)
+
+
 def make_benefit_row(
     plan_id, host_mno, plan_name, benefit_category, benefit_name, *,
-    value_won="", pay_won="", selectable=False, select_group="", condition="",
-    detail="", source_url="",
+    value_won="", value_basis="", months="", pay_won="",
+    selectable=False, select_group="", condition="", detail="", source_url="",
 ):
-    """BENEFIT_COLUMNS 순서에 맞는 혜택 행 하나."""
+    """BENEFIT_COLUMNS 순서에 맞는 혜택 행 하나.
+
+    value_basis/months 를 넘기지 않으면 혜택명에서 추론한다. 크롤러마다 표기가 달라
+    한 곳에서 처리하는 편이 안전하다(parse_value_period).
+    """
+    name = strip_ui_label(benefit_name)
+    if value_won != "" and not value_basis:
+        value_basis, months = parse_value_period(name, months)
     return {
         "plan_id": plan_id,
         "host_mno": host_mno,
         "plan_name": plan_name,
         "benefit_category": benefit_category,
         # 혜택명에서만 UI 라벨을 뗀다. benefit_detail은 원문 그대로 남긴다.
-        "benefit_name": strip_ui_label(benefit_name),
+        "benefit_name": name,
         "benefit_value_won": value_won,
+        "benefit_value_basis": value_basis,
+        "benefit_months": months,
+        "benefit_data_gb": extract_data_gb(name, benefit_category),
         "user_pay_won": pay_won,
         "is_selectable": selectable,
         "select_group": select_group,
@@ -619,7 +720,18 @@ def write_benefits(rows, path):
         if not row.get("benefit_service"):
             row["benefit_service"] = normalize_service(row.get("benefit_name", ""))
         if not row.get("benefit_tier"):
-            row["benefit_tier"] = extract_tier(row.get("benefit_name", ""), row["benefit_service"])
+            name = row.get("benefit_name", "")
+            # 멤버십은 구독 등급(광고형/스탠다드)이 아니라 통신사 등급(VVIP/VIP)이다.
+            # 같은 컬럼을 쓰되 뽑는 규칙이 다르다.
+            row["benefit_tier"] = (
+                extract_membership_tier(name)
+                if row.get("benefit_category") == "멤버십"
+                else extract_tier(name, row["benefit_service"])
+            )
+        if not row.get("benefit_data_gb"):
+            row["benefit_data_gb"] = extract_data_gb(
+                row.get("benefit_name", ""), row.get("benefit_category", "")
+            )
     _write(rows, path, BENEFIT_COLUMNS)
 
 

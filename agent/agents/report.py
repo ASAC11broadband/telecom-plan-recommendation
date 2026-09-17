@@ -31,6 +31,9 @@ REPORT_PROMPT = """\
   사용자의 예산 조건도 discounted_fee 로 판정된 것이라 monthly_fee 를 쓰면 예산 초과처럼 보인다.
 - monthly_fee(정상가)는 할인 종료 후 요금으로만 쓰고, 두 값이 다르면 어느 쪽인지 반드시 밝힌다.
   할인 기간이나 조건이 없으면 할인가가 계속 유지된다고 단정하지 않는다.
+- monthly_fee 와 discounted_fee 가 같으면 할인 중이 아니다. 이런 상품에는 '할인된 가격',
+  '할인가', '특가' 같은 표현을 쓰지 말고 그냥 월 요금이라고 쓴다. 할인 종료 후 인상을
+  안내하지도 않는다. 두 값이 같은데 할인을 언급하면 사실과 어긋난다.
 - ranked_recommendations에 없는 요금제를 새로 추천하거나 순위를 바꾸지 않는다.
 - ranked_recommendations의 요금제는 모두 사용자의 필수 조건을 이미 통과한 후보다.
   하위 순위를 두고 예산 초과·데이터 부족 같은 조건 미달이라고 쓰지 마라. 순위 차이는
@@ -38,6 +41,17 @@ REPORT_PROMPT = """\
 - 순위는 그대로 유지하되 앞 단계의 내부 계산 문구는 인용하지 않고 사용자 관점의 이유로 다시 설명한다.
 - matched_benefits가 있으면 사용자가 요청한 조건과 직접 일치하는 실제 혜택명이다.
   각 상품 설명 첫 문장에 이 혜택명을 생략하거나 일반화하지 말고 그대로 적는다.
+- data_tier_label은 수집된 기본량과 소진 후 속도의 분류다.
+  '기본량 무제한'은 수집된 기본량 기준이며 모든 이용 상황의 속도 보장이 아니다.
+  HD/480p/저화질 등급은 참고 수준이며 영상 품질을 보장하지 않는다.
+  '소진 후 정책 미확인'은 차단·추가과금 여부도 모른다는 뜻이다.
+  qos_source_suspect=true이면 로밍 속도 혼입 의심으로 국내 속도를 확정할 수 없다.
+- benefit_value_won은 수집된 혜택의 월 환산 원화 가치다. 0이면 '혜택이 없다'가 아니라
+  '금액을 확인하지 못했다'는 뜻이므로 혜택이 없다고 쓰지 마라.
+- 혜택 환산액은 납부액 할인이 아니다. 사용 여부와 지급 조건에 따라 달라지는 참고값이다.
+- 기대순위와 1위 수용도는 사용자 만족도나 예측 정확도가 아니다.
+- 사용자의 월 예상 사용량(profile.estimated_monthly_data_gb)보다 제공량이 적은 상품을
+  추천했다면, 장점만 말하지 말고 그 차이를 반드시 문장으로 알린다.
 
 [리포트 작성 규칙]
 1. 한국어 Markdown으로 바로 사용자에게 보여 줄 최종 답변만 작성한다.
@@ -185,6 +199,9 @@ def _fallback_reason(plan: dict[str, Any]) -> str:
     name = str(plan.get("plan_name") or "추천 요금제")
     fee = int(plan.get("discounted_fee") or 0)
     data = "무제한" if plan.get("data_unlimited") else f"{float(plan.get('data_gb') or 0):g}GB"
+    tier = str(plan.get("data_tier_label") or "")
+    if tier and not plan.get("data_unlimited"):
+        data += f"({tier})"
     benefits = list(plan.get("included_benefits") or [])
     benefit_text = f" 주요 혜택은 {', '.join(map(str, benefits[:3]))}입니다." if benefits else ""
     reason = (
@@ -208,6 +225,38 @@ def _ensure_matched_benefits(reason: str, plan: Mapping[str, Any]) -> str:
     return f"요청한 혜택 조건은 {quoted}으로 충족합니다. {reason}".strip()
 
 
+_COMMON_SECTION = re.compile(r"^###\s+(?:현재 요금제와 비교|가입 전 확인)\s*$", re.MULTILINE)
+
+
+def _ensure_all_ranks(report: str, recommendations: list[dict[str, Any]]) -> str:
+    """리포트에서 빠진 순위를 코드로 채운다.
+
+    상위 5개를 모두 서술하라고 지시해도 모델이 뒤쪽 두세 개를 통째로 빼먹는다. 그때마다
+    리포트 단계를 다시 돌리면 한 번에 10초씩 쓰고도 같은 결과가 나오기 일쑤고, 재시도 예산을
+    소진하면 화면에 "잠정 결과" 딱지가 붙는다. 빠진 상품만 확정된 숫자로 채워 넣는 편이
+    빠르고 정확하다(_fallback_reason 은 후보 원본 값만 쓴다).
+    """
+    present = {int(match.group(1)) for match in _RANK_HEADING.finditer(report)}
+    missing = [
+        plan
+        for plan in recommendations
+        if int(plan.get("rank") or 0) not in present
+        or str(plan.get("plan_name") or "") not in report
+    ]
+    if not missing:
+        return report
+
+    blocks = "\n\n".join(
+        f"### {plan['rank']}순위 — {plan['plan_name']}\n{_fallback_reason(plan)}"
+        for plan in missing
+    )
+    # 공통 섹션(현재 요금제와 비교 / 가입 전 확인) 앞에 끼워 넣어야 순서가 어긋나지 않는다.
+    common = _COMMON_SECTION.search(report)
+    if common:
+        return f"{report[: common.start()].rstrip()}\n\n{blocks}\n\n{report[common.start():]}"
+    return f"{report.rstrip()}\n\n{blocks}\n"
+
+
 def _rank_reasons(report: str, recommendations: list[dict[str, Any]]) -> list[str]:
     """정해 둔 순위 제목 사이의 문단을 상품별 카드 설명으로 분리한다."""
     matches = list(_RANK_HEADING.finditer(report))
@@ -220,6 +269,23 @@ def _rank_reasons(report: str, recommendations: list[dict[str, Any]]) -> list[st
         if body:
             extracted[int(match.group(1))] = body
     return [extracted.get(int(plan.get("rank") or 0), _fallback_reason(plan)) for plan in recommendations]
+
+
+def _ensure_promo_notices(report: str, recommendations: list[dict[str, Any]]) -> str:
+    """필수 요금 조건은 LLM의 문장 생략 여부에 맡기지 않고 원본으로 붙인다."""
+    by_rank = {int(plan['rank']): plan for plan in recommendations}
+    for heading in reversed(list(_RANK_HEADING.finditer(report))):
+        plan = by_rank.get(int(heading.group(1)))
+        if not plan or plan.get('monthly_fee') == plan.get('discounted_fee'):
+            continue
+        following = re.search(r'^###\s', report[heading.end():], re.MULTILINE)
+        end = heading.end() + following.start() if following else len(report)
+        period = plan.get('discount_period_months')
+        timing = f"할인 {period}개월 후" if period is not None else "할인 기간 미확인 · 할인 종료 후"
+        notice = (f"\n\n요금 조건: 현재 월 {plan['discounted_fee']:,}원, {timing} "
+                  f"월 {plan['monthly_fee']:,}원. 가입 조건은 사업자 고지를 확인해 주세요.\n\n")
+        report = report[:end].rstrip() + notice + report[end:]
+    return report
 
 
 def report_node(state: PipelineState, config: RunnableConfig) -> dict:
@@ -245,6 +311,8 @@ def report_node(state: PipelineState, config: RunnableConfig) -> dict:
         report = _response_text(response.content)
         if not report:
             raise ValueError("Report Agent가 빈 응답을 반환했습니다.")
+        report = _ensure_all_ranks(report, recommendations)
+        report = _ensure_promo_notices(report, recommendations)
 
     ranked = list(state.get("ranked") or [])
     if recommendations and ranked:
@@ -314,6 +382,33 @@ if __name__ == "__main__":
     orphan = [ScoredPlan(plan_id="404", plan_name="없는요금제", score=50, reason="")]
     rows = _ranked_recommendations({"candidates": candidates, "ranked": orphan})
     assert len(rows) == 1 and rows[0]["plan_name"] == "없는요금제" and rows[0]["score"] == 50, rows
+
+    # 모델이 뒤쪽 순위를 빼먹어도 리포트에는 전부 남아야 한다 (재시도 대신 코드로 채운다)
+    five = [
+        {
+            "rank": rank,
+            "plan_name": f"요금제{rank}",
+            "discounted_fee": 10000 + rank,
+            "monthly_fee": 10000 + rank,
+            "data_gb": 10.0,
+        }
+        for rank in range(1, 6)
+    ]
+    partial = (
+        "### 추천 결론\n요약입니다.\n\n"
+        "### 1순위 — 요금제1\n첫째입니다. 월 10,001원입니다.\n\n"
+        "### 2순위 — 요금제2\n둘째입니다. 월 10,002원입니다.\n\n"
+        "### 가입 전 확인\n확인하세요.\n"
+    )
+    filled = _ensure_all_ranks(partial, five)
+    for plan in five:
+        assert f"{plan['rank']}순위 — {plan['plan_name']}" in filled, plan
+        assert f"{plan['discounted_fee']:,}" in filled, plan  # 할인가 누락 검증과 짝
+    # 공통 섹션은 마지막에 그대로 남는다
+    assert filled.index("3순위") < filled.index("### 가입 전 확인")
+    assert filled.index("1순위") < filled.index("3순위")
+    # 빠진 게 없으면 손대지 않는다
+    assert _ensure_all_ranks(filled, five) == filled
 
     assert "추천 가능한 요금제를 찾지 못했습니다" in _empty_report()
     print("self-check ok")
