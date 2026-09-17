@@ -88,6 +88,15 @@ REPORT_PROMPT = """\
    절감액은 reference_plan의 금액과 추천 요금제의 금액으로만 계산한다. reference_plan이
    null이거나 금액이 없으면 해당 제목과 문장을 아예 쓰지 않는다.
    계산 기준이 정상가인지 할인가인지 명시한다.
+   유지가 나은지 바꾸는 게 나은지는 reference_verdict.status를 그대로 따른다. 직접 판정하지 마라.
+   - status='keep': 현재 요금제를 유지하는 편이 낫다고 쓴다. 추천 목록은 맞교환을 감수할 때의
+     대안임을 밝힌다.
+   - status='switch': 바꿀 만하다고 쓸 수 있다. 근거는 reference_verdict.reason이다.
+   - status='undetermined': **유리하다/불리하다를 어느 쪽으로도 쓰지 마라.** 무엇을 몰라서
+     판단하지 못했는지(reference_verdict.missing)를 밝히고, 그 값을 알려주면 다시 비교하겠다고
+     안내하는 것으로 끝낸다. 후보가 0건이라는 사실을 현재 요금제가 유리하다는 근거로 쓰지 마라.
+   - reference_verdict.confirm의 항목은 `### 가입 전 확인`에 그대로 반영한다.
+     요금제 데이터로는 알 수 없는 것들이라 빼면 안 된다.
 8. 마지막에는 `### 가입 전 확인` 제목으로 할인 기간, 가입 조건, 테더링과 소진 후 속도 등
    불명확한 항목을 두세 줄로 안내한다.
 9. prior_feedback이 있으면 사실성 원칙을 해치지 않는 범위에서 모두 반영한다.
@@ -326,6 +335,7 @@ def report_node(state: PipelineState, config: RunnableConfig) -> dict:
             "original_user_query": user_query(state),
             "profile": _plain(state.get("profile")),
             "reference_plan": _plain(state.get("reference")),
+            "reference_verdict": _plain(state.get("reference_verdict")),
             "ranked_recommendations": recommendations,
             "prior_feedback": _plain(state.get("feedback", [])),
         }

@@ -29,6 +29,7 @@ class PipelineState(TypedDict, total=False):
     profile: Optional[UserProfile]      # 1단계가 write
     candidates: list[dict]              # 2단계(a) 하드 필터가 통과시킨 후보 원본
     reference: Optional[dict]           # 2단계가 DB 에서 확정한 비교 기준 요금제
+    reference_verdict: Optional[dict]   # 현재 요금제 유지/전환/판단불가 (코드 판정)
     blockers: list[dict]                # 후보 0건일 때 어느 조건이 막았는지
     recommendation_trace: dict         # 실제 후보 수·평가 기준. 발표 및 결과 설명용
     clarification_question: Optional[str]  # 진행 전 사용자에게 확인할 질문

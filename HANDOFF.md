@@ -1,12 +1,12 @@
-# HANDOFF — 추천 설명 검증 실패 / 비용 기준 통일 / 혜택 왜곡 / 필수·선호 분리
+# HANDOFF — 설명 검증 실패 / 비용 기준 통일 / 혜택 왜곡 / 필수·선호 분리 / 현재 요금제 유지 판정
 
 작업일: 2026-09-18
 브랜치: `fix/plan`
 기준 커밋: `8f5a18c` + 작업 시작 시점의 미커밋 변경 전부
 
 > 첫 커밋(`chore:`)은 작업 시작 시점의 미커밋 변경(수정 31개 파일 + 미추적 파일)을
-> 그대로 담은 것이고, 두 번째 커밋(`fix:`)이 이번 작업분입니다.
-> 두 번째 커밋만 보면 이번에 바뀐 것을 그대로 읽을 수 있습니다.
+> 그대로 담은 것이고, 그 뒤 커밋들이 이번 작업분입니다.
+> `git log 8f5a18c..HEAD` 로 이번에 바뀐 것만 볼 수 있습니다.
 
 ---
 
@@ -132,19 +132,25 @@ agent/mcda.py                         COMPARE_MONTHS 도입, 혜택 축 중립�
 agent/agents/evaluation.py            PROMPT 에 [판단 기준] 절 추가
 agent/agents/report.py                REPORT_PROMPT 규칙 2·4 재작성 + 사실성 원칙 3개 추가,
                                       _ensure_promo_notices 를 할인 없는 상품까지 확장
-agent/agents/profiling.py             PROFILING_PROMPT 예산 하한·필수/선호 규칙,
+agent/agents/profiling.py             PROFILING_PROMPT 예산 하한·필수/선호·현재요금 규칙,
                                       _repair_budget_bounds 하한 제거, _BUDGET_MIN_RE,
-                                      _apply_benefit_constraint_strength, _apply_soft_data_preference
+                                      _apply_benefit_constraint_strength, _apply_soft_data_preference,
+                                      _apply_reference_fee, _drop_placeholder_text,
+                                      _POST_NORMALIZE_REPAIRS (정규화가 선호 완화를 되돌리던 문제)
+agent/agents/recommend.py             _reference_verdict / _known_reference_axes /
+                                      REFERENCE_CONFIRM_NOTES, 세 분기에서 reference_verdict 반환
+agent/state.py                        PipelineState 에 reference_verdict 추가
+backend/main.py                       응답에 referenceVerdict 추가
 backend/plans.py                      six_month_cost -> total_cost, COMPARE_MONTHS 를 mcda 에서 import,
                                       effectiveTotal 을 benefit_deductible_won 기준으로,
                                       benefitDeductible/benefitValueEstimated/benefitConditionalCount 추가
-test_service_process.py               import 변경 + 테스트 4개 추가
-frontend/src/types.ts                 PlanItem 에 필드 3개 추가
+test_service_process.py               import 변경 + 테스트 7개 추가
+frontend/src/types.ts                 PlanItem 에 필드 3개 추가, ReferenceVerdict 타입 추가
 frontend/src/components/BrowseScreen.tsx        '6개월' 하드코딩 제거, 차감 표시 기준 변경
 frontend/src/components/HomeScreen.tsx          폴백 6 -> 12
 frontend/src/components/RecommendationTrace.tsx 폴백 6 -> 12, 4번 절 문구 재작성
 frontend/src/components/ReportScreen.tsx        혜택 블록 재작성(추정·조건 안내)
-frontend/src/components/ResultScreen.tsx        차감 표시 기준·라벨 변경
+frontend/src/components/ResultScreen.tsx        차감 표시 기준·라벨 변경, 현재 요금제 판정 배너 추가
 HANDOFF.md                            (신규)
 ```
 
@@ -158,7 +164,7 @@ HANDOFF.md                            (신규)
 
 | 명령 | 결과 |
 |---|---|
-| `python -B -m unittest test_service_process` | **OK — 16개** (기존 12 + 신규 4) |
+| `python -B -m unittest test_service_process` | **OK — 19개** (기존 12 + 신규 7) |
 | `python -m unittest discover -s crawler/src -p "test_*.py"` | **OK — 34개** |
 | `python backend/plans.py` | `self-check ok: 2759 plans` |
 | `python -m agent.data` | `self-check ok: 1555 candidates` |
@@ -167,11 +173,14 @@ HANDOFF.md                            (신규)
 | `python -m agent.usage` | `self-check ok` |
 | `cd frontend && npm run build` | `tsc --noEmit` 통과, `✓ built in 2.44s` |
 
-**신규 테스트 4개** (`test_service_process.py`)
+**신규 테스트 7개** (`test_service_process.py`)
 - `test_compare_period_is_single_source_of_truth` — `compareMonths == rankingMonths == BENEFIT_AMORTIZE_MONTHS`
 - `test_benefit_is_not_deducted_without_confirmed_usage` — 구독형 혜택은 총비용에서 빠지지 않는다
 - `test_benefit_axis_is_neutral_when_not_requested` — 혜택 미요청 시 혜택 축이 전 후보 0.5
 - `test_preferred_benefit_does_not_remove_candidates` — 선호 혜택은 후보를 지우지 않는다(알뜰폰 포함)
+- `test_keep_current_plan_is_distinguished_from_cannot_tell` — 유지/전환/판단불가 3상태, 후보 0건은 유지가 아니다
+- `test_current_fee_is_not_turned_into_a_budget_cap` — 현재 납부액이 예산 상한이 되지 않는다
+- `test_recommend_exposes_reference_verdict_through_api` — API 응답에 referenceVerdict 가 나간다
 
 > 기존 테스트 중 스펙이 바뀐 것은 **기준을 느슨하게 만든 게 아니라 새 스펙으로 다시 쓴 것**입니다.
 > - `plans.py`: 6개월 총비용 기대값 → 12개월 기대값(계산식 그대로 노출)
@@ -245,14 +254,63 @@ HANDOFF.md                            (신규)
   - 카드 실적 조건이 붙은 페이백 → `deductible_won=0`, `conditional=1`
 
 ### 시나리오 7 — 현재 요금제가 유리하거나 비교 정보가 부족한 경우
-입력: `지금 쓰는 요금제가 월 3만원인데 바꾸는 게 나을까? 만 30세.`
 
-- 실제 결과: **미해결 (후순위 항목)**. `budget_max_won=30000`이 만들어졌습니다.
-  사용자는 현재 납부액을 말한 것이지 예산 상한을 말한 게 아닙니다(→ `reference_fee_won`이 맞습니다).
-  그 결과 "현재 요금제보다 싼 것"만 후보가 되고, 리포트는 현재 요금제의 데이터·혜택을 모르는 채
-  `현재 사용 중인 요금제보다 더 저렴하면서도 데이터와 통화 혜택이 우수한` 이라고 단정했습니다.
-  `followup_question`("어떤 조건을 고려해서 바꾸고 싶은지")은 나왔습니다.
-  유지 권고와 판단 불가는 아직 구분되지 않습니다. 재현 방법은 위 입력 그대로입니다.
+**해결.** 유지 권고와 판단 불가를 코드로 구분합니다(`agent/agents/recommend.py:_reference_verdict`).
+LLM 판정이 아니라 코드 판정이고, 리포트는 그 결과를 따르기만 합니다.
+
+| status | 조건 | 뜻 |
+|---|---|---|
+| `keep` | 현재 요금제를 **모든** 비교 항목에서 앞서는 후보(파레토 우위)가 없다 | 유지가 낫다 |
+| `switch` | 파레토 우위 후보가 있다 | 바꿀 만하다 |
+| `undetermined` | 현재 요금·데이터 중 모르는 게 있거나, 후보가 0건이다 | **판정하지 않는다** |
+
+요금만 알고 데이터를 모르면 `undetermined`입니다. 그 상태에서 "더 싼 게 있다"는 말은
+무엇을 포기하는지 빼고 한 말이라 유불리 근거가 못 됩니다.
+후보 0건도 `keep`이 아니라 `undetermined`이고, 문구에 "후보가 없다는 것이 현재 요금제가
+유리하다는 뜻은 아닙니다"를 넣었습니다.
+어느 상태든 `confirm`(실제 납부액·결합할인·위약금)을 함께 내려보내 `### 가입 전 확인`에 들어갑니다.
+
+함께 고친 것 두 가지 — 둘 다 이 시나리오를 막고 있던 별개 버그입니다.
+
+1. **현재 납부액이 예산 상한으로 둔갑** (`_apply_reference_fee`)
+   `지금 월 3만원인데`가 `budget_max_won=30000`이 되면 지금보다 싼 상품만 후보가 되어,
+   "유지가 낫다"는 답 자체가 나올 수 없습니다. 발화의 금액이 현재 요금 하나뿐이고
+   경계 표현(`이하`/`N만원대`)이 없으면 프로필에 붙은 예산을 지웁니다.
+   금액을 둘 말했으면(`지금 3만원 내는데 2만원짜리 있어?`) 손대지 않습니다.
+2. **`_normalize_profile`이 선호 완화를 되돌리던 문제** (우선순위 4의 실제 회귀)
+   `_normalize_profile`은 `hard_constraints`를 **값 유무로 다시 만듭니다.** 그래서
+   `_apply_benefit_constraint_strength`가 앞에서 `wanted_benefits`를 빼도 곧바로 되돌아왔습니다.
+   단위 테스트는 통과했는데 노드 전체로는 동작하지 않던 상태였습니다.
+   이 보정만 `_POST_NORMALIZE_REPAIRS`로 옮겨 정규화 뒤에 적용합니다.
+3. **구조화 출력의 `"null"` 문자열** (`_drop_placeholder_text`)
+   LLM이 `reference_plan_name`에 문자열 `"null"`을 넣었고, 그 이름으로 DB를 뒤지다
+   "정확한 요금제명을 알려주세요"로 파이프라인이 통째로 멈췄습니다(후보 0건, 평가 미실행).
+   문자열 필드의 자리표시자(`null`/`none`/`없음`/`N/A` 등)를 진짜 `None`으로 바꿉니다.
+
+**실제 결과** (LLM 실호출)
+
+| 입력 | 예산 | verdict | 후보 |
+|---|---|---|---|
+| `지금 쓰는 요금제가 월 3만원인데 바꾸는 게 나을까?` | 상한 없음 | `undetermined` · missing=`['데이터 제공량']` | 1,906 |
+| `지금 월 2만원에 데이터 100GB 쓰고 있어. 바꾸는 게 나을까?` | 상한 없음 | `switch` · better 121 / cheaper 118 | 677 |
+| `지금 월 7만원에 데이터 50GB 쓰는데 바꾸는 게 나을까?` | 상한 없음 | `switch` · better 851 / cheaper 2,390 | 2,390 |
+| `지금 월 5천원에 데이터 무제한에 통화도 무제한으로 쓰고 있어.` | 상한 없음 | `keep` · better 0 / cheaper 38 | 1,397 |
+
+- 첫 번째 리포트: `현재 요금제의 데이터 제공량을 알 수 없어 지금이 유리한지 판단하지 못했습니다.`
+  (수정 전에는 데이터를 모르는 채 `현재 요금제보다 더 저렴하면서도 데이터와 통화 혜택이 우수한`이라고 단정했습니다)
+- 네 번째 리포트: `현재 요금제를 유지하는 것이 더 나을 것으로 보입니다.` + 확인 항목 3줄
+- 수정 전 첫 번째 입력은 `budget_max_won=30000`이 붙고 `reference_plan_name="null"`로 막혀
+  추천 자체가 나오지 않았습니다.
+
+**선호/필수 재확인** (2번 항목을 고친 뒤 다시 측정)
+
+| 입력 | hard_constraints | 후보 | 그중 넷플릭스 포함 |
+|---|---|---|---|
+| `넷플릭스 포함이면 좋겠어` (3만원 이하 20GB 이상) | `budget_max_won`, `min_data_gb` | 578 | 0 |
+| `넷플릭스 포함 요금제만 원해` (7만원 이하) | `budget_max_won`, **`wanted_benefits`** | 15 | 15 |
+
+선호는 후보를 지우지 않고, 리포트가 `넷플릭스 혜택은 포함되어 있지 않으니 참고하시기 바랍니다`로
+못 맞췄다는 사실을 알립니다. 필수는 15건 전부 넷플릭스 포함입니다.
 
 ### 시나리오 8 — 담기 → 비교 → 새로고침
 - **브라우저로 직접 확인하지 못했습니다.** 확인한 범위: `tsc --noEmit` + `vite build` 통과,
@@ -268,19 +326,14 @@ HANDOFF.md                            (신규)
 
 ## 5. 아직 남은 것 / 재현 방법
 
-1. **시나리오 7 — 현재 요금제 유지 권고와 판단 불가 구분** (후순위 1, 미착수)
-   - 재현: `지금 쓰는 요금제가 월 3만원인데 바꾸는 게 나을까? 만 30세.`
-   - 할 일: (a) "현재 월 N원"을 `budget_max_won`이 아니라 `reference_fee_won`으로 보내는 보정,
-     (b) 현재 요금제의 데이터·혜택을 모르면 "유리하다"고 단정하지 않고 확인 안내로 끝내기.
-     `프로필에 reference_* 가 비어 있음` = 판단 불가, `reference가 파레토 우위` = 유지 권고.
-2. **리포트가 여전히 카드 스펙을 한 번씩 반복한다.**
+1. **리포트가 여전히 카드 스펙을 한 번씩 반복한다.**
    프롬프트에 금지 규칙과 좋은 예/나쁜 예를 넣어 많이 줄었지만 `gpt-4o-mini`가 완전히 따르지는 않습니다
    (`"120GB의 데이터와 무제한 음성 및 SMS를 제공합니다"` 같은 문장이 남습니다).
    정확성 문제는 아닙니다. 더 줄이려면 `MODEL`을 올리거나 예시를 몇 개 더 붙이는 쪽입니다.
    후처리로 문장을 지우는 방식은 넣지 않았습니다(멀쩡한 비교 문장까지 지울 위험).
-3. **후보 0건일 때 `blockers`가 화면에서 어떻게 보이는지 확인 못 함** (시나리오 3).
+2. **후보 0건일 때 `blockers`가 화면에서 어떻게 보이는지 확인 못 함** (시나리오 3).
    서버는 `{'field','label','value','candidates','minimum_fee'}`를 내려보냅니다.
-4. **비슷한 추천 반복 완화** (후순위 2, 미착수). `_dedupe_by_name`은 이름이 같으면 실납부가 가장 싼
+3. **비슷한 추천 반복 완화** (후순위 2, 미착수). `_dedupe_by_name`은 이름이 같으면 실납부가 가장 싼
    1건만 남깁니다. 가입 조건·혜택이 다른 동명 상품이 지워지는지는 점검하지 않았습니다.
 
 ---
@@ -329,4 +382,4 @@ npm run dev
 2. **비교 구간 12개월을 팀과 확정하세요.** 이전 6개월 결정과 충돌합니다(위 2번 ⚠️).
    되돌리는 비용은 `agent/mcda.py` 한 줄 + 테스트 한 줄입니다.
 3. 브라우저로 시나리오 8(담기 → 비교 → 새로고침)을 눈으로 확인하세요. 코드로는 빌드까지만 봤습니다.
-4. 그다음이 시나리오 7(유지 권고 / 판단 불가 구분)입니다.
+   현재 요금제 판정 배너(`ResultScreen`의 `referenceVerdict`)도 이때 같이 보면 됩니다.

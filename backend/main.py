@@ -124,6 +124,8 @@ def recommend(req: RecommendRequest) -> dict:
         # 선택한 추천 상품과 현재 요금제를 화면에서 직접 비교할 수 있도록 원본 기준 상품도 전달한다.
         "referencePlan": to_plan_item(reference) if reference and reference.get("plan_id") else None,
         "referenceFacts": reference,
+        # 현재 요금제 유지/전환/판단불가. LLM 판정이 아니라 코드 판정이다.
+        "referenceVerdict": state.get("reference_verdict"),
         "trace": {**state.get("recommendation_trace", {}),
                   "elapsedSeconds": round(time.monotonic() - started, 2),
                   "evaluationAttempts": state.get("attempt", 0)},

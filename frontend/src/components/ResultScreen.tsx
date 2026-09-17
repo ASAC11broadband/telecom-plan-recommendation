@@ -256,6 +256,29 @@ export function ResultScreen({
         {result.plans.length > 0 && result.evaluation && !result.evaluation.passed && (
           <div className="notice" role="alert">설명 검증을 통과하지 못한 잠정 결과입니다. 요금·조건은 원문에서 확인해 주세요. </div>
         )}
+        {result.referenceVerdict && (
+          <section className="card result-overview">
+            <h3>
+              {result.referenceVerdict.status === 'keep'
+                ? '현재 요금제를 유지하는 편이 낫습니다'
+                : result.referenceVerdict.status === 'switch'
+                  ? '바꿀 만한 요금제가 있습니다'
+                  : '지금이 유리한지 판단하지 못했습니다'}
+            </h3>
+            <p>{result.referenceVerdict.reason}</p>
+            {result.referenceVerdict.missing.length > 0 && (
+              <p>
+                {result.referenceVerdict.missing.join(', ')}을(를) 알려주시면 현재 요금제와 다시 비교해
+                드리겠습니다.
+              </p>
+            )}
+            <ul className="comparison-note" style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+              {result.referenceVerdict.confirm.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          </section>
+        )}
         {result.plans.length > 0 && <section className="card result-overview">
           <h3>이번 추천 한눈에 보기</h3>
           <p>월 요금 {Math.min(...prices).toLocaleString()}~{Math.max(...prices).toLocaleString()}원 · 추천 {result.plans.length}개</p>

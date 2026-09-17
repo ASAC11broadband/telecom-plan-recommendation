@@ -154,6 +154,9 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - 현재 요금제명 앞의 통신사명은 기준 상품 식별 정보일 뿐 새 상품의 carrier 조건으로 복사하지 않는다.
   예: '현재 KT 초이스90보다 싼 것' → reference_plan_name='초이스90', comparison_goals=['cheaper']
 - 사용자가 현재 가격·데이터·통화·QoS를 직접 말하면 reference_* 필드에 저장한다.
+  '지금 월 3만원 내고 있다'는 reference_fee_won=30000이다. budget_max_won이 아니다.
+  현재 납부액을 예산 상한으로 옮기면 지금보다 싼 상품만 후보가 되어, 바꾸는 게 나은지를
+  물은 사용자에게 유지가 낫다는 답을 아예 못 주게 된다.
 - 비교 목적은 cheaper/more_data/faster_qos/similar/better 중 해당 값을 comparison_goals에 저장한다.
 - 비교 기준값을 현재 추천 조건 필드에 복사하지 않는다. 실제 기준 상품 조회와 비교는 Recommend가 한다.
 
@@ -644,6 +647,75 @@ def _apply_benefit_constraint_strength(profile: UserProfile, query: str) -> User
     return profile.model_copy(update={"hard_constraints": relaxed})
 
 
+# 구조화 출력이 값 없음을 문자열로 흘리는 경우. 'null' 이라는 이름의 요금제를 DB 에서
+# 찾다가 "정확한 요금제명을 알려주세요"로 파이프라인 전체가 멈춘 적이 있다.
+_PLACEHOLDER_TEXT = {
+    "", "null", "none", "nil", "n/a", "na", "-", "미상", "없음", "해당없음",
+    "unknown", "undefined", "not specified", "미지정",
+}
+_TEXT_FIELDS = ("mvno_brand", "age_condition", "reference_plan_name", "notes", "followup_question")
+
+
+def _drop_placeholder_text(profile: UserProfile, query: str) -> UserProfile:
+    """문자열 필드에 들어온 'null' 같은 자리표시자를 진짜 None 으로 바꾼다."""
+    updates = {
+        field: None
+        for field in _TEXT_FIELDS
+        if isinstance(getattr(profile, field, None), str)
+        and str(getattr(profile, field)).strip().casefold() in _PLACEHOLDER_TEXT
+    }
+    return profile.model_copy(update=updates) if updates else profile
+
+
+# "지금 월 3만원 내고 있다" — 현재 납부액이지 예산 상한이 아니다.
+_CURRENT_FEE_PREFIX_RE = re.compile(
+    r"(?:지금|현재|기존|원래|쓰던|쓰는)[^.\n]{0,20}?([\d,]+(?:\.\d+)?)\s*(만원|천원|원)"
+)
+# 발화에 등장한 금액 표현 전부. 현재 요금 말고 다른 금액을 말했는지 세는 데 쓴다.
+_MONEY_AMOUNT_RE = re.compile(r"[\d,]+(?:\.\d+)?\s*(?:만원|천원|원)")
+_CURRENT_FEE_SUFFIX_RE = re.compile(
+    r"([\d,]+(?:\.\d+)?)\s*(만원|천원|원)[^.\n]{0,14}?(?:내고|내는|냅니|쓰고|쓰는|씁니|사용\s*중|이용\s*중|납부)"
+)
+
+
+def _apply_reference_fee(profile: UserProfile, query: str) -> UserProfile:
+    """'지금 월 3만원인데' 를 예산 상한이 아니라 현재 요금으로 읽는다.
+
+    '지금 쓰는 요금제가 월 3만원인데 바꾸는 게 나을까'에 budget_max_won=30,000 이 붙으면
+    현재보다 싼 상품만 후보가 된다. 사용자는 상한을 말한 적이 없고, 오히려 지금이 나은지를
+    물었다. 상한 표현(이하/까지/미만)을 실제로 말한 경우에는 그대로 둔다
+    ('지금 3만원 내는데 2만원 이하로' 는 현재 요금 3만원 + 상한 2만원이 맞다).
+    """
+    text = query or ""
+    matched = _CURRENT_FEE_PREFIX_RE.search(text) or _CURRENT_FEE_SUFFIX_RE.search(text)
+    if not matched:
+        return profile
+    fee = int(float(matched.group(1).replace(",", "")) * _BUDGET_UNIT[matched.group(2)])
+
+    updates: dict[str, object] = {}
+    if profile.reference_fee_won is None:
+        updates["reference_fee_won"] = fee
+
+    # 발화에 나온 금액이 현재 요금 하나뿐이고 경계 표현('이하', 'N만원대')도 없으면,
+    # 프로필에 붙은 예산은 전부 이 금액에서 흘러나온 것이다. '월 2만원에 100GB 쓰고 있어'가
+    # budget 20,000~29,999 로 잡혀 후보가 144건까지 줄어든 적이 있다.
+    # 금액이 둘 이상이면(예: '지금 3만원 내는데 2만원짜리 있어?') 손대지 않는다.
+    amounts = {match.group(0) for match in _MONEY_AMOUNT_RE.finditer(text)}
+    bounded = _BUDGET_MAX_RE.search(text) or _BUDGET_MIN_RE.search(text)
+    if not bounded and len(amounts) == 1:
+        if profile.budget_max_won is not None:
+            updates["budget_max_won"] = None
+        if profile.budget_min_won is not None:
+            updates["budget_min_won"] = None
+        if updates.keys() & {"budget_max_won", "budget_min_won"}:
+            updates["hard_constraints"] = [
+                field
+                for field in profile.hard_constraints
+                if field not in ("budget_max_won", "budget_min_won")
+            ]
+    return profile.model_copy(update=updates) if updates else profile
+
+
 # 수치 없이 "데이터가 넉넉했으면" 하는 희망. 필터 조건은 못 되지만 버리면 안 된다.
 _DATA_WISH_RE = re.compile(
     r"(?:데이터|용량)[^.\n]{0,12}(?:넉넉|여유|충분|많[았으은]|빵빵)"
@@ -674,9 +746,12 @@ def _apply_soft_data_preference(profile: UserProfile, query: str) -> UserProfile
 # 구조화 출력을 사용자 발화로 되짚어 고치는 보정들. 순서대로 적용한다.
 # 프롬프트 지시만으로는 같은 오추출이 계속 재발해서 코드로 못 박는 자리다.
 _REPAIRS = (
+    # 다른 보정이 'null' 같은 자리표시자를 진짜 값으로 오해하지 않게 맨 먼저 돌린다.
+    _drop_placeholder_text,
     _drop_phantom_budget,
     _repair_budget_bounds,
-    _apply_benefit_constraint_strength,
+    # 예산 경계 확정 다음에 와야 한다. 현재 납부액이 상한으로 들어갔는지를 그 결과로 판단한다.
+    _apply_reference_fee,
     _drop_inferred_priorities,
     # _drop_inferred_priorities 다음에 와야 한다. 앞에 두면 방금 넣은 data 가 지워진다.
     _apply_soft_data_preference,
@@ -688,6 +763,11 @@ _REPAIRS = (
     _apply_smartchoice_usage_rule,
     _repair_reference_plan_name,
 )
+
+
+# _normalize_profile 은 hard_constraints 를 값 유무로 다시 만든다. 그래서 "값은 있지만
+# 필수는 아니다"(선호)라는 판단은 정규화 뒤에 적용해야 한다. 앞에서 빼면 곧바로 되돌아온다.
+_POST_NORMALIZE_REPAIRS = (_apply_benefit_constraint_strength,)
 
 
 def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
@@ -705,6 +785,8 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     for repair in _REPAIRS:
         profile = repair(profile, query)
     profile = _normalize_profile(profile)
+    for repair in _POST_NORMALIZE_REPAIRS:
+        profile = repair(profile, query)
     if core_signal_missing(profile) and not benefit_preference_missing(profile):
         profile = profile.model_copy(
             update={
@@ -837,6 +919,57 @@ if __name__ == "__main__":
     assert "wanted_benefits" in must.hard_constraints, must.hard_constraints
     # 혜택 조건이 없으면 아무것도 하지 않는다
     assert _apply_benefit_constraint_strength(UserProfile(), "넷플릭스 이용 중이야").hard_constraints == []
+
+    # 'null' 문자열은 값이 아니다. 이걸 요금제명으로 DB 를 뒤지다 파이프라인이 멈춘 적이 있다.
+    junk = _drop_placeholder_text(
+        UserProfile(reference_plan_name="null", mvno_brand="없음", notes="N/A"), ""
+    )
+    assert junk.reference_plan_name is None and junk.mvno_brand is None and junk.notes is None
+    assert _drop_placeholder_text(UserProfile(reference_plan_name="초이스90"), "").reference_plan_name == "초이스90"
+
+    # 정규화가 선호 완화를 되돌리면 안 된다 (hard_constraints 를 값 유무로 다시 만들기 때문)
+    wished = UserProfile(wanted_benefits=["넷플릭스"])
+    normalized = _normalize_profile(wished)
+    assert "wanted_benefits" in normalized.hard_constraints, "정규화는 값이 있으면 필수로 본다"
+    for repair in _POST_NORMALIZE_REPAIRS:
+        normalized = repair(normalized, "넷플릭스 포함이면 좋겠어")
+    assert "wanted_benefits" not in normalized.hard_constraints, normalized.hard_constraints
+    assert normalized.wanted_benefits == ["넷플릭스"], "값 자체는 살아 있어야 점수에 반영된다"
+    assert _apply_benefit_constraint_strength not in _REPAIRS, "정규화 전에 돌면 무효가 된다"
+
+    # 현재 납부액은 예산 상한이 아니다
+    asked = "지금 쓰는 요금제가 월 3만원인데 바꾸는 게 나을까?"
+    kept = _apply_reference_fee(
+        UserProfile(budget_max_won=30000, hard_constraints=["budget_max_won"]), asked
+    )
+    assert kept.reference_fee_won == 30000, kept
+    assert kept.budget_max_won is None and kept.hard_constraints == [], kept
+    # 상한을 직접 말했으면 그대로 둔다
+    both = _apply_reference_fee(
+        UserProfile(budget_max_won=20000, hard_constraints=["budget_max_won"]),
+        "지금 3만원 내는데 2만원 이하로 줄이고 싶어",
+    )
+    assert both.reference_fee_won == 30000 and both.budget_max_won == 20000, both
+    # 현재 요금 하나만 말했으면 거기서 흘러나온 예산은 전부 지운다
+    spec = _apply_reference_fee(
+        UserProfile(budget_min_won=20000, budget_max_won=29999,
+                    hard_constraints=["budget_min_won", "budget_max_won", "min_data_gb"]),
+        "지금 월 2만원에 데이터 100GB 쓰고 있어. 바꾸는 게 나을까?",
+    )
+    assert spec.reference_fee_won == 20000, spec
+    assert spec.budget_min_won is None and spec.budget_max_won is None, spec
+    assert spec.hard_constraints == ["min_data_gb"], spec.hard_constraints
+    # 금액을 둘 말했으면 예산 쪽은 손대지 않는다
+    two = _apply_reference_fee(
+        UserProfile(budget_max_won=20000, hard_constraints=["budget_max_won"]),
+        "지금 3만원 내는데 2만원짜리 있어?",
+    )
+    assert two.reference_fee_won == 30000 and two.budget_max_won == 20000, two
+
+    # 현재 요금 언급이 없으면 아무것도 하지 않는다
+    plain = _apply_reference_fee(UserProfile(budget_max_won=30000), "3만원 이하로 추천해줘")
+    assert plain.reference_fee_won is None and plain.budget_max_won == 30000
+    assert _apply_reference_fee(UserProfile(), "월 5만원에 50GB 사용 중").reference_fee_won == 50000
 
     # 수치 없는 데이터 여유 희망은 버리지 말고 가중치로 남긴다
     wish = _apply_soft_data_preference(UserProfile(), "월 3만원 이하로. 가능하면 데이터가 넉넉했으면 좋겠어")

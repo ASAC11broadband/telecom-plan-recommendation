@@ -119,6 +119,17 @@ export interface Blocker {
   minimum_fee?: number;
 }
 
+export interface ReferenceVerdict {
+  status: 'keep' | 'switch' | 'undetermined';
+  reason: string;
+  /** 판단하지 못한 이유가 된, 모르는 항목들. */
+  missing: string[];
+  /** 요금제 데이터로는 알 수 없어 사용자가 직접 확인해야 하는 것들. */
+  confirm: string[];
+  betterCount?: number;
+  cheaperCount?: number;
+}
+
 export interface RecommendResponse {
   plans: PlanItem[];
   /** 데이터·요금을 둘 다 못 잡아 추천 전에 멈춘 경우. 결과 대신 질문을 보여준다. */
@@ -127,6 +138,8 @@ export interface RecommendResponse {
   totalCount: number;
   report: string;
   referencePlan: PlanItem | null;
+  /** 현재 요금제 유지/전환/판단불가. 서버가 코드로 판정한 값이며 LLM 판정이 아니다. */
+  referenceVerdict: ReferenceVerdict | null;
   profile: Profile | null;
   followupQuestion: string | null;
   assumptions: string[];

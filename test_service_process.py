@@ -8,7 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from agent.data import all_plans, filter_candidates
 from agent.schemas import UserProfile, ScoredPlan, Evaluation
-from agent.agents.recommend import recommend_node, _apply_comparison
+from agent.agents.recommend import recommend_node, _apply_comparison, _reference_verdict
 from agent.agents.evaluation import _ranking_errors, evaluation_node
 from agent.agents.profiling import _apply_user_age
 from backend.main import app, _llm_calls, LLM_CALLS_PER_MINUTE
@@ -120,6 +120,56 @@ class ServiceProcessTests(unittest.TestCase):
         })
         self.assertGreater(len(soft), len(hard))
         self.assertTrue(any(r['carrier_type'] == 'MVNO' for r in soft))
+
+    def test_keep_current_plan_is_distinguished_from_cannot_tell(self):
+        """유지 권고와 판단 불가는 다른 상태다. 후보가 없다는 사실만으로 유지가 유리하다고 하지 않는다."""
+        current = {'discounted_fee': 30000, 'data_gb': 50.0, 'data_unlimited': False}
+
+        # 요금만 알고 데이터를 모르면 비교가 성립하지 않는다
+        fee_only = _reference_verdict({'discounted_fee': 30000}, [{'discounted_fee': 10000, 'data_gb': 5.0}])
+        self.assertEqual(fee_only['status'], 'undetermined')
+        self.assertIn('데이터 제공량', fee_only['missing'])
+
+        # 후보 0건은 '유지가 유리'가 아니라 '판단 불가'
+        empty = _reference_verdict(current, [])
+        self.assertEqual(empty['status'], 'undetermined')
+        self.assertIn('유리하다는 뜻은 아닙니다', empty['reason'])
+
+        # 모든 항목에서 나쁘지 않고 한 항목이 나은 후보가 있으면 전환
+        better = _reference_verdict(current, [{'discounted_fee': 20000, 'data_gb': 50.0}])
+        self.assertEqual(better['status'], 'switch')
+        self.assertEqual(better['betterCount'], 1)
+
+        # 더 싸지만 데이터가 적은 후보뿐이면 유지. 맞교환이라는 사실을 함께 말한다.
+        tradeoff = _reference_verdict(current, [{'discounted_fee': 9000, 'data_gb': 5.0}])
+        self.assertEqual(tradeoff['status'], 'keep')
+        self.assertEqual(tradeoff['cheaperCount'], 1)
+        self.assertIn('맞교환', tradeoff['reason'])
+
+        # 어느 상태든 데이터로 알 수 없는 항목은 확인 안내로 남는다
+        for verdict in (fee_only, empty, better, tradeoff):
+            self.assertTrue(any('결합할인' in note for note in verdict['confirm']))
+        self.assertIsNone(_reference_verdict(None, []))
+
+    def test_current_fee_is_not_turned_into_a_budget_cap(self):
+        """'지금 월 3만원인데'는 현재 납부액이지 예산 상한이 아니다."""
+        from agent.agents.profiling import _apply_reference_fee
+        asked = '지금 쓰는 요금제가 월 3만원인데 바꾸는 게 나을까?'
+        fixed = _apply_reference_fee(
+            UserProfile(budget_max_won=30000, hard_constraints=['budget_max_won']), asked)
+        self.assertEqual(fixed.reference_fee_won, 30000)
+        self.assertIsNone(fixed.budget_max_won)
+        self.assertNotIn('budget_max_won', fixed.hard_constraints)
+
+    def test_recommend_exposes_reference_verdict_through_api(self):
+        state = {'profile': UserProfile(reference_fee_won=50000),
+                 'reference': {'discounted_fee': 50000},
+                 'reference_verdict': _reference_verdict({'discounted_fee': 50000}, []),
+                 'ranked': [], 'candidates': []}
+        with patch('backend.main.graph.invoke', return_value=state):
+            response = self.client.post('/api/recommend', json={'messages': [{'role': 'user', 'content': '현재 5만원'}]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['referenceVerdict']['status'], 'undetermined')
 
     def test_manual_current_plan_no_longer_crashes_api(self):
         state = {'profile': UserProfile(reference_fee_won=50000), 'reference': {'discounted_fee': 50000},
