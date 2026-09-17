@@ -8,8 +8,8 @@ import math
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from ..data import diagnose_empty, filter_candidates, find_plans_by_name
-from ..mcda import CRITERIA, evaluate_mcda, rank_smaa2
+from ..data import DATA_TIERS, data_tier, is_effectively_unlimited, diagnose_empty, filter_candidates, find_plans_by_name
+from ..mcda import CRITERIA, COMPARE_MONTHS, _effective_monthly_fee, evaluate_mcda, rank_smaa2
 from ..schemas import ScoredPlan, UserProfile
 from ..state import PipelineState
 
@@ -38,6 +38,28 @@ def _reference_from_profile(profile: UserProfile) -> dict | None:
     return values if any(value is not None for value in values.values()) else None
 
 
+def _with_current_facts(plan: dict, profile: UserProfile) -> dict:
+    """카탈로그 가격보다 사용자가 알려준 현재 납부액·제공량을 우선한다."""
+    facts = {key: value for key, value in (_reference_from_profile(profile) or {}).items() if value is not None}
+    current = {**plan, **facts}
+    if profile.reference_fee_won is not None:
+        current.update(monthly_fee=profile.reference_fee_won, discount_period_months=None)
+    if profile.reference_data_gb is not None and profile.reference_data_unlimited is None:
+        current['data_unlimited'] = False
+    if profile.reference_voice_minutes is not None and profile.reference_voice_unlimited is None:
+        current['voice_unlimited'] = False
+    if any(key in facts for key in ('data_gb', 'data_unlimited', 'qos_mbps')):
+        tier = data_tier(current.get('data_unlimited'), current.get('qos_mbps'))
+        current.update(data_tier=tier, data_tier_label=DATA_TIERS[tier],
+                       effective_unlimited=is_effectively_unlimited(current.get('data_unlimited'), current.get('qos_mbps')))
+        current['data'] = '무제한' if current.get('data_unlimited') else (
+            f"{current['data_gb']:g}GB" if current.get('data_gb') is not None else '확인 필요')
+    if any(key in facts for key in ('voice_minutes', 'voice_unlimited')):
+        current['voice'] = '무제한' if current.get('voice_unlimited') else (
+            f"{current['voice_minutes']}분" if current.get('voice_minutes') is not None else '확인 필요')
+    return current
+
+
 def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
     if not profile.reference_plan_name:
         return _reference_from_profile(profile), None
@@ -46,7 +68,7 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
     if not matched:
         return None, f"'{profile.reference_plan_name}' 요금제를 DB에서 찾지 못했습니다. 정확한 요금제명을 알려주세요."
     if len(matched) == 1:
-        return matched[0], None
+        return _with_current_facts(matched[0], profile), None
 
     spec_fields = (
         "discounted_fee",
@@ -59,7 +81,7 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
     )
     specs = {tuple(plan.get(field) for field in spec_fields) for plan in matched}
     if len(specs) == 1:
-        return matched[0], None
+        return _with_current_facts(matched[0], profile), None
 
     choices = ", ".join(
         f"{plan['plan_name']}({plan['carrier']}, 월 {plan['discounted_fee']:,}원)"
@@ -76,7 +98,7 @@ def _apply_comparison(
 
     result = candidates
     if "cheaper" in goals and reference.get("discounted_fee") is not None:
-        result = [p for p in result if p["discounted_fee"] < reference["discounted_fee"]]
+        result = [p for p in result if _effective_monthly_fee(p) < _effective_monthly_fee(reference)]
     if "more_data" in goals:
         if reference.get("data_unlimited"):
             # 무제한보다 수치상 더 많은 데이터는 존재하지 않는다. 사용자의 의도는
@@ -94,14 +116,18 @@ def _apply_comparison(
 
 
 def _is_pareto_better(candidate: dict, reference: dict) -> bool:
+    if not _known_reference_axes(reference).issubset(_known_reference_axes(candidate)):
+        return False  # 미수집 제공량을 0으로 채워 우열을 단정하지 않는다.
+    if not _known_comparison_price(reference) or not _known_comparison_price(candidate):
+        return False
     comparisons: list[tuple[float, float, bool]] = []
     if reference.get("discounted_fee") is not None:
-        comparisons.append((candidate["discounted_fee"], reference["discounted_fee"], False))
-    if reference.get("data_gb") is not None or reference.get("data_unlimited") is not None:
+        comparisons.append((_effective_monthly_fee(candidate), _effective_monthly_fee(reference), False))
+    if "data" in _known_reference_axes(reference):
         comparisons.append((_data_value(candidate), _data_value(reference), True))
     if reference.get("qos_mbps") is not None:
         comparisons.append((candidate.get("qos_mbps") or 0, reference["qos_mbps"], True))
-    if reference.get("voice_minutes") is not None or reference.get("voice_unlimited") is not None:
+    if "voice" in _known_reference_axes(reference):
         comparisons.append((_voice_value(candidate), _voice_value(reference), True))
     if not comparisons:
         return False
@@ -126,13 +152,19 @@ def _known_reference_axes(reference: dict) -> set[str]:
     axes = set()
     if reference.get("discounted_fee") is not None:
         axes.add("fee")
-    if reference.get("data_unlimited") is not None or reference.get("data_gb") is not None:
+    if reference.get("data_unlimited") is True or reference.get("data_gb") is not None:
         axes.add("data")
-    if reference.get("voice_unlimited") is not None or reference.get("voice_minutes") is not None:
+    if reference.get("voice_unlimited") is True or reference.get("voice_minutes") is not None:
         axes.add("voice")
     if reference.get("qos_mbps") is not None:
         axes.add("qos")
     return axes
+
+
+def _known_comparison_price(plan: dict) -> bool:
+    fee = plan.get('discounted_fee')
+    regular = plan.get('monthly_fee')
+    return fee is not None and (regular is None or regular == fee or plan.get('discount_period_months') is not None)
 
 
 def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict | None:
@@ -152,6 +184,8 @@ def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict |
     axes = _known_reference_axes(reference)
     confirm = list(REFERENCE_CONFIRM_NOTES)
     missing = [label for axis, label in _REFERENCE_AXIS_LABELS.items() if axis not in axes]
+    if not _known_comparison_price(reference):
+        missing.append("할인 기간을 포함한 요금")
     if missing:
         return {
             "status": "undetermined",
@@ -173,15 +207,23 @@ def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict |
             "confirm": confirm,
         }
 
-    better = sum(1 for plan in candidates if _is_pareto_better(plan, reference))
-    cheaper = sum(
-        1 for plan in candidates if plan["discounted_fee"] < reference["discounted_fee"]
-    )
+    comparable = [plan for plan in candidates
+                  if axes.issubset(_known_reference_axes(plan)) and _known_comparison_price(plan)]
+    if not comparable:
+        return {"status": "undetermined", "reason": "후보의 요금·제공량 정보가 부족해 현재 요금제와 비교하지 못했습니다.",
+                "missing": [], "confirm": confirm}
+    better = sum(1 for plan in comparable if _is_pareto_better(plan, reference))
+    cheaper = sum(1 for plan in comparable
+                  if _effective_monthly_fee(plan) < _effective_monthly_fee(reference))
+    unknown = len(candidates) - len(comparable)
+    scope = f"확인된 요금·제공량과 {COMPARE_MONTHS}개월 평균요금 기준으로 "
+    if unknown:
+        confirm.append(f"정보가 부족한 후보 {unknown}건은 우열 비교에서 제외했습니다.")
     if better:
         return {
             "status": "switch",
             "reason": (
-                f"현재 요금제보다 모든 비교 항목에서 나쁘지 않고 최소 한 항목이 더 나은 후보가 {better}건 있습니다."
+                scope + f"현재 요금제보다 나쁘지 않고 최소 한 항목이 더 나은 후보가 {better}건 있습니다. 실제 전환 이익은 결합할인과 위약금 확인 후 판단해 주세요."
             ),
             "betterCount": better,
             "cheaperCount": cheaper,
@@ -191,9 +233,9 @@ def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict |
     return {
         "status": "keep",
         "reason": (
-            "현재 요금제를 모든 비교 항목에서 앞서는 후보가 없습니다. "
-            f"더 싼 후보는 {cheaper}건 있지만 그만큼 제공량이나 속도를 내주는 상품입니다. "
-            "맞교환을 감수할 생각이 없다면 지금 요금제를 유지하는 편이 낫습니다."
+            scope + "현재 요금제보다 확실히 우위인 후보를 찾지 못했습니다. "
+            f"더 싼 후보 {cheaper}건은 제공량이나 속도와 맞교환이 필요합니다. "
+            "현재 수준을 유지하려면 기존 요금제도 선택지입니다. 이것만으로 현재 요금제가 최적이라고 단정할 수는 없습니다."
         ),
         "betterCount": 0,
         "cheaperCount": cheaper,
@@ -418,7 +460,14 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             "messages": [AIMessage(content="조건을 만족하는 요금제가 없습니다.", name="recommend")],
         }
 
-    ranking_candidates = _dedupe_identical_offers(candidates)
+    # 현재 요금제에 대한 일반 비교에서는 판정 배너와 실제 카드의 범위를 맞춘다.
+    # 더 싼 것/더 많은 데이터 등 명시적인 맞교환 요청은 기존 목적을 유지한다.
+    ranking_pool = candidates
+    if reference and not profile.comparison_goals:
+        better_candidates = [plan for plan in candidates if _is_pareto_better(plan, reference)]
+        if better_candidates:
+            ranking_pool = better_candidates
+    ranking_candidates = _dedupe_identical_offers(ranking_pool)
     by_id = {candidate["plan_id"]: candidate for candidate in ranking_candidates}
     decisions = evaluate_mcda(
         ranking_candidates,
@@ -447,6 +496,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
         "recommendation_trace": {
             "eligibleCount": len(candidates),
             "rankedCount": len(ranking_candidates),
+            "referenceImprovementPreferred": ranking_pool is not candidates,
             "shownCount": len(ranked),
             "rankingProfile": ranking_profile.model_dump(exclude_none=True),
             "referenceBaselineApplied": ranking_profile is not profile,

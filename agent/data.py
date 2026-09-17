@@ -350,6 +350,8 @@ def _benefit_duration(
     미상이면 (None, False). 무기한이면 (비교 구간, True) — 비교 구간 내내 받는다.
     일시금은 (1, True) — 한 번 받고 끝이라 기간이 확인된 것과 같다.
     """
+    if basis == "one_off":
+        return 1, True  # 금액 단위가 명시된 일시금은 이름의 개월 수와 무관하다.
     if months is not None and months > 0:
         return months, True
     if _INDEFINITE_RE.search(name):
@@ -357,7 +359,9 @@ def _benefit_duration(
     matched = _BENEFIT_MONTHS_RE.search(name)
     if matched and int(matched.group(1)) > 0:
         return int(matched.group(1)), True
-    if basis == "one_off" or one_off:
+    if basis == "monthly" or re.search(r"매달|매월", name):
+        return None, False  # 사은품 카테고리여도 반복 지급 기간을 추정하지 않는다.
+    if one_off:
         return 1, True
     return None, False
 
@@ -758,7 +762,12 @@ def find_plans_mentioned_in_text(text: str) -> list[dict]:
 
     names = _plans["plan_name"].fillna("").astype(str)
     stems = names.map(_plan_name_stem)
-    mentioned = stems.map(lambda key: len(key) >= 4 and key in text_key)
+    # '데이터 100GB'라는 스펙을 '데이터100G(밀리의서재)+'라는 상품으로 오인하지 않는다.
+    generic_spec = stems.str.fullmatch(r"(?:데이터)?\d+(?:g|gb|기가)(?:무제한)?", case=False)
+    full_names = names.map(normalize_plan_name)
+    mentioned = stems.map(lambda key: len(key) >= 4 and key in text_key) & (
+        ~generic_spec | full_names.map(lambda key: bool(key) and key in text_key)
+    )
     if not mentioned.any():
         return []
     longest = max(stems[mentioned].map(len))

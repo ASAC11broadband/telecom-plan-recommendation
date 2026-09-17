@@ -499,6 +499,14 @@ _REFERENCE_SPEC_FIELDS = (
 )
 
 
+def _repair_general_comparison(profile: UserProfile, query: str) -> UserProfile:
+    """현재보다 '유리한' 요청을 가격만 낮추라는 의미로 축소하지 않는다."""
+    if (any(getattr(profile, field) is not None for field in _REFERENCE_SPEC_FIELDS)
+            and re.search(r"(?:현재|기존|지금).*보다\s*(?:더\s*)?유리", query)):
+        return profile.model_copy(update={"comparison_goals": ["better"]})
+    return profile
+
+
 def _repair_reference_plan_name(profile: UserProfile, query: str) -> UserProfile:
     """스펙 설명을 상품명으로 오인한 값을 버리고 문장 속 실제 DB명을 복구한다."""
     name = (profile.reference_plan_name or "").strip()
@@ -761,6 +769,7 @@ _REPAIRS = (
     _apply_explicit_qos_min,
     _apply_explicit_data_max,
     _apply_smartchoice_usage_rule,
+    _repair_general_comparison,
     _repair_reference_plan_name,
 )
 

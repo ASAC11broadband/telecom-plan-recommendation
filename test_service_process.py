@@ -18,6 +18,27 @@ from backend.plans import COMPARE_MONTHS, to_plan_item, total_cost
 
 
 class ServiceProcessTests(unittest.TestCase):
+    def test_current_spec_is_not_a_catalog_product_name(self):
+        from agent.data import find_plans_mentioned_in_text
+        from agent.agents.profiling import _repair_reference_plan_name, _repair_general_comparison
+        query = '지금 월 2만원에 데이터 100GB인 요금제를 쓰고 있어. 만 30세야. 현재 요금제보다 유리한 요금제가 있으면 추천해줘.'
+        self.assertEqual(find_plans_mentioned_in_text(query), [])
+        profile = UserProfile(reference_plan_name='데이터100G(밀리의서재)+',
+                              reference_fee_won=20000, reference_data_gb=100,
+                              comparison_goals=['cheaper'])
+        self.assertIsNone(_repair_reference_plan_name(profile, query).reference_plan_name)
+        self.assertEqual(_repair_general_comparison(profile, query).comparison_goals, ['better'])
+
+    def test_current_plan_comparison_shows_the_improving_candidates(self):
+        from agent.agents.recommend import _is_pareto_better
+        result = recommend_node({'profile': UserProfile(
+            reference_fee_won=20000, reference_data_gb=100, user_age=30)}, {})
+        self.assertEqual(result['reference_verdict']['status'], 'switch')
+        by_id = {plan['plan_id']: plan for plan in result['candidates']}
+        self.assertTrue(result['ranked'])
+        self.assertTrue(all(_is_pareto_better(by_id[plan.plan_id], result['reference'])
+                            for plan in result['ranked']))
+
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
@@ -161,6 +182,61 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(fixed.reference_fee_won, 30000)
         self.assertIsNone(fixed.budget_max_won)
         self.assertNotIn('budget_max_won', fixed.hard_constraints)
+
+    def test_recurring_cash_without_duration_is_not_deductible(self):
+        from agent.data import benefit_summary
+        for basis in ('monthly', ''):
+            value = benefit_summary([{'name': '매달 5천원 페이백', 'value_won': 5000,
+                                      'value_basis': basis, 'categories': ['사은품/페이백']}])
+            self.assertTrue(value['estimated'])
+            self.assertEqual(value['deductible_won'], 0)
+        value = benefit_summary([{'name': '3개월 유지 후 일시금', 'value_won': 24000,
+                                  'value_basis': 'one_off', 'months': 3, 'categories': ['사은품/페이백']}])
+        self.assertEqual(value['monthly_won'], 2000)
+
+    def test_reference_verdict_banners_are_returned_by_api(self):
+        cases = [
+            ({'discounted_fee': 20000, 'data_gb': 100}, [{'discounted_fee': 15000, 'data_gb': 100}], 'switch'),
+            ({'discounted_fee': 5000, 'data_unlimited': True}, [{'discounted_fee': 10000, 'data_gb': 100}], 'keep'),
+            ({'discounted_fee': 20000, 'data_unlimited': False}, [{'discounted_fee': 15000, 'data_gb': 100}], 'undetermined'),
+        ]
+        for reference, candidates, expected in cases:
+            with self.subTest(expected=expected):
+                state = {'profile': UserProfile(), 'reference': reference, 'candidates': [], 'ranked': [],
+                         'reference_verdict': _reference_verdict(reference, candidates)}
+                with patch('backend.main.graph.invoke', return_value=state):
+                    response = self.client.post('/api/recommend', json={'messages': [{'role': 'user', 'content': '현재 요금제 비교'}]})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()['referenceVerdict']['status'], expected)
+
+    def test_reference_comparison_uses_full_period_not_intro_price(self):
+        current = {'discounted_fee': 20000, 'data_gb': 50}
+        promo = {'discounted_fee': 1000, 'monthly_fee': 50000,
+                 'discount_period_months': 1, 'data_gb': 50}
+        self.assertEqual(_reference_verdict(current, [promo])['status'], 'keep')
+        self.assertEqual(_apply_comparison([promo], current, ['cheaper']), [])
+        self.assertEqual(_reference_verdict(current, [dict(promo, discount_period_months=None)])['status'], 'undetermined')
+
+    def test_false_unlimited_is_not_known_allowance(self):
+        incomplete = {'discounted_fee': 20000, 'data_unlimited': False, 'data_gb': None}
+        known = {'discounted_fee': 10000, 'data_gb': 50}
+        self.assertEqual(_reference_verdict(incomplete, [known])['status'], 'undetermined')
+        self.assertEqual(_reference_verdict(known, [incomplete])['status'], 'undetermined')
+
+    def test_named_current_plan_uses_reported_bill_without_mutating_catalog(self):
+        from agent.agents.recommend import _resolve_reference
+        catalog = {'plan_id': 'current', 'plan_name': '현재상품', 'discounted_fee': 50000,
+                   'monthly_fee': 70000, 'discount_period_months': 3,
+                   'data_gb': 100, 'data_unlimited': True}
+        with patch('agent.agents.recommend.find_plans_by_name', return_value=[catalog]):
+            reference, question = _resolve_reference(UserProfile(
+                reference_plan_name='현재상품', reference_fee_won=15000, reference_data_gb=20))
+        self.assertIsNone(question)
+        self.assertEqual(reference['discounted_fee'], 15000)
+        self.assertEqual(reference['monthly_fee'], 15000)
+        self.assertIsNone(reference['discount_period_months'])
+        self.assertFalse(reference['data_unlimited'])
+        self.assertEqual(catalog['discounted_fee'], 50000)
 
     def test_recommend_exposes_reference_verdict_through_api(self):
         state = {'profile': UserProfile(reference_fee_won=50000),

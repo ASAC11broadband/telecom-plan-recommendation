@@ -260,9 +260,9 @@ export function ResultScreen({
           <section className="card result-overview">
             <h3>
               {result.referenceVerdict.status === 'keep'
-                ? '현재 요금제를 유지하는 편이 낫습니다'
+                ? '현재 수준을 유지하려면 기존 요금제도 고려하세요'
                 : result.referenceVerdict.status === 'switch'
-                  ? '바꿀 만한 요금제가 있습니다'
+                  ? '확인된 조건에서 유리한 후보가 있습니다'
                   : '지금이 유리한지 판단하지 못했습니다'}
             </h3>
             <p>{result.referenceVerdict.reason}</p>
