@@ -54,7 +54,7 @@ export function HomeScreen({ onNavigate }: { onNavigate: (s: ScreenType) => void
           <ul className="entry-list">
             <li>통신사·요금·데이터 필터</li>
             <li>테이블 정렬 및 비교</li>
-            <li>선택 요금제 AI 질의 연동</li>
+            <li>선택 요금제 비교·상세 확인</li>
           </ul>
           <button className="btn btn-block" onClick={() => onNavigate('s-browse')}>
             요금제 탐색

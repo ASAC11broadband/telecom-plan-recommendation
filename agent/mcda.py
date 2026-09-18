@@ -77,7 +77,7 @@ class MCDAResult:
     smaa2_score: int
     favorable_weights: tuple[float, ...]
     # 축별 효용(0~1). SMAA-2 계산에는 쓰지 않고 "왜 이 순위인지"를 화면에 보여주는 용도다.
-    # 후보가 2천 건이면 smaa2_score 는 상위 5개가 전부 100 으로 포화해 변별력이 없다.
+    # 후보가 2천 건이면 smaa2_score 는 상위 3개가 전부 100 으로 포화해 변별력이 없다.
     utilities: tuple[float, ...] = ()
 
 

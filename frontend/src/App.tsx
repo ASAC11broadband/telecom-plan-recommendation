@@ -8,7 +8,6 @@ import { InputScreen } from './components/InputScreen';
 import { ResultScreen } from './components/ResultScreen';
 import { ReportScreen } from './components/ReportScreen';
 import { BrowseScreen } from './components/BrowseScreen';
-import { AiQueryModal } from './components/Modal';
 import { CompareScreen } from './components/CompareScreen';
 
 const now = () =>
@@ -45,7 +44,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(saved.pending ? '새로고침 전에 진행하던 요청은 자동 재개되지 않습니다.' : null);
   // 비교함: 탐색 화면에서 체크한 요금제. GNB 배지와 비교 모달이 같이 쓴다.
   const [compare, setCompare] = useState<PlanItem[]>(saved.compare ?? []);
-  const [askPlan, setAskPlan] = useState<PlanItem | null>(null);
   const [reportPlanId, setReportPlanId] = useState<string | null>(saved.reportPlanId ?? null);
 
   useEffect(() => {
@@ -80,7 +78,7 @@ export default function App() {
     setError(null);
     navigate('s-result');
     try {
-      // 백엔드가 준 순위를 그대로 쓴다. 잘라내면 리포트 본문(5순위까지)과 카드가 어긋난다.
+      // 백엔드가 준 상위 3개 순위를 그대로 쓴다. 잘라내면 리포트 본문과 카드가 어긋난다.
       const data = await recommend(next);
       setResult(data);
       setHistory((rows) => [
@@ -164,12 +162,10 @@ export default function App() {
           compare={compare}
           onToggleCompare={toggleCompare}
           onOpenCompare={() => navigate('s-compare')}
-          onAskPlan={setAskPlan}
         />
       )}
 
       {screen === 's-compare' && <CompareScreen plans={compare} onRemove={toggleCompare} onNavigate={navigate} />}
-      {askPlan && <AiQueryModal plan={askPlan} onClose={() => setAskPlan(null)} />}
     </div>
   );
 }

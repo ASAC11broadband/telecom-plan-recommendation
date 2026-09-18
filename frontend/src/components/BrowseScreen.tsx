@@ -99,12 +99,10 @@ export function BrowseScreen({
   compare,
   onToggleCompare,
   onOpenCompare,
-  onAskPlan,
 }: {
   compare: PlanItem[];
   onToggleCompare: (plan: PlanItem) => void;
   onOpenCompare: () => void;
-  onAskPlan: (plan: PlanItem) => void;
 }) {
   const [stats, setStats] = useState<Stats | null>(null);
   const facets: Facets = stats?.facets ?? {};
@@ -276,7 +274,7 @@ export function BrowseScreen({
                   <th>음성</th>
                   <th>{data?.plans[0]?.compareMonths ?? 12}개월 총비용</th>
                   <th>현금성 혜택 차감 참고값</th>
-                  <th>액션</th>
+                  <th>요금제 상세</th>
                 </tr>
               </thead>
               <tbody>
@@ -335,9 +333,15 @@ export function BrowseScreen({
                           : '—'}
                       </td>
                       <td>
-                        <button className="btn btn-sm" onClick={() => onAskPlan(plan)}>
-                          AI 질의
-                        </button>
+                        {plan.sourceUrl ? (
+                          <a className="btn btn-sm" href={plan.sourceUrl} target="_blank" rel="noreferrer">
+                            상세 보기
+                          </a>
+                        ) : (
+                          <span className="btn btn-sm" aria-disabled="true" title="수집된 상세 주소가 없습니다">
+                            상세 주소 없음
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))}
