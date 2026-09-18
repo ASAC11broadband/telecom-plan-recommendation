@@ -9,12 +9,14 @@ from fastapi.testclient import TestClient
 from agent.data import all_plans, filter_candidates
 from agent.schemas import UserProfile, ScoredPlan, Evaluation
 from agent.agents.recommend import (recommend_node, _apply_comparison, _reference_verdict,
-                                    _dedupe_identical_offers, _diverse_selection, _offer_character)
+                                    _dedupe_identical_offers, _diverse_selection, _offer_character,
+                                    _is_pareto_better)
 from agent.agents.evaluation import _ranking_errors, evaluation_node
 from agent.agents.profiling import _apply_user_age
 from backend.main import app, _llm_calls, LLM_CALLS_PER_MINUTE
 from backend.analysis import analysis_snapshot
-from backend.plans import COMPARE_MONTHS, to_plan_item, total_cost
+from backend.plans import (COMPARE_MONTHS, monthly_fee_schedule, reference_delta,
+                           to_plan_item, total_cost)
 
 
 class ServiceProcessTests(unittest.TestCase):
@@ -31,13 +33,228 @@ class ServiceProcessTests(unittest.TestCase):
 
     def test_current_plan_comparison_shows_the_improving_candidates(self):
         from agent.agents.recommend import _is_pareto_better
-        result = recommend_node({'profile': UserProfile(
-            reference_fee_won=20000, reference_data_gb=100, user_age=30)}, {})
+        known = next(plan for plan in self.rows if plan['billing_price_known'])
+        improved = dict(known, plan_id='improved', plan_name='개선 후보', discounted_fee=19000,
+                        monthly_fee=19000, discount_period_months=None, data_gb=100)
+        cheap = dict(improved, plan_id='cheap', plan_name='저용량 후보', discounted_fee=1000,
+                     monthly_fee=1000, data_gb=1, data_unlimited=False)
+        with patch('agent.agents.recommend.filter_candidates', return_value=[improved, cheap]):
+            result = recommend_node({'profile': UserProfile(
+                reference_fee_won=20000, reference_data_gb=100, user_age=30)}, {})
         self.assertEqual(result['reference_verdict']['status'], 'switch')
         by_id = {plan['plan_id']: plan for plan in result['candidates']}
         self.assertTrue(result['ranked'])
         self.assertTrue(all(_is_pareto_better(by_id[plan.plan_id], result['reference'])
                             for plan in result['ranked']))
+
+    def test_no_better_plan_means_keep_not_unknown(self):
+        """'더 나은 게 있으면'에 우위 후보가 없으면 '비교 못 함'이 아니라 '유지'다.
+
+        비교를 한 끝에 우위가 없는 것과, 비교 자체가 성립하지 않는 것은 다르다.
+        배너(유지)와 화면에 뜨는 카드(맞교환 후보)의 범위도 서로 어긋나면 안 된다.
+        """
+        result = recommend_node({'profile': UserProfile(
+            user_age=30, reference_fee_won=20000, reference_data_gb=100.0,
+            comparison_goals=['better'])}, {})
+        verdict = result['reference_verdict']
+        self.assertIn(verdict['status'], ('keep', 'switch'))
+        self.assertTrue(result['ranked'])
+        if verdict['status'] == 'keep':
+            by_id = {plan['plan_id']: plan for plan in result['candidates']}
+            self.assertFalse(any(_is_pareto_better(by_id[plan.plan_id], result['reference'])
+                                 for plan in result['ranked']))
+
+    def test_payback_display_prices_are_not_bills_or_deducted_twice(self):
+        unknown = [plan for plan in self.rows if not plan['billing_price_known']]
+        self.assertTrue(unknown)
+        self.assertTrue(all(plan['billing_price_known'] for plan in filter_candidates({})))
+        for row in unknown:
+            item = to_plan_item(row)
+            self.assertIsNone(item['totalNum'])
+            self.assertIsNone(item['effectiveTotalNum'])
+            self.assertEqual(item['benefitDeductible'], 0)
+            self.assertIn('확인 필요', item['total'])
+            self.assertEqual(_reference_verdict(row, [self.rows[0]])['status'], 'undetermined')
+
+    def test_verified_billing_prices_come_back_as_bills_not_display_prices(self):
+        """원문에서 청구액을 확인한 페이백 상품만 계산에 복귀한다.
+
+        정정표(data/페이백_청구액_검증.csv)는 표시가에 페이백을 더해 만든 값이 아니라
+        상세페이지 '월 납부액'을 그대로 옮긴 값이다. 표시가는 payback_included_fee 로
+        따로 남고 청구액과 섞이지 않는다.
+        """
+        restored = [plan for plan in self.rows
+                    if plan['billing_price_known'] and '페이백' in plan['discount_type']]
+        self.assertTrue(restored)
+        for row in restored:
+            item = to_plan_item(row)
+            self.assertIsNotNone(item['totalNum'])
+            self.assertEqual(item['priceNum'], row['discounted_fee'])
+            # 표시가를 청구액으로 쓰지 않는다. 둘이 같은 값이면 페이백이 없는 것이다.
+            if row['payback_included_fee'] is not None:
+                self.assertLessEqual(row['payback_included_fee'], row['discounted_fee'])
+            # 할인 기간이 남아 있다면 실제 요금 할인이 있는 경우뿐이다.
+            if row['discount_period_months'] is not None:
+                self.assertLess(row['discounted_fee'], row['monthly_fee'])
+
+        known = {plan['plan_id']: plan for plan in self.rows}
+        nugget = known.get('36334')
+        if nugget is not None:   # 정정표에 있는 원문 확인 사례
+            self.assertEqual((nugget['discounted_fee'], nugget['payback_included_fee']), (49000, 7000))
+
+    def test_current_plan_comparison_needs_no_product_name(self):
+        """상품명 없이 현재 납부액·데이터량만 알아도 12개월 기준으로 비교한다."""
+        facts = {'discounted_fee': 20000, 'data_gb': 100, 'data_unlimited': None}
+        row = dict(next(plan for plan in self.rows if plan['billing_price_known']
+                        and plan['discount_period_months'] is not None
+                        and plan['discounted_fee'] < plan['monthly_fee']))
+        delta = reference_delta(facts, row)
+        self.assertEqual(delta['months'], COMPARE_MONTHS)
+        self.assertEqual(delta['currentTotal'], 20000 * COMPARE_MONTHS)
+        self.assertEqual(delta['candidateTotal'], total_cost(row))
+        self.assertEqual(delta['totalDiff'], delta['candidateTotal'] - delta['currentTotal'])
+        # 할인 종료 시점과 그 이후 가격을 함께 준다. 그래프와 총비용은 같은 목록에서 나온다.
+        self.assertEqual(delta['discountEndsAfterMonths'], row['discount_period_months'])
+        self.assertEqual(delta['feeAfterDiscount'], row['monthly_fee'])
+        self.assertEqual(sum(point['candidate'] for point in delta['schedule']), delta['candidateTotal'])
+        self.assertEqual(len(delta['schedule']), COMPARE_MONTHS)
+
+    def test_report_gets_the_price_comparison_precomputed(self):
+        """더 비싼 후보에 '더 저렴'이라고 쓰지 못하게 비교 결론을 코드가 넘긴다."""
+        from agent.agents.report import _vs_current
+        pricier = _vs_current({'discounted_fee': 23100, 'monthly_fee': 46640,
+                               'discount_period_months': 12}, {'discounted_fee': 20000})
+        self.assertEqual(pricier['결론'], '현재보다 비싸다')
+        self.assertEqual(pricier['초기_월_차이'], 3100)
+        cheaper = _vs_current({'discounted_fee': 15000, 'monthly_fee': 15000,
+                               'discount_period_months': None}, {'discounted_fee': 20000})
+        self.assertEqual(cheaper['결론'], '현재보다 싸다')
+        # 현재 요금을 모르거나 청구액이 미확인이면 비교 자체를 넘기지 않는다.
+        self.assertIsNone(_vs_current({'discounted_fee': 15000}, None))
+        self.assertIsNone(_vs_current({'discounted_fee': 15000, 'billing_price_known': False},
+                                      {'discounted_fee': 20000}))
+
+    def test_unknown_values_are_not_counted_as_zero(self):
+        """모르는 값은 0 이 아니라 None 이다. 확정 절약액이라고 부르지 않는다."""
+        row = next(plan for plan in self.rows if plan['billing_price_known'])
+        no_fee = reference_delta({'data_gb': 100, 'discounted_fee': None}, row)
+        self.assertIsNone(no_fee['currentTotal'])
+        self.assertIsNone(no_fee['totalDiff'])
+        self.assertIn('현재 월 납부액', no_fee['unknowns'])
+
+        unknown_billing = [plan for plan in self.rows if not plan['billing_price_known']]
+        if unknown_billing:
+            delta = reference_delta({'discounted_fee': 20000}, unknown_billing[0])
+            self.assertIsNone(delta['candidateTotal'])
+            self.assertIsNone(delta['totalDiff'])
+        # 위약금·결합할인 손실은 언제나 미반영 항목으로 남는다.
+        self.assertIn('해지 위약금', no_fee['unknowns'])
+        self.assertIn('결합·가족할인 손실', no_fee['unknowns'])
+
+    def test_monthly_schedule_matches_the_shared_total_cost(self):
+        """그래프와 총비용이 같은 계산을 쓴다. 기준이 갈리면 화면끼리 숫자가 어긋난다."""
+        for row in self.rows[:200]:
+            self.assertEqual(sum(monthly_fee_schedule(row)), total_cost(row))
+
+    def test_latest_preference_wins_over_the_earlier_one(self):
+        """선호를 바꾸면 최신 발화가 이긴다. 대화 전체를 다시 읽어도 앞의 축이 남지 않는다."""
+        from agent.agents.profiling import _repair_latest_priority
+        kept = '월 30,000원 이하, 데이터 20GB 이상, 만 30세 조건은 그대로 두고, '
+        price_first = kept + '가격을 가장 중요하게 봐서 다시 추천해줘.'
+        data_first = kept + '데이터 제공량을 가장 중요하게 봐서 다시 추천해줘.'
+        asked = '월 데이터 20GB 이상, 요금 3만원 이하로 추천해줘. 만 30세이고 혜택은 상관없어.'
+        profile = UserProfile(priorities=['price'], budget_max_won=30000, min_data_gb=20)
+
+        history = lambda *turns: chr(10).join(turns)   # 대화 전체가 한 덩어리로 들어온다
+        after = _repair_latest_priority(profile, history(asked, price_first, data_first))
+        self.assertEqual(after.priorities, ['data'])
+        # 필수 조건은 그대로다. 바뀌는 것은 정렬 축뿐이다.
+        self.assertEqual((after.budget_max_won, after.min_data_gb), (30000, 20))
+        self.assertEqual(
+            _repair_latest_priority(profile, history(asked, data_first, price_first)).priorities,
+            ['price'])
+        # 조건만 말한 발화는 정렬 요구가 아니다(_drop_inferred_priorities 와 같은 기준).
+        self.assertEqual(_repair_latest_priority(profile, asked).priorities, ['price'])
+
+    def test_unlimited_needs_both_allowance_and_speed(self):
+        """'무제한'은 제공량과 소진 후 속도를 함께 본다.
+
+        속도만 보던 때는 '4.5GB + 1Mbps / 100원'이 무제한 요청의 1순위였다
+        (그 정의에 걸린 QoS형 1,644건의 중위 제공량이 24GB).
+        """
+        from agent.data import UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS, is_effectively_unlimited
+        self.assertTrue(is_effectively_unlimited(False, UNLIMITED_QOS_MBPS, UNLIMITED_MIN_GB))
+        self.assertFalse(is_effectively_unlimited(False, UNLIMITED_QOS_MBPS, 4.5))
+        self.assertFalse(is_effectively_unlimited(False, 1.0, 150.0))
+        # 제공량을 모르면 무제한으로 치지 않는다.
+        self.assertFalse(is_effectively_unlimited(False, UNLIMITED_QOS_MBPS, None))
+        self.assertTrue(is_effectively_unlimited(True, None, None))
+
+        loose = filter_candidates({'data_unlimited': True})
+        self.assertTrue(loose)
+        for plan in loose:
+            self.assertTrue(
+                plan['data_unlimited']
+                or (plan['data_gb'] >= UNLIMITED_MIN_GB and plan['qos_mbps'] >= UNLIMITED_QOS_MBPS),
+                plan['plan_name'])
+        # '완전 무제한' 요청은 기본량 무제한만 남긴다.
+        strict = filter_candidates({'data_unlimited': True, 'require_full_unlimited': True})
+        self.assertTrue(strict)
+        self.assertTrue(all(plan['data_unlimited'] for plan in strict))
+        self.assertLess(len(strict), len(loose))
+
+    def test_latest_unlimited_scope_wins(self):
+        """'완전 무제한만' ↔ 'QoS형도 괜찮다'도 마지막에 말한 쪽이 이긴다."""
+        from agent.agents.profiling import _repair_latest_unlimited_strictness as repair
+        asked = '데이터 무제한인 요금제 추천해줘.'
+        only_full = '완전 무제한, 속도 제한 없는 요금제만 추천해줘.'
+        also_qos = '완전 무제한이 아니어도 괜찮아. 소진 후 속도가 유지되는 상품도 포함해서 추천해줘.'
+        history = lambda *turns: chr(10).join(turns)
+
+        self.assertIsNone(repair(UserProfile(data_unlimited=True), asked).require_full_unlimited)
+        self.assertTrue(repair(UserProfile(data_unlimited=True),
+                               history(asked, only_full)).require_full_unlimited)
+        self.assertIsNone(repair(UserProfile(data_unlimited=True, require_full_unlimited=True),
+                                 history(asked, only_full, also_qos)).require_full_unlimited)
+        self.assertTrue(repair(UserProfile(data_unlimited=True, require_full_unlimited=True),
+                               history(asked, also_qos, only_full)).require_full_unlimited)
+
+    def test_preference_statement_is_not_a_comparison_filter(self):
+        """'가격 우선'은 순위 가중치다. 현재보다 싼 것만 남기는 필수 조건이 아니다.
+
+        실측: 선호만 바꿨는데 comparison_goals 가 cheaper 로 잡혀 후보가 0건이 됐다.
+        """
+        from agent.agents.profiling import _repair_general_comparison
+        current = dict(reference_fee_won=20000, reference_data_gb=100.0)
+        asked = '지금 월 2만원에 데이터 100GB인 요금제를 쓰고 있어. 더 나은 요금제가 있으면 추천해줘.'
+        preference = '데이터 100GB 이상 조건은 그대로 두고, 가격을 가장 중요하게 봐서 다시 추천해줘.'
+
+        after = _repair_general_comparison(
+            UserProfile(**current, comparison_goals=['cheaper']), chr(10).join([asked, preference]))
+        self.assertEqual(after.comparison_goals, ['better'])
+        # 선호만 말한 대화에서는 비교 목표 자체가 생기지 않는다.
+        self.assertIsNone(_repair_general_comparison(
+            UserProfile(**current, comparison_goals=['cheaper']), preference).comparison_goals)
+        # 명시적 맞교환 요청은 그대로 필수 조건으로 남는다.
+        self.assertEqual(_repair_general_comparison(
+            UserProfile(**current, comparison_goals=['cheaper']),
+            '지금보다 더 싼 걸로 추천해줘').comparison_goals, ['cheaper'])
+
+    def test_priority_change_keeps_hard_constraints_and_moves_the_ranking(self):
+        """선호 축만 바꾼 재계산. 필수조건 필터는 그대로고 가중치는 기존 SMAA-2 보정을 쓴다."""
+        from agent.mcda import evaluate_mcda, rank_smaa2
+        profile = {'budget_max_won': 30000, 'min_data_gb': 20, 'user_age': 30}
+        candidates = filter_candidates(profile)
+        self.assertTrue(candidates)
+        self.assertTrue(all(plan['discounted_fee'] <= 30000 for plan in candidates))
+        self.assertTrue(all(plan['data_unlimited'] or plan['data_gb'] >= 20 for plan in candidates))
+
+        by_price = rank_smaa2(evaluate_mcda(candidates, ['price']))
+        by_data = rank_smaa2(evaluate_mcda(candidates, ['data']))
+        self.assertNotEqual([plan.plan_id for plan in by_price[:5]],
+                            [plan.plan_id for plan in by_data[:5]])
+        # 재계산해도 후보 집합(=필수조건)은 같다. 바뀌는 것은 순서뿐이다.
+        self.assertEqual({plan.plan_id for plan in by_price}, {plan.plan_id for plan in by_data})
 
     @classmethod
     def setUpClass(cls):
@@ -52,8 +269,18 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(facts['total'], len(self.rows))
         self.assertEqual(sum(r['count'] for r in facts['carriers']), len(self.rows))
         self.assertEqual(sum(r['count'] for r in facts['tiers']), len(self.rows))
-        counts = [r['count'] for r in facts['unlimitedPolicy']['sensitivity']]
-        self.assertEqual(counts, sorted(counts, reverse=True))
+        # 민감도 표는 '무제한' 두 문턱(제공량·속도)의 격자다. 한 축을 조이면 후보는
+        # 줄기만 해야 하고, '현재 기준' 칸은 실제 정의가 고르는 건수와 같아야 한다.
+        grid = {(r['minGb'], r['threshold']): r['count']
+                for r in facts['unlimitedPolicy']['sensitivity']}
+        for (min_gb, speed), count in grid.items():
+            for tighter in (k for k in grid if k[0] >= min_gb and k[1] >= speed):
+                self.assertLessEqual(grid[tighter], count, (tighter, (min_gb, speed)))
+        current = [r for r in facts['unlimitedPolicy']['sensitivity'] if r['current']]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0]['count'], sum(r['effective_unlimited'] for r in self.rows))
+        self.assertEqual((current[0]['minGb'], current[0]['threshold']),
+                         (facts['unlimitedPolicy']['minGb'], facts['unlimitedPolicy']['threshold']))
         self.assertAlmostEqual(sum(r['mean'] for r in facts['weights']), 1, places=4)
         self.assertEqual(self.client.get('/api/stats').json()['dataAsOf'], facts['collectedTo'])
 

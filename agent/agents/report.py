@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..data import has_benefit, normalize_benefit_category
+from ..mcda import COMPARE_MONTHS, _effective_monthly_fee
 from ..state import PipelineState, get_llm, user_query
 
 
@@ -84,7 +85,10 @@ REPORT_PROMPT = """\
    예산 조건은 할인 가격을 기준으로 통과했으므로, 할인 종료 후 정상가가 예산보다 높더라도
    현재 추천이 예산을 위반했다고 표현하지 말고 향후 요금 변동에 주의하라고 안내한다.
 6. 같은 내용과 표현을 모든 순위에 반복하지 말고 상품별 차이가 드러나게 쓴다.
-7. reference_plan(사용자가 현재 쓰는 요금제)이 있으면 `### 현재 요금제와 비교`에서 별도로 쓴다.
+7. 후보에 vs_current 가 있으면 현재 요금제와의 금액 비교는 **그 값만** 쓴다. 직접 빼서 계산하지 마라.
+   vs_current.결론이 '현재보다 비싸다'인 후보에 '더 저렴하다/절약된다'고 쓰면 안 된다.
+   그 후보는 무엇을 더 주는 대신 얼마를 더 내는지로 쓴다.
+8. reference_plan(사용자가 현재 쓰는 요금제)이 있으면 `### 현재 요금제와 비교`에서 별도로 쓴다.
    절감액은 reference_plan의 금액과 추천 요금제의 금액으로만 계산한다. reference_plan이
    null이거나 금액이 없으면 해당 제목과 문장을 아예 쓰지 않는다.
    계산 기준이 정상가인지 할인가인지 명시한다.
@@ -97,10 +101,10 @@ REPORT_PROMPT = """\
      안내하는 것으로 끝낸다. 후보가 0건이라는 사실을 현재 요금제가 유리하다는 근거로 쓰지 마라.
    - reference_verdict.confirm의 항목은 `### 가입 전 확인`에 그대로 반영한다.
      요금제 데이터로는 알 수 없는 것들이라 빼면 안 된다.
-8. 마지막에는 `### 가입 전 확인` 제목으로 할인 기간, 가입 조건, 테더링과 소진 후 속도 등
+9. 마지막에는 `### 가입 전 확인` 제목으로 할인 기간, 가입 조건, 테더링과 소진 후 속도 등
    불명확한 항목을 두세 줄로 안내한다.
-9. prior_feedback이 있으면 사실성 원칙을 해치지 않는 범위에서 모두 반영한다.
-10. 입력 데이터 구조, JSON, 에이전트, 프롬프트 같은 내부 용어는 답변에서 언급하지 않는다.
+10. prior_feedback이 있으면 사실성 원칙을 해치지 않는 범위에서 모두 반영한다.
+11. 입력 데이터 구조, JSON, 에이전트, 프롬프트 같은 내부 용어는 답변에서 언급하지 않는다.
 
 <REPORT_DATA>
 {report_data}
@@ -178,9 +182,36 @@ def _ranked_recommendations(state: PipelineState) -> list[dict[str, Any]]:
         recommendation["matched_benefits"] = _matched_benefits(
             state.get("profile"), recommendation
         )
+        comparison = _vs_current(recommendation, _plain(state.get("reference")))
+        if comparison:
+            recommendation["vs_current"] = comparison
         recommendations.append(recommendation)
 
     return recommendations
+
+
+def _vs_current(plan: Mapping, reference: Mapping | None) -> dict | None:
+    """현재 요금제와의 금액 차이를 코드로 계산해 넘긴다.
+
+    LLM 이 직접 두 금액을 비교하면 더 비싼 후보에도 "더 저렴합니다"라고 쓰는 일이 있었다
+    (실측: 현재 20,000원 / 후보 23,100원). 비교는 여기서 끝내고 프롬프트에는 결론만 준다.
+
+    현재 요금은 비교 구간 내내 유지된다고 본다 - 사용자의 할인 종료 시점은 모른다.
+    """
+    if not reference or reference.get("discounted_fee") is None:
+        return None
+    if reference.get("billing_price_known") is False or plan.get("billing_price_known") is False:
+        return None
+    current = int(reference["discounted_fee"])
+    initial = int(plan["discounted_fee"])
+    average_gap = round(_effective_monthly_fee(plan) - current)
+    return {
+        "현재_월_납부액": current,
+        "후보_초기_월_요금": initial,
+        "초기_월_차이": initial - current,
+        f"{COMPARE_MONTHS}개월_평균요금_차이": average_gap,
+        "결론": "현재보다 비싸다" if average_gap > 0 else ("현재와 같다" if average_gap == 0 else "현재보다 싸다"),
+    }
 
 
 def _response_text(content: Any) -> str:

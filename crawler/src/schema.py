@@ -100,9 +100,16 @@ PLAN_COLUMNS = [
     "sms_count",
     # --- 가격 ---
     "monthly_fee",             # 정가 월정액(원)
-    "discounted_fee",          # 대표 할인가(원)
+    "discounted_fee",          # 대표 할인가(원) = 실제 청구액
     "discount_type",
     "discount_period_months",
+    # 모요 상세의 "페이백 포함하면" 체감가. 청구액이 아니라 페이백을 뺀 표시가라
+    # discounted_fee 와 절대 섞지 않는다. 페이백 지급액·기간은 benefits.csv 쪽에
+    # 월액(benefit_value_won) + 개월수(benefit_months)로 따로 들어간다.
+    "payback_included_fee",
+    # 상세의 "월 납부액"을 실제로 읽어 왔는가. False면 목록 카드 값만 있는 것이고
+    # 페이백 상품이면 표시가일 수 있다 - 추천/총비용 계산에서 빼는 근거가 된다.
+    "billing_price_verified",
     # --- 혜택 요약 (상세는 benefits.csv) ---
     "benefit_count",
     "ott_option_count",

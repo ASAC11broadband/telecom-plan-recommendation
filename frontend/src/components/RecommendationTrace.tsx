@@ -124,7 +124,7 @@ export function RecommendationTrace({ result }: { result: RecommendResponse }) {
                   <td>{months}개월 평균 월요금</td>
                   {result.plans.map((plan) => (
                     <td className="num" key={plan.id}>
-                      {plan.rankingAverageFee.toLocaleString()}원{plan.costIsEstimate && '*'}
+                      {plan.rankingAverageFee === null ? '확인 필요' : `${plan.rankingAverageFee.toLocaleString()}원`}{plan.costIsEstimate && '*'}
                     </td>
                   ))}
                 </tr>

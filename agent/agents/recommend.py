@@ -43,7 +43,7 @@ def _with_current_facts(plan: dict, profile: UserProfile) -> dict:
     facts = {key: value for key, value in (_reference_from_profile(profile) or {}).items() if value is not None}
     current = {**plan, **facts}
     if profile.reference_fee_won is not None:
-        current.update(monthly_fee=profile.reference_fee_won, discount_period_months=None)
+        current.update(monthly_fee=profile.reference_fee_won, discount_period_months=None, billing_price_known=True)
     if profile.reference_data_gb is not None and profile.reference_data_unlimited is None:
         current['data_unlimited'] = False
     if profile.reference_voice_minutes is not None and profile.reference_voice_unlimited is None:
@@ -51,7 +51,8 @@ def _with_current_facts(plan: dict, profile: UserProfile) -> dict:
     if any(key in facts for key in ('data_gb', 'data_unlimited', 'qos_mbps')):
         tier = data_tier(current.get('data_unlimited'), current.get('qos_mbps'))
         current.update(data_tier=tier, data_tier_label=DATA_TIERS[tier],
-                       effective_unlimited=is_effectively_unlimited(current.get('data_unlimited'), current.get('qos_mbps')))
+                       effective_unlimited=is_effectively_unlimited(current.get('data_unlimited'), current.get('qos_mbps'),
+                                                                    current.get('data_gb')))
         current['data'] = '무제한' if current.get('data_unlimited') else (
             f"{current['data_gb']:g}GB" if current.get('data_gb') is not None else '확인 필요')
     if any(key in facts for key in ('voice_minutes', 'voice_unlimited')):
@@ -162,6 +163,8 @@ def _known_reference_axes(reference: dict) -> set[str]:
 
 
 def _known_comparison_price(plan: dict) -> bool:
+    if plan.get('billing_price_known') is False:
+        return False
     fee = plan.get('discounted_fee')
     regular = plan.get('monthly_fee')
     return fee is not None and (regular is None or regular == fee or plan.get('discount_period_months') is not None)
@@ -430,6 +433,8 @@ def _with_reference_baseline(profile: UserProfile, reference: dict | None) -> Us
 def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
     profile = state.get("profile") or UserProfile()
     reference, question = _resolve_reference(profile)
+    if reference and reference.get('billing_price_known') is False and not question:
+        question = '현재 상품의 수집 가격은 페이백 반영 표시가입니다. 실제 월 납부액을 알려주시면 비교하겠습니다.'
 
     if question:
         return {
@@ -445,7 +450,14 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
     # 필터가 아니라 점수에만 반영하면 "무제한보다 싼 것" 요청에 0.5GB 요금제가 살아남는다.
     ranking_profile = _with_reference_baseline(profile, reference)
     candidates = filter_candidates(ranking_profile.model_dump())
-    candidates = _apply_comparison(candidates, reference, profile.comparison_goals or [])
+    compared = _apply_comparison(candidates, reference, profile.comparison_goals or [])
+    # '현재보다 더 나은 것'은 방향 요청이지 필수 조건이 아니다. 우위 후보가 없을 때 후보를
+    # 0건으로 만들면 "비교하지 못했습니다"가 되는데, 사실은 비교한 끝에 우위가 없는 것이다.
+    # 이 경우 전체 후보로 돌아가 유지 판정과 맞교환 후보를 보여준다. '더 싸게'·'데이터 더'
+    # 같은 명시적 맞교환 요청은 그대로 필수로 남긴다.
+    if not compared and candidates and (profile.comparison_goals or []) == ["better"]:
+        compared = candidates
+    candidates = compared
     if not candidates:
         # 무엇을 고치면 되는지 함께 돌려준다. "없습니다"만으로는 사용자가 다음 수를 못 둔다.
         blockers = diagnose_empty(ranking_profile.model_dump())

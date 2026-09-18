@@ -21,6 +21,10 @@ DATA_DIR = ROOT / "data"  # CSV 는 프로젝트 루트의 data/ 에 둔다
 
 PLANS_CSV = DATA_DIR / "통신요금제_통합데이터_최종.csv"
 BENEFITS_CSV = DATA_DIR / "통신요금제_혜택상세_최종.csv"
+# 모요 상세페이지에서 실제 "월 납부액"을 확인해 만든 페이백 상품 정정표.
+# crawler/src/verify_payback_prices.py 가 만들고, 사람이 확인한 뒤 여기로 옮긴다.
+# 이 표에 있는 상품만 청구액이 확인된 것으로 보고 추천 계산에 넣는다.
+VERIFIED_BILLING_CSV = DATA_DIR / "페이백_청구액_검증.csv"
 
 _plans = None
 _load_lock = threading.Lock()
@@ -164,9 +168,26 @@ def _speed_to_mbps(value) -> float | None:
 QOS_HD_MBPS = 4.44
 QOS_SD_MBPS = 1.37
 QOS_LITE_MBPS = 0.46
-# 사용자가 "무제한"이라고 말할 때 받아들일 최소 소진 후 속도.
-# 1Mbps 면 소진 뒤에도 메신저·웹·음악·저화질 영상이 끊기지 않는다.
-UNLIMITED_QOS_MBPS = 1.0
+# 사용자가 "무제한"이라고 말할 때 받아들일 최소 기준. 두 조건을 **함께** 본다.
+#
+# 예전에는 소진 후 1Mbps 하나만 봤다. 그러면 '4.5GB + 1Mbps'와 '200GB + 5Mbps'가 같은
+# 문으로 들어온다 — 실측으로 이 정의에 걸린 QoS형 1,644건의 중위 제공량이 24GB 였고,
+# 절반 이상(868건)이 50GB 미만이었다. "무제한 추천해줘"에 4.5GB / 100원 상품이 1순위로
+# 올라온 원인이다. 그래서 기본 제공량 조건을 함께 건다.
+#
+# 근거 셋이 100GB 로 모인다. 규제가 정한 숫자가 아니라 **서비스 정책값**이다.
+#  1) 상품 군집: 수집 데이터에서 제공량 100GB 를 경계로 소진 후 속도가 3Mbps -> 5Mbps 로
+#     계단이 진다(71GB 군집 232건은 전부 3.0Mbps, 100GB 군집 196건 중 193건이 5.0Mbps).
+#  2) 사용량: 스마트초이스 생활패턴의 최상위 구간이 '하루 3시간 이상 영상 = 월 90GB 이상,
+#     상한 없음'이다(usage.py SMARTCHOICE_USAGE_RANGES_GB). 100GB 는 그 구간을 기본
+#     제공량만으로 덮는 최소 규격이다.
+#  3) 평균 사용량: 과기정통부 통계 기준 5G 월평균이 26GB 대(2022년 6월 26.16GB)로, 그 약 4배.
+#
+# 속도 문턱을 1Mbps 에서 HD 기준으로 올린 이유는 규제 쪽이다. 공정위는 2021년 SKT 5G
+# 요금제에 대해 "소진 후 최대 1Mbps 인데 명시하지 않아 소비자 오인" 으로 경고했다.
+# 1Mbps 는 규제가 무제한으로 인정한 속도가 아니라 문제 삼은 속도다.
+UNLIMITED_MIN_GB = 100.0
+UNLIMITED_QOS_MBPS = QOS_HD_MBPS
 
 DATA_TIERS = {
     "unlimited_full": "기본량 무제한",
@@ -194,9 +215,57 @@ def data_tier(data_unlimited: object, qos_mbps: float | None) -> str:
     return "qos_text"
 
 
-def is_effectively_unlimited(data_unlimited: object, qos_mbps: float | None) -> bool:
-    """사용자 표현 '무제한'이 가리키는 범위. 완전 무제한 + 쓸 만한 QoS 상품."""
-    return bool(data_unlimited) or (qos_mbps is not None and qos_mbps >= UNLIMITED_QOS_MBPS)
+def is_effectively_unlimited(
+    data_unlimited: object, qos_mbps: float | None, data_gb: float | None = None
+) -> bool:
+    """사용자 표현 '무제한'이 가리키는 범위.
+
+    기본량 무제한이거나, **제공량과 소진 후 속도를 둘 다 충족**하는 QoS형이다.
+    속도만 보면 소량 요금제가 섞이고, 제공량만 보면 소진 뒤 문자만 되는 상품이 섞인다.
+
+    제공량을 모르면 무제한으로 치지 않는다. 지금 CSV 에는 그런 행이 없지만
+    (크롤러가 일일 제공량을 월 환산해 채운다) 모르는 값을 통과시키지는 않는다.
+    """
+    if bool(data_unlimited):
+        return True
+    if qos_mbps is None or qos_mbps < UNLIMITED_QOS_MBPS:
+        return False
+    return data_gb is not None and float(data_gb) >= UNLIMITED_MIN_GB
+
+
+def _apply_verified_billing(plans) -> None:
+    """페이백 상품의 `discounted_fee`를 원문에서 확인한 청구액으로 바로잡는다.
+
+    수집 CSV의 페이백 상품 가격은 모요 목록 카드의 **체감가**(페이백을 뺀 표시가)라
+    청구액이 아니다(36334: 카드 7,000원 / 실제 청구 49,000원). 표시가에 페이백을
+    도로 더하거나 정가로 치환하면 안 되므로, 상세페이지 "월 납부액"을 실제로 읽어
+    온 상품만 정정표를 통해 되돌린다.
+
+    정정표에 없는 페이백 상품은 `billing_price_known=False`로 남아 추천·총비용
+    계산에서 빠진다(탐색 목록에는 그대로 보인다).
+
+    페이백 지급액·기간은 요금 할인 기간과 다르므로 가격에 섞지 않는다. 지급 일정은
+    `payback_schedule`에 문자열로 남기고, 차감 여부는 혜택 쪽 규칙이 판단한다.
+    """
+    plans["billing_price_known"] = ~(
+        plans["discount_type"].fillna("").str.contains("페이백", regex=False)
+    )
+    plans["payback_schedule"] = ""
+    plans["payback_included_fee"] = None
+    if not VERIFIED_BILLING_CSV.exists():
+        return
+    fixes = pd.read_csv(VERIFIED_BILLING_CSV, dtype={"plan_id": str},
+                        encoding="utf-8-sig").set_index("plan_id")
+    fixes = fixes[~fixes.index.duplicated()]
+    verified = plans["plan_id"].isin(fixes.index)
+    if not verified.any():
+        return
+    for column in ("monthly_fee", "discounted_fee", "discount_type", "discount_period_months",
+                   "payback_included_fee", "payback_schedule"):
+        mapped = plans["plan_id"].map(fixes[column])
+        plans.loc[verified, column] = mapped[verified]
+    plans["payback_schedule"] = plans["payback_schedule"].fillna("")
+    plans.loc[verified, "billing_price_known"] = True
 
 
 def load() -> None:
@@ -214,6 +283,7 @@ def load() -> None:
         if _plans is not None:
             return
         plans = pd.read_csv(PLANS_CSV, dtype={"plan_id": str})
+        _apply_verified_billing(plans)
         plans["qos_mbps"] = plans["data_throttle_speed"].map(_speed_to_mbps)
         # 원본 CSV는 보존한다. 재수집 전에는 로밍 혼입 의심 값을 국내 속도로 쓰지 않는다.
         plans["qos_source_suspect"] = (
@@ -226,8 +296,10 @@ def load() -> None:
             for unlimited, qos in zip(plans["data_unlimited"], plans["qos_mbps"])
         ]
         plans["effective_unlimited"] = [
-            is_effectively_unlimited(unlimited, qos)
-            for unlimited, qos in zip(plans["data_unlimited"], plans["qos_mbps"])
+            is_effectively_unlimited(unlimited, qos, gb)
+            for unlimited, qos, gb in zip(
+                plans["data_unlimited"], plans["qos_mbps"], plans["data_gb"]
+            )
         ]
         benefits = pd.read_csv(BENEFITS_CSV, dtype={"plan_id": str})
         benefit_lists = (
@@ -539,6 +611,11 @@ def filter_candidates(profile: dict) -> list[dict]:
     load()
     df = _plans
 
+    # 청구액이 확인되지 않은 페이백 표시가는 예산·순위 판단의 기준이 될 수 없다.
+    # 정정표로 청구액이 확인된 상품은 여기서 다시 후보가 된다(_apply_verified_billing).
+    # 전체 탐색용 all_plans 에는 미확인 상품도 그대로 남는다.
+    df = df[df["billing_price_known"]]
+
     # 예산 판단 기준은 discounted_fee(할인 후 실제 납부액).
     # 할인이 없는 요금제는 discounted_fee 가 monthly_fee 와 같고, 0원은 실제 0원 프로모션이다.
     if profile.get("budget_min_won") is not None:
@@ -549,8 +626,9 @@ def filter_candidates(profile: dict) -> list[dict]:
     # unlimited 계열이 False 인 것은 "무제한이 필수는 아니다" 라는 뜻이지
     # "무제한이면 안 된다" 가 아니다. True 일 때만 필터한다. (sms/voice 도 동일)
     #
-    # 일반 '무제한'은 기본량 무제한 또는 1Mbps 이상 QoS형이라는 서비스 정책이다.
-    # 1Mbps는 EDA로 입증한 정답이 아닌 명시적인 운영 기준이다.
+    # 일반 '무제한'의 범위는 is_effectively_unlimited 한 곳에서만 정한다 - 기본량 무제한이거나
+    # 제공량과 소진 후 속도를 **둘 다** 넘긴 QoS형이다. 문턱(UNLIMITED_MIN_GB /
+    # UNLIMITED_QOS_MBPS)은 EDA 로 찾은 상품 군집 경계이자 서비스 정책이지 입증된 정답이 아니다.
     if profile.get("data_unlimited") is True:
         df = df[df["effective_unlimited"]] if not profile.get("require_full_unlimited") else df[df["data_unlimited"]]
 
@@ -819,6 +897,10 @@ def _row_summary(r) -> dict:
         "monthly_fee": int(r["monthly_fee"]),
         "discounted_fee": int(r["discounted_fee"]),
         "discount_type": r["discount_type"] if pd.notna(r["discount_type"]) else "",
+        "billing_price_known": bool(r["billing_price_known"]),
+        # 페이백을 뺀 체감 표시가와 지급 일정. 청구액(discounted_fee)과 섞지 않는다.
+        "payback_included_fee": _opt_int(r.get("payback_included_fee")),
+        "payback_schedule": str(r.get("payback_schedule") or ""),
         "discount_period_months": int(r["discount_period_months"])
         if pd.notna(r["discount_period_months"])
         else None,
@@ -983,7 +1065,12 @@ if __name__ == "__main__":
     assert data_tier(False, float("nan")) == "capped"  # 미수집이 조용히 등급을 받으면 안 된다
     tier_counts = pd.Series([r["data_tier"] for r in all_plans()]).value_counts()
     assert tier_counts.get("capped", 0) > 500, tier_counts.to_dict()
-    assert is_effectively_unlimited(False, 5.0) and not is_effectively_unlimited(False, 0.4)
+    # 속도만 빠른 소량 상품은 '무제한'이 아니다. 제공량도 함께 넘겨야 통과한다.
+    assert is_effectively_unlimited(False, 5.0, 150.0)
+    assert not is_effectively_unlimited(False, 5.0, 4.5)
+    assert not is_effectively_unlimited(False, 1.0, 150.0)
+    assert not is_effectively_unlimited(False, 5.0, None)
+    assert is_effectively_unlimited(True, None, None)
 
     # '무제한' 요청은 완전 무제한과 QoS형을 함께 본다. 라벨만 보면 3만원 이하가 1건뿐이다.
     strict = [r for r in all_plans() if r["data_unlimited"] and r["discounted_fee"] <= 30000]

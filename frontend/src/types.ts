@@ -14,6 +14,7 @@ export interface PlanItem {
   priceNum: number;
   originalPrice: number;
   priceNote: string;
+  billingPriceKnown: boolean;
   score: number;
   reason: string;
   data: string;
@@ -47,14 +48,14 @@ export interface PlanItem {
   expectedRank: number | null;
   firstRankAcceptability: number | null;
   rankingMonths: number;
-  rankingAverageFee: number;
+  rankingAverageFee: number | null;
   costIsEstimate: boolean;
   dataWarnings: string[];
   signupNotice: string;
   total: string;
-  totalNum: number;
+  totalNum: number | null;
   effectiveTotal: string;
-  effectiveTotalNum: number;
+  effectiveTotalNum: number | null;
   /** 혜택 금액이 요금을 넘은 경우. 실부담은 0 원에서 끊고 조건 확인을 안내한다. */
   benefitExceedsFee: boolean;
   compareMonths: number;
@@ -69,6 +70,31 @@ export interface PlanItem {
   hasAddon: boolean;
   ageCondition: string;
   sourceUrl: string;
+  /** 현재 쓰는 요금제가 있을 때만 채워진다. 상품명 없이 납부액만 말한 경우도 포함. */
+  referenceDelta: ReferenceDelta | null;
+}
+
+/** 현재 요금제 대비 변화. 금액 계산은 전부 서버(backend/plans.reference_delta)에서 한다.
+ *  모르는 값은 0 이 아니라 null 이고, 화면은 null 을 '확인 필요'로 보여준다. */
+export interface ReferenceDelta {
+  months: number;
+  currentMonthlyFee: number | null;
+  candidateMonthlyFee: number | null;
+  monthlyDiff: number | null;
+  currentTotal: number | null;
+  candidateTotal: number | null;
+  /** 요금만 비교한 차이다. 위약금·결합할인 손실은 빠져 있어 '확정 절약액'이 아니다. */
+  totalDiff: number | null;
+  discountEndsAfterMonths: number | null;
+  feeAfterDiscount: number | null;
+  currentData: string;
+  candidateData: string;
+  dataDiffGb: number | null;
+  currentQos: string;
+  candidateQos: string;
+  schedule: { month: number; current: number | null; candidate: number | null }[];
+  unknowns: string[];
+  assumption: string;
 }
 
 export interface ChatMessage {
@@ -119,6 +145,16 @@ export interface Blocker {
   minimum_fee?: number;
 }
 
+export interface ReferenceFacts {
+  discounted_fee?: number | null;
+  data_gb?: number | null;
+  data_unlimited?: boolean | null;
+  voice_minutes?: number | null;
+  voice_unlimited?: boolean | null;
+  qos_mbps?: number | null;
+  plan_name?: string | null;
+}
+
 export interface ReferenceVerdict {
   status: 'keep' | 'switch' | 'undetermined';
   reason: string;
@@ -138,6 +174,8 @@ export interface RecommendResponse {
   totalCount: number;
   report: string;
   referencePlan: PlanItem | null;
+  /** 상품명을 몰라도 사용자가 말한 현재 납부액·데이터량만으로 비교할 때 쓰는 원본 값. */
+  referenceFacts: ReferenceFacts | null;
   /** 현재 요금제 유지/전환/판단불가. 서버가 코드로 판정한 값이며 LLM 판정이 아니다. */
   referenceVerdict: ReferenceVerdict | null;
   profile: Profile | null;
@@ -146,6 +184,8 @@ export interface RecommendResponse {
   /** 후보가 0건일 때, 어느 조건을 풀면 몇 건이 살아나는지. */
   blockers: Blocker[];
   dataAsOf: string;
+  /** '무제한'을 어느 범위로 봤는지. 상수는 서버(agent/data.py)에만 두고 화면은 받아 쓴다. */
+  unlimitedPolicy: { minGb: number; qosMbps: number };
   evaluation: { passed: boolean; feedback: string; retry_target: string } | null;
   trace: {
     eligibleCount?: number;

@@ -204,6 +204,14 @@ def _utility_rows(
             else _minimum_fit(float(p.get("data_gb") or 0), float(explicit_min_data))
             for p in candidates
         ]
+        # 필수 최소량("20GB 이상")은 필터가 이미 걸러서, 남은 후보는 이 축에서 전부 1.0 이
+        # 된다. 상수 축은 _discriminating 이 빼 버리므로 "데이터를 가장 중요하게"라고 말해도
+        # 순위가 하나도 안 바뀐다(실측). 사용자가 데이터를 우선하겠다고 직접 말했을 때만
+        # 충족 여부 대신 실제 제공량으로 갈라 준다 - 최소량 판정 자체는 그대로다.
+        if "data" in (_profile_value(profile, "priorities") or []) and (
+            max(data_utility) - min(data_utility) <= 1e-9
+        ):
+            data_utility = _minmax([math.log1p(_finite_data(p, data_max)) for p in candidates])
     elif target_data is not None and float(target_data) > 0:
         data_utility = [
             _DATA_OVERSUPPLY_FLOOR

@@ -454,11 +454,73 @@ def parse_signup_notice(soup) -> str:
     return " | ".join(dict.fromkeys(texts))
 
 
+def _labeled_fee(soup, label: str):
+    """상세 헤더의 "<라벨> 월 N원" 블록에서 N을 뽑는다. 없으면 None."""
+    node = next((s for s in soup.find_all("span") if s.get_text(strip=True) == label), None)
+    if node is None or node.parent is None:
+        return None
+    text = re.sub(r"\s+", " ", node.parent.get_text(" ", strip=True))
+    m = re.search(r"월\s*([\d,]+)\s*원", text[text.find(label) + len(label):])
+    return to_won(m.group(1)) if m else None
+
+
+def parse_billing_prices(soup) -> dict:
+    """상세페이지가 나눠서 보여주는 두 금액.
+
+    - "월 납부액"       = 통신사가 실제로 청구하는 금액.
+    - "페이백 포함하면"  = 페이백을 뺀 체감가. 청구액이 아니다.
+
+    목록 카드에는 체감가만 나오는 경우가 있어(plan 36334: 카드 7,000원 / 청구
+    49,000원) 이 둘을 반드시 따로 싣는다. 페이백 지급 기간은 요금 할인 기간과
+    달라서 한 값으로 접으면 복구할 수 없다.
+    """
+    return {
+        "billing_monthly_fee": _labeled_fee(soup, "월 납부액"),
+        "payback_included_fee": _labeled_fee(soup, "페이백 포함하면"),
+    }
+
+
+def apply_billing_prices(card: dict, prices: dict) -> dict:
+    """청구액이 확인되면 카드의 가격 칸을 청구액 기준으로 바로잡는다.
+
+    카드의 "페이백 포함 월 X원 / N개월 이후 Y원"은 X가 체감가일 때 Y도 신뢰할 수
+    없다. 청구액(B)과 카드 정가(Y)를 비교해 세 갈래로 나눈다.
+
+      B < Y : 진짜 요금 할인이 걸려 있다. 할인가만 청구액으로 바꾸고 기간은 둔다.
+      B == Y: 할인은 없고 페이백만 있다. 카드가 적어둔 기간은 요금 할인 기간이
+              아니라 페이백 지급 기간이므로 지운다(6804: 카드 0원/6개월, 청구 1,700원).
+      B > Y : 카드의 "정가"까지 체감가였다. 둘 다 청구액으로 맞추고 기간을 지운다
+              (36334: 카드 7,000원, 청구 49,000원).
+
+    표시가에 페이백을 더하거나 정가로 치환하지 않는다. 쓰는 값은 원문의 청구액뿐이다.
+    """
+    billing = prices.get("billing_monthly_fee")
+    payback_included = prices.get("payback_included_fee")
+    out = {**card, "payback_included_fee": payback_included if payback_included is not None else ""}
+    if billing is None:
+        out["billing_price_verified"] = False
+        return out
+
+    regular = card.get("monthly_fee")
+    out["billing_price_verified"] = True
+    out["discounted_fee"] = billing
+    if regular is None or billing >= regular:
+        out["monthly_fee"] = billing
+        out["discount_period_months"] = ""
+    has_discount = out["monthly_fee"] > billing
+    has_payback = payback_included is not None and payback_included < billing
+    out["discount_type"] = " ".join(
+        part for part in ("모요 프로모션 할인" if has_discount else "", "페이백" if has_payback else "")
+        if part
+    )
+    return out
+
+
 def parse_detail(plan_id: str, plan_name: str):
-    """returns (mvno_brand, benefit_rows, support, signup_notice)"""
+    """returns (mvno_brand, benefit_rows, support, signup_notice, billing_prices)"""
     path = os.path.join(CACHE_DIR, f"detail_{plan_id}.html")
     if not os.path.exists(path):
-        return "", [], {}, ""
+        return "", [], {}, "", {}
     with open(path, encoding="utf-8") as f:
         html = f.read()
     soup = BeautifulSoup(html, "html.parser")
@@ -516,7 +578,7 @@ def parse_detail(plan_id: str, plan_name: str):
 
     support = parse_support_services(soup)
     support["voice_extra_minutes"] = parse_addon_voice(soup)
-    return brand, benefits, support, signup_notice
+    return brand, benefits, support, signup_notice, parse_billing_prices(soup)
 
 
 def parse_card_only(a_tag) -> dict | None:
@@ -667,7 +729,8 @@ def parse_card(a_tag, now: str):
     if card is None:
         return None, []
 
-    brand, benefits, support, signup_notice = parse_detail(card["plan_id"], card["plan_name"])
+    brand, benefits, support, signup_notice, prices = parse_detail(card["plan_id"], card["plan_name"])
+    card = apply_billing_prices(card, prices)
     for b in benefits:
         b["host_mno"] = card["host_mno"]
 

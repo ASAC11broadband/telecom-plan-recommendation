@@ -1,7 +1,7 @@
 import { RecommendationTrace } from './RecommendationTrace';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { PlanItem, Profile, RecommendResponse, ScreenType } from '../types';
+import { PlanItem, Profile, RecommendResponse, ReferenceDelta, ScreenType } from '../types';
 
 /** 비용 표는 LLM 서술이 아니라 요금제 숫자로 직접 계산한다. 돈 얘기는 틀리면 안 된다. */
 function costRows(plan: PlanItem) {
@@ -86,25 +86,62 @@ function alternativeSummary(selected: PlanItem, other: PlanItem) {
   return `${price}. ${data} ${benefit}`;
 }
 
-function referenceRows(current: PlanItem, selected: PlanItem): [string, string][] {
-  const feeGap = selected.priceNum - current.priceNum;
-  const priceChange = feeGap === 0
-    ? '월 요금이 같습니다.'
-    : feeGap < 0
-      ? `월 ${Math.abs(feeGap).toLocaleString()}원 저렴해집니다.`
-      : `월 ${feeGap.toLocaleString()}원 비싸집니다.`;
-  const currentBenefits = benefitItems(current);
-  const selectedBenefits = benefitItems(selected);
-  const benefitChange = selectedBenefits.length === currentBenefits.length
-    ? `확인된 혜택 수는 ${selectedBenefits.length}개로 같습니다.`
-    : selectedBenefits.length > currentBenefits.length
-      ? `확인된 혜택이 ${currentBenefits.length}개에서 ${selectedBenefits.length}개로 늘어납니다.`
-      : `확인된 혜택이 ${currentBenefits.length}개에서 ${selectedBenefits.length}개로 줄어듭니다.`;
+function won(value: number | null | undefined, fallback = '확인 필요') {
+  return value === null || value === undefined ? fallback : `${value.toLocaleString()}원`;
+}
+
+/** 현재 요금제 대비 변화. 금액은 전부 서버가 준 referenceDelta 를 그대로 쓴다.
+ *  화면에서 다시 계산하면 총비용 기준이 서버와 갈라진다(예전에 6개월/12개월이 갈렸다). */
+function deltaRows(delta: ReferenceDelta): [string, string][] {
+  const monthly = delta.monthlyDiff === null
+    ? '차이를 계산하려면 현재 월 납부액이 필요합니다.'
+    : delta.monthlyDiff === 0
+      ? '초기 월 요금은 같습니다.'
+      : `초기 월 요금이 ${Math.abs(delta.monthlyDiff).toLocaleString()}원 ${delta.monthlyDiff < 0 ? '적습니다' : '많습니다'}.`;
+  const total = delta.totalDiff === null
+    ? '현재 납부액이나 후보의 청구액이 확인되지 않아 총비용을 비교하지 않았습니다.'
+    : delta.totalDiff === 0
+      ? `${delta.months}개월 총비용이 같습니다.`
+      : `${delta.months}개월 총비용이 ${Math.abs(delta.totalDiff).toLocaleString()}원 ${delta.totalDiff < 0 ? '적습니다' : '많습니다'}.`;
+  const dataChange = delta.dataDiffGb === null
+    ? '한쪽 제공량이 확인되지 않아 증감을 계산하지 않았습니다.'
+    : delta.dataDiffGb === 0
+      ? '제공량이 같습니다.'
+      : `${Math.abs(delta.dataDiffGb).toLocaleString()}GB ${delta.dataDiffGb > 0 ? '늘어납니다' : '줄어듭니다'}.`;
   return [
-    ['월 요금', `${current.price}원 → ${selected.price}원 · ${priceChange}`],
-    ['데이터', `${current.data} → ${selected.data} · ${dataDifference(current, selected)}`],
-    ['주요 혜택', `${current.benefit} → ${selected.benefit} · ${benefitChange}`],
+    ['현재 월 납부액 / 후보 초기 월 요금', `${won(delta.currentMonthlyFee)} → ${won(delta.candidateMonthlyFee)} · ${monthly}`],
+    [`${delta.months}개월 총비용`, `${won(delta.currentTotal)} → ${won(delta.candidateTotal)} · ${total}`],
+    ['데이터 제공량', `${delta.currentData} → ${delta.candidateData} · ${dataChange}`],
+    ['소진 후 속도', `${delta.currentQos} → ${delta.candidateQos}`],
+    ['할인 종료 시점', delta.discountEndsAfterMonths === null
+      ? '후보에 비교 구간 안에서 끝나는 요금 할인이 확인되지 않았습니다.'
+      : `${delta.discountEndsAfterMonths}개월 후 ${won(delta.feeAfterDiscount)}으로 오릅니다.`],
   ];
+}
+
+/** 월별 청구액 변화. 할인이 끝나는 달에 막대가 뛰는 것을 그대로 보여준다.
+ *  차트 라이브러리를 쓰지 않는다 - 값이 12개뿐이라 CSS 막대로 충분하다. */
+function FeeChart({ delta }: { delta: ReferenceDelta }) {
+  const values = delta.schedule.flatMap((point) => [point.current, point.candidate])
+    .filter((value): value is number => value !== null);
+  if (!values.length) return null;
+  const max = Math.max(...values, 1);
+  return (
+    <div className="fee-chart" role="img"
+         aria-label={`${delta.months}개월 월별 청구액 변화. 현재와 후보를 나란히 비교합니다.`}>
+      {delta.schedule.map((point) => (
+        <div className="fee-chart-col" key={point.month}>
+          <div className="fee-chart-bars">
+            <span className="cur" style={{ height: `${((point.current ?? 0) / max) * 100}%` }}
+                  title={`${point.month}개월차 현재 ${won(point.current)}`} />
+            <span className="cand" style={{ height: `${((point.candidate ?? 0) / max) * 100}%` }}
+                  title={`${point.month}개월차 후보 ${won(point.candidate)}`} />
+          </div>
+          <em>{point.month}</em>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** 시안의 "실효 월 비용 시뮬레이션"을 대체한다.
@@ -239,6 +276,7 @@ export function ReportScreen({
           <h4>
             <span className="no">{nextNo()}</span>비용 산정 내역
           </h4>
+          {cost.total === null ? <p>페이백 반영 표시가입니다. 실제 청구액이 확인될 때까지 비용 계산에서 제외합니다.</p> : <>
           <p>
             비교 기준은 {cost.months}개월입니다.{' '}
             {plan.costIsEstimate ? '할인 기간 미확인으로 현재 가격이 유지된다고 가정했습니다.' : cost.regularMonths === 0
@@ -317,6 +355,7 @@ export function ReportScreen({
                 ` ${cost.months}개월 총비용에는 인상분이 포함되지 않았습니다.`}
             </p>
           )}
+          </>}
         </div>
 
         <div className="report-sec">
@@ -360,26 +399,39 @@ export function ReportScreen({
           )}
         </div>
 
-        {result.referencePlan && (
+        {plan.referenceDelta && (
           <div className="report-sec">
             <h4>
-              <span className="no">{nextNo()}</span>현재 요금제와 비교
+              <span className="no">{nextNo()}</span>현재 요금제 대비 변화
             </h4>
             <p>
-              현재 이용 중인 “{result.referencePlan.name}”과 선택한 “{plan.name}”을 비교했습니다.
+              {result.referencePlan
+                ? `현재 이용 중인 “${result.referencePlan.name}”과 선택한 “${plan.name}”을 비교했습니다.`
+                : `지금 쓰고 계신 요금제와 선택한 “${plan.name}”을 비교했습니다. 상품명 대신 알려주신 현재 월 납부액과 데이터량을 기준으로 삼았습니다.`}
             </p>
             <div className="mini-table">
               <div className="r">
                 <span>비교 항목</span>
                 <span>변화</span>
               </div>
-              {referenceRows(result.referencePlan, plan).map(([key, value]) => (
+              {deltaRows(plan.referenceDelta).map(([key, value]) => (
                 <div className="r" key={key} style={{ gap: 18 }}>
                   <span>{key}</span>
                   <span className="v" style={{ textAlign: 'right' }}>{value}</span>
                 </div>
               ))}
             </div>
+            <FeeChart delta={plan.referenceDelta} />
+            <p className="chart-legend">
+              <span className="swatch cur" /> 현재 요금제
+              <span className="swatch cand" /> {plan.name}
+              <span> · 가로축은 가입 후 개월 수입니다.</span>
+            </p>
+            <p>{plan.referenceDelta.assumption}</p>
+            <p>
+              이 비교는 요금만 본 차이이고 확정 절약액이 아닙니다.
+              반영하지 못한 항목: {plan.referenceDelta.unknowns.join(', ')}.
+            </p>
           </div>
         )}
 

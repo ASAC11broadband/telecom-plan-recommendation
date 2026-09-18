@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from agent.data import all_plans, get_plan
+from agent.data import all_plans, get_plan, UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS
 from agent.graph import graph
 from agent.state import get_llm
 from .plans import (
@@ -110,7 +110,7 @@ def recommend(req: RecommendRequest) -> dict:
     candidates = state.get("candidates", [])
     reference = state.get("reference")
     followup = (profile.followup_question if profile else None) or state.get("clarification_question")
-    plans = to_plan_items(candidates, ranked)
+    plans = to_plan_items(candidates, ranked, reference)
 
     return {
         "plans": plans,
@@ -134,6 +134,8 @@ def recommend(req: RecommendRequest) -> dict:
         "followupQuestion": followup,
         "assumptions": profile.assumptions if profile else [],
         "dataAsOf": _data_as_of(),
+        # '무제한'을 어느 범위로 봤는지. 화면이 기준을 그대로 읽어 설명한다(상수 중복 금지).
+        "unlimitedPolicy": {"minGb": UNLIMITED_MIN_GB, "qosMbps": UNLIMITED_QOS_MBPS},
         # 검증 결과는 화면에 내부 문구를 그대로 띄우지 않는다. 통과 여부만 쓴다.
         "evaluation": evaluation.model_dump() if evaluation else None,
     }
@@ -238,6 +240,8 @@ def ask(req: AskRequest) -> dict:
         "아래 요금제 데이터만 근거로 사용자 질문에 2~3문장으로 답하라. "
         "데이터에 없는 내용은 '제공된 자료로는 확인되지 않습니다'라고 답하고 추측하지 마라.\n\n"
         "혜택 환산액을 납부액 할인으로 단정하지 마라. 데이터 속도 미확인은 무제한 속도 보장이 아니다."
+        "billing_price_known이 false이면 discounted_fee는 페이백 반영 표시가이며 실제 청구액이 아니다. "
+        "이 경우 총 납부액·절약액을 계산하거나 페이백을 다시 차감하지 말고 청구액 확인이 필요하다고 안내해라."
         f"[요금제]\n{json.dumps(row, ensure_ascii=False)}"
     )
     try:

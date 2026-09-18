@@ -5,7 +5,8 @@ from hashlib import sha256
 import json
 from statistics import mean, median
 
-from agent.data import all_plans, PLANS_CSV, BENEFITS_CSV, DATA_TIERS, UNLIMITED_QOS_MBPS
+from agent.data import (all_plans, PLANS_CSV, BENEFITS_CSV, DATA_TIERS,
+                        UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS)
 from agent.mcda import CRITERIA, _WEIGHT_DATA_PATH, _PRICE_HORIZON_MONTHS
 
 LABELS = dict(zip(CRITERIA, ["가격", "데이터", "소진 후 속도", "혜택", "통화", "테더링"]))
@@ -27,11 +28,20 @@ def analysis_snapshot() -> dict:
         ("benefits", "금액이 확인된 혜택 없음", sum(not row["benefit_value_won"] for row in rows)),
         ("network", "LTE / 5G 구분", sum(not row["network_gen"] for row in rows)),
     ]
+    # '무제한' 정의의 두 문턱을 함께 흔든다. 속도만 흔들면 실제 정의와 다른 표가 된다 -
+    # 서비스는 제공량과 소진 후 속도를 함께 본다. minGb=0 줄이 속도만 보던 옛 정의다.
     sensitivity = []
-    for speed in [0.4, 1.0, 3.0, 5.0]:
-        selected = [r for r in rows if r["data_unlimited"] or (r["qos_mbps"] or 0) >= speed]
-        sensitivity.append({"threshold": speed, "count": len(selected),
-                            "under30k": sum(r["discounted_fee"] <= 30000 for r in selected)})
+    for min_gb in [0.0, 70.0, UNLIMITED_MIN_GB, 150.0]:
+        for speed in [1.0, 3.0, UNLIMITED_QOS_MBPS]:
+            selected = [r for r in rows if r["data_unlimited"]
+                        or ((r["qos_mbps"] or 0) >= speed and (r["data_gb"] or 0) >= min_gb)]
+            sensitivity.append({
+                "minGb": min_gb, "threshold": speed, "count": len(selected),
+                "medianDataGb": median([r["data_gb"] for r in selected if not r["data_unlimited"]]
+                                       or [0]),
+                "under30k": sum(r["discounted_fee"] <= 30000 for r in selected),
+                "current": min_gb == UNLIMITED_MIN_GB and speed == UNLIMITED_QOS_MBPS,
+            })
     return {
         "total": total,
         "dataFingerprint": sha256(PLANS_CSV.read_bytes() + BENEFITS_CSV.read_bytes()).hexdigest()[:16],
@@ -50,8 +60,13 @@ def analysis_snapshot() -> dict:
         "tiers": [{"name": DATA_TIERS[key], "count": tiers[key]} for key in DATA_TIERS],
         "qosDistribution": [{"name": "미확인" if speed is None else f"{speed:g}Mbps", "count": count}
                             for speed, count in sorted(qos.items(), key=lambda x: -1 if x[0] is None else x[0])],
-        "unlimitedPolicy": {"threshold": UNLIMITED_QOS_MBPS, "sensitivity": sensitivity,
-                            "definition": "기본량 무제한 또는 소진 후 1Mbps 이상. 속도 제한 없는 무제한 요청은 기본량 무제한만 선택."},
+        "unlimitedPolicy": {"threshold": UNLIMITED_QOS_MBPS, "minGb": UNLIMITED_MIN_GB,
+                            "sensitivity": sensitivity,
+                            "definition": (
+                                f"기본량 무제한, 또는 제공량 {UNLIMITED_MIN_GB:g}GB 이상이면서 소진 후 "
+                                f"{UNLIMITED_QOS_MBPS:g}Mbps 이상. 두 조건을 함께 본다. "
+                                "'완전 무제한' 요청은 기본량 무제한만 선택."
+                            )},
         "weights": [{"key": key, "label": LABELS[key],
                      "mean": round(mean(v[i] for v in vectors), 5),
                      "min": round(min(v[i] for v in vectors), 5),
@@ -69,9 +84,12 @@ def analysis_snapshot() -> dict:
         "limitations": [
             "가입자 데이터 기반의 시장 사전분포입니다. 개인 만족도나 추천 정확도 검증을 대신하지 않습니다.",
             "학습 출처는 MVNO 2,158건으로 기록되어 있습니다. 통신 3사로의 적용에는 분포 차이가 있습니다.",
-            "1Mbps 기준은 서비스 정책입니다. 임계값별 후보 수 비교는 민감도 분석이며 최적 기준의 증명이 아닙니다.",
+            f"'무제한' 기준(기본량 무제한 또는 제공량 {UNLIMITED_MIN_GB:g}GB 이상＋소진 후 "
+            f"{UNLIMITED_QOS_MBPS:g}Mbps 이상)은 서비스 정책입니다. 수집 데이터에서 상품 군집이 "
+            "갈리는 경계를 따랐을 뿐, 규제나 표준이 정한 값도 최적 기준의 증명도 아닙니다. "
+            "문턱별 후보 수 비교는 민감도 분석입니다.",
             "1위 수용도는 고정된 표본 가중치에서 1위가 된 비율입니다. 동일 효용이면 ID 정렬 영향을 받을 수 있습니다.",
-            "6개월 비용은 단기 비교, 12개월 평균 비용은 기존 순위 계산용입니다. 할인 기간 미상은 현재가 유지 가정입니다.",
+            "추천과 총비용은 12개월 기준입니다. 할인 기간 미상은 현재가 유지 가정이며, 페이백 반영 표시가만 있는 상품은 추천에서 제외합니다.",
             "혜택 환산액은 조건부 참고 가치입니다. 모두 현금 할인으로 받을 수 있다는 뜻이 아닙니다.",
         ],
     }

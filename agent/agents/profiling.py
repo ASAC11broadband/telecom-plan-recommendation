@@ -316,6 +316,77 @@ def _drop_inferred_priorities(profile: UserProfile, query: str) -> UserProfile:
     return profile.model_copy(update={"priorities": None})
 
 
+# 우선순위 표현이 가리키는 축. UserProfile.priorities 의 Literal 과 1:1 이다.
+_PRIORITY_AXIS_PATTERNS = (
+    ("price", re.compile(r"가격|요금|저렴|싼|비용|가성비")),
+    ("data", re.compile(r"데이터|제공량|용량")),
+    ("qos", re.compile(r"속도|qos|소진\s*후", re.IGNORECASE)),
+    ("benefit", re.compile(r"혜택|사은품|페이백|ott", re.IGNORECASE)),
+    ("voice", re.compile(r"통화|음성")),
+    ("tethering", re.compile(r"테더링|핫스팟")),
+)
+
+# 한 발화 안에서도 우선순위를 말한 절만 본다. "3만원 이하, 데이터 20GB 이상 조건은
+# 그대로 두고, 가격을 가장 중요하게" 에서 앞 절의 '데이터'까지 축으로 세면 순서가 뒤집힌다.
+_CLAUSE_SPLIT_RE = re.compile(r"[,.·\n]|그리고|그다음|다음으로")
+
+
+def _axes_in_priority_clauses(utterance: str) -> list[str]:
+    axes: list[str] = []
+    for clause in _CLAUSE_SPLIT_RE.split(utterance or ""):
+        if not _PRIORITY_PHRASE_RE.search(clause):
+            continue
+        for name, pattern in _PRIORITY_AXIS_PATTERNS:
+            match = pattern.search(clause)
+            if match and name not in axes:
+                axes.append((match.start(), name))
+    ordered = sorted(axes, key=lambda item: item[0])
+    return list(dict.fromkeys(name for _, name in ordered))
+
+
+def _repair_latest_priority(profile: UserProfile, query: str) -> UserProfile:
+    """선호 축은 **가장 마지막에 말한 것**이 이긴다.
+
+    프로파일링은 매 턴 대화 전체에서 프로필을 다시 뽑는다. 그래서 "가격을 가장 중요하게"
+    다음에 "데이터를 가장 중요하게" 라고 해도 앞의 발화가 그대로 남아 순위가 바뀌지 않는
+    일이 있었다(실측: priorities 가 ['price'] 로 고정). 사용자가 선호를 바꾸는 것은
+    조건을 추가하는 것과 다르다 - 마지막 지시로 교체한다.
+
+    필수 조건(예산 상한·최소 데이터량)은 건드리지 않는다. 바뀌는 것은 정렬 축뿐이다.
+    """
+    for utterance in reversed((query or "").splitlines()):
+        axes = _axes_in_priority_clauses(utterance)
+        if axes:
+            return profile if profile.priorities == axes else profile.model_copy(update={"priorities": axes})
+    return profile
+
+
+# '무제한'을 어느 범위로 볼지. 순서가 중요하다 - "완전 무제한이 아니어도"는 ON 패턴을
+# 부분 문자열로 품고 있어서 OFF 를 먼저 본다.
+_FULL_UNLIMITED_OFF_RE = re.compile(
+    r"완전\s*무제한이?\s*아니어?도|속도\s*제한(?:이)?\s*있어도"
+    r"|소진\s*후\s*속도(?:가)?\s*유지|qos\s*형?도\s*(?:괜찮|포함)",
+    re.IGNORECASE,
+)
+_FULL_UNLIMITED_ON_RE = re.compile(r"완전\s*무제한|속도\s*제한\s*없")
+
+
+def _repair_latest_unlimited_strictness(profile: UserProfile, query: str) -> UserProfile:
+    """'완전 무제한만' ↔ 'QoS형도 괜찮다'도 마지막에 말한 쪽이 이긴다.
+
+    priorities 와 같은 문제다(_repair_latest_priority). 프로필을 매 턴 대화 전체에서 다시
+    뽑기 때문에, 앞에서 '완전 무제한만'이라고 했으면 뒤에 범위를 넓혀도 그대로 남는다.
+    """
+    for utterance in reversed((query or "").splitlines()):
+        if _FULL_UNLIMITED_OFF_RE.search(utterance):
+            return (profile.model_copy(update={"require_full_unlimited": None})
+                    if profile.require_full_unlimited else profile)
+        if _FULL_UNLIMITED_ON_RE.search(utterance):
+            return profile.model_copy(
+                update={"data_unlimited": True, "require_full_unlimited": True})
+    return profile
+
+
 _NAMED_VIDEO_APP = re.compile(
     r"유튜브|youtube|넷플릭스|netflix|디즈니\s*(?:플러스|\+)|"
     r"티빙|tving|틱톡|tiktok|인스타(?:그램)?\s*릴스|릴스",
@@ -499,11 +570,36 @@ _REFERENCE_SPEC_FIELDS = (
 )
 
 
+# "현재보다 나은 것"처럼 방향만 말한 요청. 어느 항목을 포기할지는 말하지 않았다.
+_GENERAL_BETTER_RE = re.compile(
+    r"(?:현재|기존|지금).*보다\s*(?:더\s*)?(?:유리|나은|좋은|괜찮)"
+    r"|더\s*(?:나은|좋은|괜찮은)\s*(?:요금제|상품|플랜|거|것)"
+)
+# 무엇을 얻는 대신 무엇을 포기하겠다는 명시적 맞교환 요청. 이건 필수 조건으로 남긴다.
+_EXPLICIT_TRADEOFF_RE = re.compile(
+    r"더\s*(?:싼|저렴)|싼\s*(?:거|것|걸)|저렴한\s*(?:거|것|걸)"
+    r"|데이터\s*(?:가|를)?\s*더\s*많|더\s*많은\s*데이터|더\s*빠른"
+)
+
+
 def _repair_general_comparison(profile: UserProfile, query: str) -> UserProfile:
-    """현재보다 '유리한' 요청을 가격만 낮추라는 의미로 축소하지 않는다."""
-    if (any(getattr(profile, field) is not None for field in _REFERENCE_SPEC_FIELDS)
-            and re.search(r"(?:현재|기존|지금).*보다\s*(?:더\s*)?유리", query)):
+    """현재 요금제와의 비교 목표는 **비교를 말한 문장**에서만 나온다.
+
+    두 가지 오추출을 막는다.
+    1. "현재보다 나은 것"을 cheaper 로 좁히는 것. 그러면 무엇을 포기하는지 말한 적 없는
+       사용자에게 데이터가 줄어든 저가 상품만 남는다.
+    2. "가격을 가장 중요하게" 같은 **선호 표현**이 cheaper 로 들어가는 것. 선호는 순위
+       가중치이지 후보를 잘라내는 조건이 아니다. 실측: 선호만 바꿨는데 후보가 0건이 됐다.
+    """
+    if not any(getattr(profile, field) is not None for field in _REFERENCE_SPEC_FIELDS):
+        return profile
+    if _EXPLICIT_TRADEOFF_RE.search(query or ""):
+        return profile
+    if _GENERAL_BETTER_RE.search(query or ""):
         return profile.model_copy(update={"comparison_goals": ["better"]})
+    if profile.comparison_goals:
+        # 비교를 말한 문장이 하나도 없다. 선호 표현에서 끌려 나온 목표이므로 버린다.
+        return profile.model_copy(update={"comparison_goals": None})
     return profile
 
 
@@ -761,6 +857,9 @@ _REPAIRS = (
     # 예산 경계 확정 다음에 와야 한다. 현재 납부액이 상한으로 들어갔는지를 그 결과로 판단한다.
     _apply_reference_fee,
     _drop_inferred_priorities,
+    # 정렬 요구가 살아남은 뒤에 최신 발화로 축을 교체한다. 앞에 두면 방금 고른 축이 지워진다.
+    _repair_latest_priority,
+    _repair_latest_unlimited_strictness,
     # _drop_inferred_priorities 다음에 와야 한다. 앞에 두면 방금 넣은 data 가 지워진다.
     _apply_soft_data_preference,
     _apply_user_age,

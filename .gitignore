@@ -225,3 +225,7 @@ dist/
 # crawler
 crawler/data/
 crawler/__pycache__/
+
+# Local presentation build intermediates
+.presentation-build/
+.chart-data-*/

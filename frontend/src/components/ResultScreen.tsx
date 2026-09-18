@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Blocker, ChatMessage, HistoryRow, PlanItem, RecommendResponse, ScreenType } from '../types';
+import { Blocker, ChatMessage, HistoryRow, PlanItem, Profile, RecommendResponse, ScreenType } from '../types';
 import { Conversation } from './Conversation';
 import { ConditionKind, dataCondition } from '../profileText';
 
@@ -189,6 +189,124 @@ function EmptyResult({
   );
 }
 
+/** '무제한' 요청에만 뜨는 안내 + 방향성 질문.
+ *
+ *  사용자가 말한 '무제한'은 두 가지를 가리킬 수 있다 — 기본 제공량 자체가 무제한인 상품과,
+ *  제공량을 다 써도 속도가 유지되는 대용량 상품. 어느 쪽인지 코드가 짐작하지 않고 묻는다.
+ *  기준 숫자는 서버가 내려준 unlimitedPolicy 를 그대로 쓴다(화면에 상수를 복제하지 않는다).
+ */
+function UnlimitedBasis({ result, loading, onFollowup }: {
+  result: RecommendResponse; loading: boolean; onFollowup: (text: string) => void;
+}) {
+  if (!result.profile?.data_unlimited) return null;
+  const { minGb, qosMbps } = result.unlimitedPolicy;
+  const strict = result.profile.require_full_unlimited === true;
+  const full = result.plans.filter((plan) => plan.dataUnlimited).length;
+  const qosKept = result.plans.length - full;
+  return (
+    <section className="card result-overview">
+      <h3>‘무제한’을 이렇게 봤습니다</h3>
+      <p>
+        {strict
+          ? '기본 제공량 자체가 무제한인 상품만 골랐습니다.'
+          : `기본 제공량이 무제한이거나, 제공량 ${minGb.toLocaleString()}GB 이상이면서 소진 후 속도가 ${qosMbps}Mbps 이상으로 유지되는 상품을 ‘무제한’으로 봤습니다.`}
+        {' '}이번 추천 {result.plans.length}개 중 기본량 무제한 {full}개, 대용량＋속도 유지 {qosKept}개입니다.
+      </p>
+      <p className="comparison-note">
+        제공량과 소진 후 속도를 함께 보는 기준입니다. 속도만 보면 소량 요금제가, 제공량만 보면
+        소진 뒤 문자만 되는 상품이 섞입니다. {minGb.toLocaleString()}GB는 수집 데이터에서 소진 후
+        속도가 한 단계 올라가는 경계이고, 규제가 정한 값이 아니라 저희가 정한 기준입니다.
+      </p>
+      <fieldset disabled={loading} className="plain-fieldset">
+        <div className="pref-switch">
+          <button
+            className={`btn btn-sm${strict ? ' btn-primary' : ''}`}
+            aria-pressed={strict}
+            onClick={() => onFollowup('완전 무제한, 속도 제한 없는 요금제만 추천해줘.')}
+          >
+            기본 제공량 자체가 무제한인 상품만
+          </button>
+          <button
+            className={`btn btn-sm${strict ? '' : ' btn-primary'}`}
+            aria-pressed={!strict}
+            onClick={() => onFollowup('완전 무제한이 아니어도 괜찮아. 소진 후 속도가 유지되는 상품도 포함해서 추천해줘.')}
+          >
+            소진 후 속도가 유지되면 괜찮아요
+          </button>
+        </div>
+      </fieldset>
+    </section>
+  );
+}
+
+/** 선호 축을 바꿔 다시 추천받는 버튼.
+ *
+ *  새 가중치 공식이나 슬라이더를 만들지 않는다. 기존 후속 질문 경로로 "무엇을 가장
+ *  중요하게 볼지"만 한 문장 더 보내고, 가중치 보정은 그대로 agent/mcda.py 의 SMAA-2
+ *  우선순위 가산(_boosted)이 한다.
+ *
+ *  필수 조건은 문장에 다시 적어서 보낸다. 프로파일링은 매 턴 대화 전체에서 조건을 다시
+ *  뽑는데, 짧은 후속 문장만 보내면 예산 상한·필수 데이터량이 조용히 빠질 수 있다.
+ */
+const PRIORITY_CHOICES: { key: string; label: string; phrase: string }[] = [
+  { key: 'price', label: '가격 우선', phrase: '가격을 가장 중요하게' },
+  { key: 'data', label: '데이터 우선', phrase: '데이터 제공량을 가장 중요하게' },
+  { key: 'qos', label: '소진 후 속도 우선', phrase: '데이터 소진 후 속도를 가장 중요하게' },
+  { key: 'benefit', label: '혜택 우선', phrase: '부가 혜택을 가장 중요하게' },
+];
+
+function keptConditions(profile: Profile | null): string[] {
+  const p = profile ?? {};
+  const kept: string[] = [];
+  if (p.budget_max_won) kept.push(`월 ${p.budget_max_won.toLocaleString()}원 이하`);
+  if (p.min_data_gb) kept.push(`데이터 ${p.min_data_gb.toLocaleString()}GB 이상`);
+  if (p.data_unlimited) kept.push('데이터 무제한');
+  if (p.min_voice_minutes) kept.push(`통화 ${p.min_voice_minutes.toLocaleString()}분 이상`);
+  if (p.voice_unlimited) kept.push('통화 무제한');
+  if (p.min_qos_mbps) kept.push(`소진 후 ${p.min_qos_mbps}Mbps 이상`);
+  if (p.user_age) kept.push(`만 ${p.user_age}세`);
+  return kept;
+}
+
+function PreferenceSwitch({ profile, loading, onFollowup }: {
+  profile: Profile | null; loading: boolean; onFollowup: (text: string) => void;
+}) {
+  const current = (profile?.priorities ?? []).filter((key) => PRIORITY_CHOICES.some((c) => c.key === key));
+  const kept = keptConditions(profile);
+  return (
+    <section className="card result-overview">
+      <h3>무엇을 더 중요하게 볼까요</h3>
+      <p>
+        {current.length
+          ? `지금 순위는 ${current.map((key) => PRIORITY_CHOICES.find((c) => c.key === key)?.label ?? key).join(' → ')} 기준입니다.`
+          : '지금은 특정 축을 우선하지 않고 전체를 함께 보고 있습니다.'}
+      </p>
+      <fieldset disabled={loading} className="plain-fieldset">
+        <div className="pref-switch">
+          {PRIORITY_CHOICES.map((choice) => (
+            <button
+              key={choice.key}
+              className={`btn btn-sm${current[0] === choice.key ? ' btn-primary' : ''}`}
+              aria-pressed={current[0] === choice.key}
+              onClick={() => onFollowup(
+                `${kept.length ? `${kept.join(', ')} 조건은 그대로 두고, ` : ''}${choice.phrase} 봐서 다시 추천해줘.`
+              )}
+            >
+              {choice.label}
+            </button>
+          ))}
+        </div>
+      </fieldset>
+      <p className="comparison-note">
+        {kept.length
+          ? `필수 조건(${kept.join(', ')})은 그대로 두고 순위만 다시 계산합니다.`
+          : '필수 조건은 그대로 두고 순위만 다시 계산합니다.'}{' '}
+        대화 내용과 비교함은 유지됩니다.
+      </p>
+    </section>
+  );
+}
+
 export function ResultScreen({
   result,
   prevPlans,
@@ -226,7 +344,7 @@ export function ResultScreen({
   const latest = history[0];
   const fitKeys = varyingCriteria(result.plans);
   const prices = result.plans.map(plan => plan.priceNum);
-  const cheapest = result.plans.reduce<PlanItem | null>((best, plan) => !best || plan.totalNum < best.totalNum ? plan : best, null);
+  const cheapest = result.plans.filter(p => p.totalNum !== null).reduce<PlanItem | null>((best, plan) => !best || plan.totalNum! < best.totalNum! ? plan : best, null);
 
   return (
     <div className="body split">
@@ -286,6 +404,14 @@ export function ResultScreen({
           {result.plans[0].rankingMonths !== result.plans[0].compareMonths && <p className="comparison-note">추천 순위의 가격 평가는 {result.plans[0].rankingMonths}개월 평균요금, 아래 총비용 비교는 {result.plans[0].compareMonths}개월 기준입니다.</p>}
           <p className="comparison-note">순위는 가격·데이터·혜택 등을 함께 고려한 상대 평가입니다. 만족 확률이나 가입 적합도 백분율이 아닙니다. 마음에 드는 상품은 비교함에 담아 직접 찾은 상품과 비교하세요.</p>
         </section>}
+
+        {result.plans.length > 0 && (
+          <UnlimitedBasis result={result} loading={loading} onFollowup={onFollowup} />
+        )}
+
+        {result.plans.length > 0 && (
+          <PreferenceSwitch profile={result.profile} loading={loading} onFollowup={onFollowup} />
+        )}
 
         {isUpdate && latest && (
           <div className="notice">
@@ -432,7 +558,7 @@ function PlanCard({
 
       <div className="price-block">
         <div className="line">
-          <span style={{ fontSize: 'var(--fs-11)', color: 'var(--t2)' }}>월 실 납부액</span>
+          <span style={{ fontSize: 'var(--fs-11)', color: 'var(--t2)' }}>{plan.billingPriceKnown ? '월 요금' : '페이백 반영 표시가'}</span>
           <span>
             <strong className="amt num">{plan.price}</strong>
             <span className="unit">원/월</span>
@@ -507,9 +633,9 @@ function PlanCard({
 export function CompareTable({ plans }: { plans: PlanItem[] }) {
   const rows: [string, (p: PlanItem) => string][] = [
     ['사업자 / 망', (p) => p.carrier],
-    ['월 기본료', (p) => `${p.price}원`],
-    ['정가', (p) => `${p.originalPrice.toLocaleString()}원`],
-    ['프로모션 기간', (p) => (p.isPromo ? (p.promoMonths ? `${p.promoMonths}개월` : '확인 필요') : '없음')],
+    ['월 요금 / 표시가', (p) => `${p.price}원${p.billingPriceKnown ? '' : ' (페이백 반영)'}`],
+    ['정가', (p) => p.billingPriceKnown ? `${p.originalPrice.toLocaleString()}원` : '청구액 확인 필요'],
+    ['프로모션 기간', (p) => !p.billingPriceKnown ? '청구 조건 확인 필요' : (p.isPromo ? (p.promoMonths ? `${p.promoMonths}개월` : '확인 필요') : '없음')],
     ['데이터', (p) => p.data],
     ['소진 후', (p) => p.dataTierLabel],
     ['소진 후 속도', (p) => p.qos],
@@ -517,7 +643,7 @@ export function CompareTable({ plans }: { plans: PlanItem[] }) {
     ['문자', (p) => p.sms],
     ['테더링', (p) => p.tethering],
     ['가입 조건', (p) => p.ageCondition || '수집된 제한 없음'],
-    ['비용 계산 안내', (p) => p.costIsEstimate ? '할인 기간 미확인 · 현재가 유지 가정' : `${p.compareMonths}개월 기준`],
+    ['비용 계산 안내', (p) => !p.billingPriceKnown ? '실제 청구액 미확인 · 계산 제외' : p.costIsEstimate ? '할인 기간 미확인 · 현재가 유지 가정' : `${p.compareMonths}개월 기준`],
     ['주요 혜택', (p) => p.benefit],
     ['혜택 월 환산 (참고값)', (p) => (p.benefitValue ? `${p.benefitValue.toLocaleString()}원${p.benefitValueEstimated ? ' (추정)' : ''}` : '확인 필요')],
     [`${plans[0].compareMonths}개월 총비용`, (p) => p.total],

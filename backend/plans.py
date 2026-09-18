@@ -9,25 +9,36 @@ from __future__ import annotations
 
 from agent.mcda import COMPARE_MONTHS, _effective_monthly_fee, _PRICE_HORIZON_MONTHS
 
-__all__ = ["COMPARE_MONTHS", "total_cost", "to_plan_item", "to_plan_items"]
+__all__ = ["COMPARE_MONTHS", "total_cost", "monthly_fee_schedule", "reference_delta",
+           "to_plan_item", "to_plan_items"]
 
 
-def total_cost(row: dict, months: int = COMPARE_MONTHS) -> int:
-    """비교 구간 총 납부액. 할인 기간이 구간보다 짧으면 남은 달은 정가로 계산한다.
+def monthly_fee_schedule(row: dict, months: int = COMPARE_MONTHS) -> list[int]:
+    """1개월차부터 months개월차까지의 월별 청구액.
 
-    구간은 agent.mcda.COMPARE_MONTHS 하나뿐이다. 추천의 가격 평가와 화면의 총비용이
-    같은 기간을 써야 "순위는 A가 위인데 총비용은 B가 싸다"는 설명이 성립한다.
+    할인 기간이 끝나는 달부터는 정가로 돌아간다. 총비용과 "할인 종료 시점의 요금
+    변화" 그래프가 같은 목록을 쓰게 해서, 표의 합계와 그래프가 어긋나지 않게 한다.
 
     discount_period_months 가 없으면 할인 무기한으로 본다(약정 할인 등).
     그 경우 costIsEstimate 로 추정임을 함께 내보낸다.
+
+    사용자가 말한 현재 요금처럼 정가를 모르는 행은 현재 청구액이 구간 내내 유지된다고
+    본다 - 모르는 값을 0으로 두면 총비용이 실제보다 싸게 나온다.
     """
     discounted = int(row["discounted_fee"])
-    regular = int(row["monthly_fee"])
+    regular = int(row.get("monthly_fee") if row.get("monthly_fee") is not None else discounted)
     period = row.get("discount_period_months")
-    if period is None:
-        return discounted * months
-    promo = max(0, min(int(period), months))
-    return discounted * promo + regular * max(0, months - promo)
+    promo = months if period is None else max(0, min(int(period), months))
+    return [discounted if month < promo else regular for month in range(months)]
+
+
+def total_cost(row: dict, months: int = COMPARE_MONTHS) -> int:
+    """비교 구간 총 납부액.
+
+    구간은 agent.mcda.COMPARE_MONTHS 하나뿐이다. 추천의 가격 평가와 화면의 총비용이
+    같은 기간을 써야 "순위는 A가 위인데 총비용은 B가 싸다"는 설명이 성립한다.
+    """
+    return sum(monthly_fee_schedule(row, months))
 
 
 def _carrier_label(row: dict) -> str:
@@ -40,6 +51,8 @@ def _carrier_label(row: dict) -> str:
 
 
 def _price_note(row: dict) -> str:
+    if row.get('billing_price_known') is False:
+        return '페이백 반영 표시가 · 실제 청구액 확인 필요'
     period = row.get("discount_period_months")
     if row["discounted_fee"] >= row["monthly_fee"]:
         return "프로모션 없음 · 정가 동일"
@@ -50,10 +63,10 @@ def _price_note(row: dict) -> str:
 def _data_label(row: dict) -> str:
     """화면용 데이터 표기. row["data"] 는 QoS 를 문장에 섞어 두는데(프롬프트용),
     화면에는 qos 칸이 따로 있어 그대로 쓰면 소진 후 속도가 두 번 나온다."""
-    if row["data_unlimited"]:
+    if row.get("data_unlimited"):
         return "무제한"
     gb = row.get("data_gb")
-    return f"{gb:g}GB" if gb is not None else row["data"]
+    return f"{gb:g}GB" if gb is not None else str(row.get("data") or "확인 필요")
 
 
 def _qos_label(row: dict) -> str:
@@ -105,6 +118,84 @@ def _benefit_text(row: dict, matched_benefits: list[str] | None = None) -> str:
     return " · ".join(ordered[:3]) if ordered else "부가 혜택 없음"
 
 
+def _known_total(row: dict, months: int) -> int | None:
+    """청구액이 확인된 행만 총비용을 만든다. 페이백 반영 표시가는 합산하지 않는다."""
+    if row.get("billing_price_known") is False or row.get("discounted_fee") is None:
+        return None
+    return total_cost(row, months)
+
+
+def reference_delta(reference: dict | None, row: dict, months: int = COMPARE_MONTHS) -> dict | None:
+    """현재 쓰는 요금제와 후보 하나의 차이. 상품명을 몰라도 계산한다.
+
+    reference 는 카탈로그에서 찾은 행일 수도 있고, 사용자가 말한 월 납부액·데이터량만
+    담긴 dict 일 수도 있다(agent.agents.recommend._reference_from_profile). 둘 다
+    `discounted_fee` 하나만 있으면 비용 비교가 성립한다.
+
+    지키는 규칙 세 가지.
+    1. 모르는 값을 0으로 계산하지 않는다. 현재 납부액을 모르면 비용 차이는 None 이다.
+    2. 위약금·결합할인 손실은 수집 데이터에 없다. 그래서 여기 나오는 차이는 '확정
+       절약액'이 아니라 '요금만 비교한 차이'다 - `unknowns` 로 무엇이 빠졌는지 밝힌다.
+    3. 현재 청구액은 비교 구간 내내 유지된다고 가정한다(사용자의 현재 할인 종료 시점을
+       모른다). 가정은 `assumption` 으로 함께 내려보내 화면이 그대로 쓰게 한다.
+    """
+    if not reference:
+        return None
+    current_fee = reference.get("discounted_fee")
+    candidate_fee = row.get("discounted_fee")
+    current_schedule = monthly_fee_schedule(reference, months) if current_fee is not None else None
+    candidate_schedule = monthly_fee_schedule(row, months) if row.get("billing_price_known") is not False else None
+
+    current_total = _known_total(reference, months)
+    candidate_total = _known_total(row, months)
+    both_known = current_total is not None and candidate_total is not None
+
+    period = row.get("discount_period_months")
+    is_promo = candidate_fee is not None and row.get("monthly_fee") is not None and candidate_fee < row["monthly_fee"]
+
+    current_gb = None if reference.get("data_unlimited") else reference.get("data_gb")
+    candidate_gb = None if row.get("data_unlimited") else row.get("data_gb")
+    data_diff = (candidate_gb - current_gb) if (current_gb is not None and candidate_gb is not None) else None
+
+    unknowns = ["해지 위약금", "결합·가족할인 손실", "현재 요금제의 할인 종료 시점"]
+    if current_fee is None:
+        unknowns.insert(0, "현재 월 납부액")
+    if candidate_schedule is None:
+        unknowns.insert(0, "후보의 실제 청구액")
+    if is_promo and period is None:
+        unknowns.append("후보의 할인 제공 기간")
+
+    return {
+        "months": months,
+        "currentMonthlyFee": current_fee,
+        "candidateMonthlyFee": candidate_fee,
+        "monthlyDiff": (candidate_fee - current_fee) if (current_fee is not None and candidate_schedule) else None,
+        "currentTotal": current_total,
+        "candidateTotal": candidate_total,
+        "totalDiff": (candidate_total - current_total) if both_known else None,
+        # 할인이 끝나는 달과 그 다음 달 요금. 할인이 없으면 둘 다 None 이다.
+        "discountEndsAfterMonths": int(period) if (is_promo and period is not None) else None,
+        "feeAfterDiscount": int(row["monthly_fee"]) if is_promo else None,
+        "currentData": _data_label(reference),
+        "candidateData": _data_label(row),
+        "dataDiffGb": data_diff,
+        "currentQos": _qos_label(reference),
+        "candidateQos": _qos_label(row),
+        # 월별 요금 변화 그래프용. 값이 없는 쪽은 None 으로 두고 선을 그리지 않는다.
+        "schedule": [
+            {
+                "month": index + 1,
+                "current": current_schedule[index] if current_schedule else None,
+                "candidate": candidate_schedule[index] if candidate_schedule else None,
+            }
+            for index in range(months)
+        ],
+        "unknowns": unknowns,
+        "assumption": f"현재 월 납부액이 {months}개월 동안 그대로 유지된다고 가정한 비교입니다. "
+                      "위약금과 결합할인 손실은 수집 데이터에 없어 반영하지 않았습니다.",
+    }
+
+
 def to_plan_item(
     row: dict,
     rank: int = 0,
@@ -115,6 +206,7 @@ def to_plan_item(
     criteria_fit: dict | None = None,
     expected_rank: float | None = None,
     first_rank_acceptability: float | None = None,
+    reference: dict | None = None,
 ) -> dict:
     total = total_cost(row)
     period = row.get("discount_period_months")
@@ -126,9 +218,9 @@ def to_plan_item(
     # 실부담이 실제보다 싸게 보이고, 알뜰폰＋별도 구독 조합과의 비교도 무너진다.
     # benefit_value_won 은 조건을 확인해야 하는 참고값으로 표시만 한다.
     #
-    # 페이백이 요금보다 큰 상품이 실제로 있다(월 7,000원 요금에 월 34,000원 페이백).
-    # 그대로 빼면 "실부담 -258,000원"이 되므로 0 원에서 끊고 별도 플래그로 알린다.
-    deductible = int(row.get("benefit_deductible_won") or 0)
+    # 페이백 반영 표시가에서는 다시 차감하지 않는다. 확인된 가격만 차감 참고값을 만든다.
+    billing_known = row.get('billing_price_known', True)
+    deductible = int(row.get("benefit_deductible_won") or 0) if billing_known else 0
     raw_effective = total - deductible * COMPARE_MONTHS
     effective_total = max(0, raw_effective)
     return {
@@ -144,6 +236,7 @@ def to_plan_item(
         "priceNum": row["discounted_fee"],
         "originalPrice": row["monthly_fee"],
         "priceNote": _price_note(row),
+        "billingPriceKnown": billing_known,
         "score": score,
         "reason": reason,
         "data": _data_label(row),
@@ -172,18 +265,20 @@ def to_plan_item(
         "expectedRank": expected_rank,
         "firstRankAcceptability": first_rank_acceptability,
         "rankingMonths": _PRICE_HORIZON_MONTHS,
-        "rankingAverageFee": round(_effective_monthly_fee(row)),
+        "rankingAverageFee": round(_effective_monthly_fee(row)) if billing_known else None,
         "costIsEstimate": bool(is_promo and period is None),
         "dataWarnings": (["로밍 속도 혼입이 의심되어 국내 QoS 값에서 제외했습니다. 원문 확인이 필요합니다."]
                          if row.get("qos_source_suspect") else []),
         "signupNotice": row.get("signup_notice", ""),
-        "total": f"{total:,}원",
-        "totalNum": total,
-        "effectiveTotalNum": effective_total,
-        "effectiveTotal": f"{effective_total:,}원",
+        "total": f"{total:,}원" if billing_known else '청구액 확인 필요',
+        "totalNum": total if billing_known else None,
+        "effectiveTotalNum": effective_total if billing_known else None,
+        "effectiveTotal": f"{effective_total:,}원" if billing_known else '계산 제외',
         # 혜택 금액이 요금을 넘어선 경우. 조건을 확인해야 한다는 신호로만 쓴다.
         "benefitExceedsFee": raw_effective < 0,
         "compareMonths": COMPARE_MONTHS,
+        # 현재 쓰는 요금제가 있을 때만 채운다. 상품명 없이 납부액만 알려준 경우도 포함한다.
+        "referenceDelta": reference_delta(reference, row),
         "promoMonths": int(period) if period else 0,
         "isPromo": is_promo,
         # 할인이 비교 구간 안에 끝나면 화면에 "N+1개월차부터 정가" 경고를 띄운다
@@ -201,15 +296,19 @@ def to_plan_item(
     }
 
 
-def to_plan_items(rows: list[dict], ranked: list[dict] | None = None) -> list[dict]:
-    """ranked(plan_id·score·reason 순서)에 맞춰 상세를 붙인다. ranked 없으면 목록 그대로."""
+def to_plan_items(rows: list[dict], ranked: list[dict] | None = None,
+                  reference: dict | None = None) -> list[dict]:
+    """ranked(plan_id·score·reason 순서)에 맞춰 상세를 붙인다. ranked 없으면 목록 그대로.
+
+    reference 가 있으면 각 항목에 현재 요금제 대비 변화(referenceDelta)를 함께 담는다.
+    """
     if not rows:
         return []
     cheapest = min(r["discounted_fee"] for r in rows)
     by_id = {r["plan_id"]: r for r in rows}
     if ranked is None:
         return [
-            to_plan_item(r, is_cheapest=r["discounted_fee"] == cheapest)
+            to_plan_item(r, is_cheapest=r["discounted_fee"] == cheapest, reference=reference)
             for r in rows
         ]
     items = []
@@ -228,6 +327,7 @@ def to_plan_items(rows: list[dict], ranked: list[dict] | None = None) -> list[di
                 criteria_fit=scored.get("criteria_fit", {}),
                 expected_rank=scored.get("expected_rank"),
                 first_rank_acceptability=scored.get("first_rank_acceptability"),
+                reference=reference,
             )
         )
     return items
@@ -318,10 +418,11 @@ SORTS = {
     "fee_asc": (lambda r: r["discounted_fee"], False),
     "fee_desc": (lambda r: r["discounted_fee"], True),
     "data_desc": (lambda r: (r["data_unlimited"], r.get("data_gb") or 0), True),
-    "total_asc": (lambda r: total_cost(r), False),
+    "total_asc": (lambda r: total_cost(r) if r.get('billing_price_known', True) else float('inf'), False),
     # 조건 없는 현금성 혜택만 뺀 실부담. 구독형·조건부 혜택은 빼지 않는다.
     "effective_asc": (
-        lambda r: total_cost(r) - int(r.get("benefit_deductible_won") or 0) * COMPARE_MONTHS,
+        lambda r: total_cost(r) - int(r.get("benefit_deductible_won") or 0) * COMPARE_MONTHS
+        if r.get('billing_price_known', True) else float('inf'),
         False,
     ),
     "qos_desc": (lambda r: r.get("qos_mbps") or 0, True),
@@ -379,7 +480,8 @@ if __name__ == "__main__":
     assert _tethering_label({"tethering_gb": 10.0}) == "10GB"
 
     # 차감 가능한 현금성 혜택이 있으면 실부담이 요금 합계보다 작다
-    deductible_row = next(r for r in rows if r.get("benefit_deductible_won"))
+    deductible_row = next(r for r in rows if r.get("benefit_deductible_won")
+                          and r.get('billing_price_known') and r['discounted_fee'] > 0)
     item_valued = to_plan_item(deductible_row)
     assert item_valued["effectiveTotalNum"] < item_valued["totalNum"]
     assert item_valued["benefitDeductible"] > 0
@@ -392,8 +494,8 @@ if __name__ == "__main__":
     assert item_sub["effectiveTotalNum"] == item_sub["totalNum"], item_sub["name"]
     assert item_sub["benefitValue"] > 0
 
-    # 실부담은 음수가 되지 않는다 (월 7,000원 요금에 월 34,000원 페이백인 상품이 실재한다)
-    assert all(to_plan_item(r)["effectiveTotalNum"] >= 0 for r in rows)
+    # 확인된 가격의 차감 참고값은 음수가 되지 않는다. 미확인 비용은 None이다.
+    assert all(to_plan_item(r)["effectiveTotalNum"] >= 0 for r in rows if r['billing_price_known'])
     generous = to_plan_item({**deductible_row, "benefit_deductible_won": 10**7})
     assert generous["effectiveTotalNum"] == 0 and generous["benefitExceedsFee"] is True
 

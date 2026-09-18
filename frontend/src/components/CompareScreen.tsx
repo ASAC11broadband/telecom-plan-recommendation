@@ -18,7 +18,7 @@ export function CompareScreen({ plans, onRemove, onNavigate }: {
     </div> : <>
       <div className="saved-plans">{plans.map(plan => <div className="card saved-plan" key={plan.id}>
         <span className="tag tag-muted">{plan.carrier}</span><strong>{plan.name}</strong>
-        <p>월 {plan.price}원 · {plan.data}</p>
+        <p>{plan.billingPriceKnown ? '월' : '페이백 반영 표시가'} {plan.price}원 · {plan.data}</p>
         <button className="btn btn-sm" onClick={() => onRemove(plan)} aria-label={`${plan.name} 비교함에서 삭제`}>삭제</button>
       </div>)}</div>
       {plans.length === 1 && <p className="notice">요금제를 하나 더 담으면 나란히 비교할 수 있습니다.</p>}

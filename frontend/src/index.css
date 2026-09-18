@@ -440,3 +440,17 @@ input[type=number]{font:inherit;padding:8px 10px;border:1px solid var(--border-s
 @media(max-width:800px){.split{flex-direction:column;}.conversation{width:100%;position:static;}.service-steps{grid-template-columns:1fr 1fr;}.catalog-layout .filter-panel{width:100%;}.catalog-layout>div:last-child{width:100%;}.row-between{flex-wrap:wrap;gap:10px;}.cond-bar{flex-wrap:wrap;}}
 
 .catalog-layout table{min-width:1000px;}
+
+/* 월별 청구액 변화(ReportScreen). 값이 12개뿐이라 차트 라이브러리 대신 CSS 막대를 쓴다. */
+.fee-chart{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:6px;height:132px;margin:16px 0 6px;align-items:end;}
+.fee-chart-col{display:flex;flex-direction:column;height:100%;gap:4px;}
+.fee-chart-bars{flex:1;display:flex;align-items:flex-end;justify-content:center;gap:2px;}
+.fee-chart-bars>span{width:8px;border-radius:2px 2px 0 0;min-height:2px;}
+.fee-chart-bars>.cur{background:var(--border-strong);}
+.fee-chart-bars>.cand{background:var(--accent);}
+.fee-chart-col>em{font-style:normal;font-size:10px;color:var(--t3);text-align:center;font-variant-numeric:tabular-nums;}
+.chart-legend{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:var(--fs-11);color:var(--t2);}
+.chart-legend .swatch{width:10px;height:10px;border-radius:2px;display:inline-block;}
+.chart-legend .swatch.cur{background:var(--border-strong);}
+.chart-legend .swatch.cand{background:var(--accent);}
+.pref-switch{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 6px;}

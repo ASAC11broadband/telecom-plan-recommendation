@@ -40,7 +40,9 @@ const GROUPS: { group: keyof BrowseFilters; label: string; options: [string, str
       ['3to10', '3~10GB 미만'],
       ['10to20', '10~20GB 미만'],
       ['gte20', '20GB 이상'],
-      ['unlimited', '무제한'],
+      // 아래 '다 쓴 뒤에는' 그룹과 같은 말을 쓴다. 그냥 '무제한'이라고 두면 AI 추천이 말하는
+      // '무제한'(기본량 무제한 + 대용량·속도 유지 상품)과 같은 단어인데 건수가 달라 보인다.
+      ['unlimited', '기본량 무제한'],
     ],
   },
   {
@@ -170,7 +172,7 @@ export function BrowseScreen({
             {counted < stats.total && <small>정보 미확인 {(stats.total - counted).toLocaleString()}개</small>}
           </div>;
         })}</div>
-        <p className="comparison-note">필터 적용 전 전체 수집 상품 기준이며, 가입 조건·옵션별 상품을 포함합니다. 이용자 수나 시장점유율이 아닙니다. 막대를 누르면 아래 목록에 필터가 적용됩니다.</p>
+        <p className="comparison-note">필터 적용 전 수집 상품 기준이며 가입 조건·옵션별 상품을 포함합니다. 요금 분포에는 페이백 반영 표시가도 포함됩니다. 청구액 미확인 상품은 AI 추천과 총비용 계산에서 제외합니다. 이용자 수나 시장점유율이 아닙니다. 막대를 누르면 목록에 필터가 적용됩니다.</p>
       </section>}
       <div className="split catalog-layout">
       <div className="card filter-panel">
@@ -316,6 +318,7 @@ export function BrowseScreen({
                       <td>{plan.carrier}</td>
                       <td className="num">
                         {plan.price}원
+                        {!plan.billingPriceKnown && <span className="promo-flag">페이백 반영 · 청구액 미확인</span>}
                         {plan.isPromo && <span className="promo-flag">프로모션</span>}
                       </td>
                       <td className="num">{plan.data}</td>
