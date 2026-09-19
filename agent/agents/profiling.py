@@ -79,7 +79,11 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - LG유플러스/LG U+는 LGU+로 정규화한다.
 - 특정 알뜰폰 브랜드는 mvno_brand에 저장한다.
   KT엠모바일 → carrier_type=MVNO, host_mno=KT, mvno_brand=KT엠모바일
-- LTE/5G는 network_gen에 저장한다.
+- LTE/5G만 보겠다는 조건은 network_gen에 저장한다.
+- LTE/5G를 우선하거나 선호한다고 했고 다른 세대도 가능하면 network_preference에 저장하고,
+  network_gen은 null로 둔다. 우선은 순위 조정일 뿐 다른 세대를 후보에서 빼지 않는다.
+- "통신 세대 우선순위는 LTE/5G로 하고, 다른 세대도 후보에 포함" 같은 화면 선택 문장은
+  network_preference로 확정한다.
 
 [연령·혜택]
 - 청년/청소년/키즈/시니어·어르신/군인·현역병사를 각각
@@ -847,6 +851,26 @@ def _apply_soft_data_preference(profile: UserProfile, query: str) -> UserProfile
     return profile.model_copy(update={"priorities": [*priorities, "data"]})
 
 
+# 결과 화면의 선택 문장은 LLM이 LTE/5G를 필수 조건으로 오해하지 않도록 코드로 확정한다.
+_NETWORK_PREFERENCE_RE = re.compile(
+    r"통신\s*세대\s*우선순위\s*(?:는|:)?\s*(LTE|5G|상관\s*없음)", re.IGNORECASE
+)
+
+
+def _apply_network_preference(profile: UserProfile, query: str) -> UserProfile:
+    """마지막 세대 우선순위 선택만 순위 선호로 반영한다. 필터와 섞지 않는다."""
+    choices = list(_NETWORK_PREFERENCE_RE.finditer(query or ""))
+    if not choices:
+        return profile
+    choice = choices[-1].group(1).replace(" ", "").upper()
+    return profile.model_copy(
+        update={
+            "network_preference": None if choice == "상관없음" else choice,
+            "network_gen": None,
+        }
+    )
+
+
 # 구조화 출력을 사용자 발화로 되짚어 고치는 보정들. 순서대로 적용한다.
 # 프롬프트 지시만으로는 같은 오추출이 계속 재발해서 코드로 못 박는 자리다.
 _REPAIRS = (
@@ -862,6 +886,8 @@ _REPAIRS = (
     _repair_latest_unlimited_strictness,
     # _drop_inferred_priorities 다음에 와야 한다. 앞에 두면 방금 넣은 data 가 지워진다.
     _apply_soft_data_preference,
+    # 화면에서 고른 세대 우선은 hard filter가 아니다.
+    _apply_network_preference,
     _apply_user_age,
     _apply_explicit_qos_requirement,
     _apply_benefit_preference_question,
@@ -1089,6 +1115,19 @@ if __name__ == "__main__":
     # 보정 순서: 정렬 요구 제거가 먼저, 데이터 희망 반영이 나중
     order = list(_REPAIRS)
     assert order.index(_drop_inferred_priorities) < order.index(_apply_soft_data_preference)
+
+    # 결과 화면의 LTE/5G 우선은 후보 필터가 아니다. 마지막 선택이 앞선 선택을 덮는다.
+    preferred = _apply_network_preference(
+        UserProfile(network_gen="5G"),
+        "통신 세대 우선순위는 LTE로 하고, 5G도 후보에 포함해줘.",
+    )
+    assert preferred.network_preference == "LTE" and preferred.network_gen is None, preferred
+    cleared = _apply_network_preference(
+        UserProfile(network_preference="LTE"),
+        "통신 세대 우선순위는 LTE로 하고, 5G도 후보에 포함해줘.\n"
+        "통신 세대 우선순위는 상관없음으로 하고, LTE와 5G를 동등하게 비교해줘.",
+    )
+    assert cleared.network_preference is None and cleared.network_gen is None, cleared
 
     # 예산 문장은 정렬 요구가 아니다 (priorities 가 붙으면 가중치가 한 축으로 쏠린다)
     assert _drop_inferred_priorities(UserProfile(priorities=["price"]), "월 3만원 이하로 추천해주세요").priorities is None

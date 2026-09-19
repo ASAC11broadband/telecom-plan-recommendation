@@ -70,6 +70,10 @@ class UserProfile(BaseModel):
         description="특정 알뜰폰 브랜드명(예: KT엠모바일). 언급 없으면 null",
     )
     network_gen: Optional[Literal["LTE", "5G"]] = Field(None, description="LTE 또는 5G. 언급 없으면 null")
+    network_preference: Optional[Literal["LTE", "5G"]] = Field(
+        None,
+        description="LTE 또는 5G를 순위에서 우선한다. 다른 세대 후보는 제외하지 않는다.",
+    )
     age_condition: Optional[str] = Field(
         None,
         description="가입 대상 조건의 DB 표준값(예: 만 34세 이하, 만 65세 이상, 현역병사). 언급 없으면 null",
@@ -188,6 +192,12 @@ class ScoredPlan(BaseModel):
     )
     expected_rank: Optional[float] = None
     first_rank_acceptability: Optional[float] = None
+    recommendation_fit: Optional[float] = Field(
+        None, description="현재 조건에 대한 다기준 적합도(0~100). 만족 확률이 아니다"
+    )
+    top3_acceptability: Optional[float] = Field(
+        None, description="가중치 300세트 중 상위 3위 안에 든 비율(0~1)"
+    )
 
 
 class RankingResult(BaseModel):

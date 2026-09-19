@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Blocker, ChatMessage, HistoryRow, PlanItem, Profile, RecommendResponse, ScreenType } from '../types';
 import { Conversation } from './Conversation';
 import { ConditionKind, dataCondition } from '../profileText';
@@ -36,6 +35,15 @@ function conditionCells(result: RecommendResponse) {
       kind: (p.budget_max_won ? '요청' : '') as ConditionKind,
     },
     {
+      k: '통신 세대',
+      value: p.network_gen
+        ? `${p.network_gen}만`
+        : p.network_preference
+          ? `${p.network_preference} 우선 · 두 세대 포함`
+          : 'LTE · 5G 함께 비교',
+      kind: (p.network_gen || p.network_preference ? '요청' : '기본') as ConditionKind,
+    },
+    {
       k: '가입 자격',
       value: p.age_condition || (p.user_age ? `만 ${p.user_age}세 기준` : '전용 상품 제외'),
       kind: (p.age_condition || p.user_age ? '요청' : '기본') as ConditionKind,
@@ -59,6 +67,44 @@ function varyingCriteria(plans: PlanItem[]): string[] {
     const values = plans.map((p) => p.criteriaFit[key]).filter((v) => v !== undefined);
     return values.length > 0 && Math.max(...values) - Math.min(...values) > 0.01;
   });
+}
+
+/** 상위권 안정성(top3Acceptability, 0~1)을 화면 문구로 바꾼다.
+ *
+ *  임계값은 실제 후보 데이터(agent.mcda 부트스트랩 300세트)로 확인했다. 2~3순위는
+ *  top3Acceptability 가 0 에 가까워도(=한 번도 상위 3위에 못 든 시나리오) 다양성 선정
+ *  때문에 카드에 오르는 경우가 흔해서, '낮음'을 실패처럼 보이지 않게 문구로만 표현한다.
+ */
+function stabilityTier(top3: number | null): { label: string; tone: string } {
+  if (top3 === null) return { label: '확인 필요', tone: 'tag-muted' };
+  if (top3 >= 0.66) return { label: '높음', tone: 'tag-green' };
+  if (top3 >= 0.33) return { label: '보통', tone: 'tag-muted' };
+  return { label: '조건에 따라 변동 가능', tone: 'tag-amber' };
+}
+
+/** 카드 상단의 추천 근거 요약. 적합도는 종합 지표, 안정성은 가중치를 달리해도 상위권을
+ *  유지하는지를 보여준다 — 둘 다 아래 '항목별 비교 점수' 막대(축별 충족도)와는 다른 값이다. */
+function FitSummary({ plan }: { plan: PlanItem }) {
+  const stability = stabilityTier(plan.top3Acceptability);
+  const isLowStability = plan.top3Acceptability !== null && plan.top3Acceptability < 0.33;
+  return (
+    <div className="fit-summary">
+      <div className="fit-summary-row">
+        {plan.recommendationFit !== null && (
+          <span className="fit-badge">
+            추천 적합도 <b className="num">{Math.round(plan.recommendationFit)}</b>점
+          </span>
+        )}
+        <span className={`tag ${stability.tone}`}>상위권 안정성 {stability.label}</span>
+      </div>
+      {isLowStability && (
+        <p className="fit-summary-note">
+          조건에 따라 순위 변동 가능 — 가격·데이터·속도 중 무엇을 우선하는지에 따라 순위가 바뀔 수
+          있어요. <a href="#ranking-controls" className="linklike">우선순위 조정하기</a>
+        </p>
+      )}
+    </div>
+  );
 }
 
 /** 총점 대신 축별 충족도를 보여준다. 후보가 2천 건이면 총점은 상위권이 전부 100 으로 포화한다. */
@@ -92,48 +138,6 @@ function PromoNote({ plan }: { plan: PlanItem }) {
     <div className="promo-note">
       {after} 월 {plan.originalPrice.toLocaleString()}원
       {plan.priceRisesAfter ? ' (비교 구간 안에서 인상)' : ''}
-    </div>
-  );
-}
-
-function FollowupNotice({
-  question,
-  onAnswer,
-  blocking,
-}: {
-  question: string;
-  onAnswer: (text: string) => void;
-  blocking: boolean;
-}) {
-  const [answer, setAnswer] = useState('');
-  return (
-    <div className="notice" style={{ alignItems: 'flex-start', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span className="tag tag-amber" style={{ background: '#fff' }}>
-          {blocking ? '추가 정보 필요' : '확인 질문'}
-        </span>
-        <span className="txt">{question}</span>
-      </div>
-      <form
-        style={{ display: 'flex', gap: 8, width: '100%' }}
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!answer.trim()) return;
-          onAnswer(answer.trim());
-          setAnswer('');
-        }}
-      >
-        <input
-          type="text"
-          value={answer}
-          onChange={(e) => setAnswer(e.target.value)}
-          placeholder={blocking ? '예: 20GB 정도 / 3만원 이하' : '답변을 입력하면 순위를 다시 매깁니다'}
-          autoFocus={blocking}
-        />
-        <button className="btn btn-primary" type="submit" disabled={!answer.trim()}>
-          전송
-        </button>
-      </form>
     </div>
   );
 }
@@ -274,13 +278,13 @@ function PreferenceSwitch({ profile, loading, onFollowup }: {
   const current = (profile?.priorities ?? []).filter((key) => PRIORITY_CHOICES.some((c) => c.key === key));
   const kept = keptConditions(profile);
   return (
-    <section className="card result-overview">
-      <h3>무엇을 더 중요하게 볼까요</h3>
-      <p>
-        {current.length
-          ? `지금 순위는 ${current.map((key) => PRIORITY_CHOICES.find((c) => c.key === key)?.label ?? key).join(' → ')} 기준입니다.`
-          : '지금은 특정 축을 우선하지 않고 전체를 함께 보고 있습니다.'}
-      </p>
+    <div className="ranking-control-row">
+      <div className="ranking-control-copy">
+        <strong>무엇을 더 중요하게 볼까요?</strong>
+        <p>{current.length
+          ? `${current.map((key) => PRIORITY_CHOICES.find((c) => c.key === key)?.label ?? key).join(' → ')} 기준으로 순위를 계산 중입니다.`
+          : '가격·데이터·속도·혜택을 함께 반영하고 있습니다.'}</p>
+      </div>
       <fieldset disabled={loading} className="plain-fieldset">
         <div className="pref-switch">
           {PRIORITY_CHOICES.map((choice) => (
@@ -297,13 +301,51 @@ function PreferenceSwitch({ profile, loading, onFollowup }: {
           ))}
         </div>
       </fieldset>
-      <p className="comparison-note">
-        {kept.length
-          ? `필수 조건(${kept.join(', ')})은 그대로 두고 순위만 다시 계산합니다.`
-          : '필수 조건은 그대로 두고 순위만 다시 계산합니다.'}{' '}
-        대화 내용과 비교함은 유지됩니다.
-      </p>
-    </section>
+      <span className="ranking-control-note">{kept.length ? '필수 조건은 유지됩니다.' : '선택은 순위에만 반영됩니다.'}</span>
+    </div>
+  );
+}
+
+const NETWORK_PREFERENCE_CHOICES = [
+  { key: '', label: '상관없음' },
+  { key: 'LTE', label: 'LTE 우선' },
+  { key: '5G', label: '5G 우선' },
+];
+
+function NetworkPreferenceSwitch({ profile, loading, onFollowup }: {
+  profile: Profile | null; loading: boolean; onFollowup: (text: string) => void;
+}) {
+  if (profile?.network_gen) return null;
+  const current = profile?.network_preference ?? '';
+  const kept = keptConditions(profile);
+  const sentence = (generation: string) => generation
+    ? `통신 세대 우선순위는 ${generation}로 하고, ${generation === 'LTE' ? '5G' : 'LTE'}도 후보에 포함해줘.`
+    : '통신 세대 우선순위는 상관없음으로 하고, LTE와 5G를 동등하게 비교해줘.';
+
+  return (
+    <div className="ranking-control-row network-control-row">
+      <div className="ranking-control-copy">
+        <strong>통신 세대</strong>
+        <p>{current ? `${current}를 우선하지만 반대 세대도 후보에 남겨둡니다.` : 'LTE와 5G를 함께 비교합니다.'}</p>
+      </div>
+      <fieldset disabled={loading} className="plain-fieldset">
+        <div className="pref-switch">
+          {NETWORK_PREFERENCE_CHOICES.map((choice) => (
+            <button
+              key={choice.key || 'any'}
+              className={`btn btn-sm${current === choice.key ? ' btn-primary' : ''}`}
+              aria-pressed={current === choice.key}
+              onClick={() => onFollowup(
+                `${kept.length ? `${kept.join(', ')} 조건은 그대로 두고, ` : ''}${sentence(choice.key)}`
+              )}
+            >
+              {choice.label}
+            </button>
+          ))}
+        </div>
+      </fieldset>
+      <span className="ranking-control-note">한 세대만 보려면 조건 수정에서 선택하세요.</span>
+    </div>
   );
 }
 
@@ -332,24 +374,30 @@ export function ResultScreen({
   onReport: (planId: string) => void;
   onNavigate: (s: ScreenType) => void;
 }) {
-  if (!result) return <div className="body split">
-    <div className="card empty-state" style={{ flex: 1 }}><h2>{loading ? '나에게 맞는 요금제를 찾고 있어요' : '추천을 시작해보세요'}</h2>
-      <p>대화는 오른쪽에서 계속 확인할 수 있습니다. 추천 결과가 나오면 요금과 제공량을 한눈에 비교하세요.</p>
-      {!loading && <button className="btn" onClick={() => onNavigate('s-input')}>조건 입력하기</button>}
-    </div>
-    <Conversation messages={messages} loading={loading} error={error} onSubmit={onFollowup} />
-  </div>;
+  if (!result) return <main className="body">
+    <section className="card empty-state"><h2>{loading ? '조건을 확인하고 있어요' : '추천을 시작해보세요'}</h2>
+      <p>예산이나 데이터 사용량 하나만 알려주면 맞는 요금제를 찾아드릴게요.</p>
+      {!loading && <button className="btn btn-primary" onClick={() => onNavigate('s-input')}>조건 입력하기</button>}
+    </section>
+  </main>;
+
+  if (result.needsMoreInput) return <main className="body">
+    <section className="card empty-state">
+      <span className="tag tag-amber">추가 정보 필요</span>
+      <h2>추천 전에 한 가지만 더 알려주세요.</h2>
+      <p>{result.followupQuestion || '월 데이터 사용량이나 희망 예산을 알려주세요.'}</p>
+      <button className="btn btn-primary" onClick={() => onNavigate('s-input')}>입력으로 돌아가기</button>
+    </section>
+  </main>;
 
   const isUpdate = prevPlans.length > 0 && !result.needsMoreInput;
   const latest = history[0];
   const fitKeys = varyingCriteria(result.plans);
-  const prices = result.plans.map(plan => plan.priceNum);
   const cheapest = result.plans.filter(p => p.totalNum !== null).reduce<PlanItem | null>((best, plan) => !best || plan.totalNum! < best.totalNum! ? plan : best, null);
 
   return (
-    <div className="body split">
-      <div style={{ flex: 1 }}>
-        <div className="row-between" style={{ marginBottom: 14 }}>
+    <main className="body result-page">
+        <div className="row-between result-header">
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <h2 style={{ fontSize: 'var(--fs-20)', fontWeight: 700 }}>추천 결과</h2>
@@ -370,6 +418,8 @@ export function ResultScreen({
           </div>
         </div>
 
+        <div className="split result-split">
+        <div className="result-main">
         {(loading || error) && <div className="notice" role="status">{loading ? '새 조건으로 다시 추천 중입니다.' : '새 조건의 추천을 완료하지 못했습니다.'} 아래는 이전 조건의 결과입니다.</div>}
         {result.plans.length > 0 && result.evaluation && !result.evaluation.passed && (
           <div className="notice" role="alert">설명 검증을 통과하지 못한 잠정 결과입니다. 요금·조건은 원문에서 확인해 주세요. </div>
@@ -397,70 +447,22 @@ export function ResultScreen({
             </ul>
           </section>
         )}
-        {result.plans.length > 0 && <section className="card result-overview">
-          <h3>이번 추천 한눈에 보기</h3>
-          <p>월 요금 {Math.min(...prices).toLocaleString()}~{Math.max(...prices).toLocaleString()}원 · 추천 {result.plans.length}개</p>
-          {cheapest && <p>추천 후보 중 {cheapest.compareMonths}개월 총비용이 가장 낮은 상품은 <strong>{cheapest.name}</strong> ({cheapest.total})입니다.{cheapest.costIsEstimate ? ' 할인 기간 미확인으로 추정한 비용입니다.' : ''}</p>}
-          {result.plans[0].rankingMonths !== result.plans[0].compareMonths && <p className="comparison-note">추천 순위의 가격 평가는 {result.plans[0].rankingMonths}개월 평균요금, 아래 총비용 비교는 {result.plans[0].compareMonths}개월 기준입니다.</p>}
-          <p className="comparison-note">순위는 가격·데이터·혜택 등을 함께 고려한 상대 평가입니다. 만족 확률이나 가입 적합도 백분율이 아닙니다. 마음에 드는 상품은 비교함에 담아 직접 찾은 상품과 비교하세요.</p>
-        </section>}
-
-        {result.plans.length > 0 && (
-          <UnlimitedBasis result={result} loading={loading} onFollowup={onFollowup} />
-        )}
-
-        {result.plans.length > 0 && (
-          <PreferenceSwitch profile={result.profile} loading={loading} onFollowup={onFollowup} />
-        )}
-
-        {isUpdate && latest && (
-          <div className="notice">
-            <span className="tag tag-amber" style={{ background: '#fff' }}>
-              조건 변경
-            </span>
-            <span className="txt">
-              “{latest.change}” 조건으로 후보군을 재산정했습니다. {latest.before} → {latest.after} ·{' '}
-              {latest.result}
-            </span>
+        {result.plans.length > 0 && <section className="card result-summary">
+          <div>
+            <span className="tag tag-accent">추천 요약</span>
+            <strong>후보 {result.candidateCount.toLocaleString()}건에서 상위 {result.plans.length}개를 골랐어요.</strong>
+            <p>{result.profile?.network_gen
+              ? `${result.profile.network_gen} 요금제만 비교했습니다.`
+              : result.profile?.network_preference
+                ? `${result.profile.network_preference}를 우선하되 다른 세대도 함께 비교했습니다.`
+                : 'LTE와 5G를 함께 비교했습니다.'}</p>
           </div>
-        )}
-
-        {!loading && result.followupQuestion && (
-          <FollowupNotice question={result.followupQuestion} onAnswer={onFollowup} blocking={false} />
-        )}
-
-        {result.profile?.estimated_monthly_data_gb &&
-          result.profile.usage_estimate_notes &&
-          result.profile.usage_estimate_notes.length > 0 && (
-            <div className="notice" style={{ alignItems: 'flex-start', gap: 10 }}>
-              <span className="tag tag-green" style={{ background: '#fff', flexShrink: 0 }}>
-                사용량 추정
-              </span>
-              <div className="txt">
-                <strong>
-                  {result.profile.smartchoice_usage_pattern ? '추천 데이터 기준' : '월 예상 사용량'}{' '}
-                  {result.profile.estimated_monthly_data_gb.toLocaleString()}GB
-                </strong>
-                <div style={{ marginTop: 4, color: 'var(--t3)', lineHeight: 1.6 }}>
-                  {result.profile.usage_estimate_notes.map((note) => (
-                    <div key={note}>· {note}</div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-        <div className="card cond-bar">
-          {conditionCells(result).map(({ k, value, kind }) => (
-            <div className="cond-cell" key={k}>
-              <div className="k">
-                {k}
-                {kind && <span className={`kind ${kind === '추정' ? 'guess' : ''}`}>{kind}</span>}
-              </div>
-              <div className="v num">{value}</div>
-            </div>
-          ))}
-        </div>
+          {cheapest && <div className="summary-cost">
+            <span>{cheapest.compareMonths}개월 총비용이 가장 낮은 상품</span>
+            <strong>{cheapest.name}</strong>
+            <b className="num">{cheapest.total}</b>
+          </div>}
+        </section>}
 
         {result.plans.length === 0 ? (
           !result.needsMoreInput && <fieldset disabled={loading} className="plain-fieldset"><EmptyResult blockers={result.blockers} onFollowup={onFollowup} /></fieldset>
@@ -479,6 +481,47 @@ export function ResultScreen({
             ))}
           </div>
         )}
+
+        {result.plans.length > 0 && <>
+          {isUpdate && latest && (
+            <div className="notice">
+              <span className="tag tag-amber" style={{ background: '#fff' }}>조건 변경</span>
+              <span className="txt">“{latest.change}” 조건으로 후보군을 재산정했습니다. {latest.before} → {latest.after} · {latest.result}</span>
+            </div>
+          )}
+
+          <section className="card ranking-controls" id="ranking-controls">
+            <div className="ranking-controls-head">
+              <strong>추천 기준 조정</strong>
+              <span>후보는 유지하고 순위만 다시 계산합니다.</span>
+            </div>
+            <PreferenceSwitch profile={result.profile} loading={loading} onFollowup={onFollowup} />
+            <NetworkPreferenceSwitch profile={result.profile} loading={loading} onFollowup={onFollowup} />
+          </section>
+
+          <UnlimitedBasis result={result} loading={loading} onFollowup={onFollowup} />
+
+          <div className="card cond-bar">
+            {conditionCells(result).map(({ k, value, kind }) => (
+              <div className="cond-cell" key={k}>
+                <div className="k">{k}{kind && <span className={`kind ${kind === '추정' ? 'guess' : ''}`}>{kind}</span>}</div>
+                <div className="v num">{value}</div>
+              </div>
+            ))}
+          </div>
+
+          {result.profile?.estimated_monthly_data_gb && result.profile.usage_estimate_notes?.length ? (
+            <div className="notice" style={{ alignItems: 'flex-start', gap: 10 }}>
+              <span className="tag tag-green" style={{ background: '#fff', flexShrink: 0 }}>사용량 추정</span>
+              <div className="txt">
+                <strong>{result.profile.smartchoice_usage_pattern ? '추천 데이터 기준' : '월 예상 사용량'} {result.profile.estimated_monthly_data_gb.toLocaleString()}GB</strong>
+                <div style={{ marginTop: 4, color: 'var(--t3)', lineHeight: 1.6 }}>
+                  {result.profile.usage_estimate_notes.map((note) => <div key={note}>· {note}</div>)}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </>}
 
         {result.plans.length > 1 && <CompareTable plans={result.plans} />}
 
@@ -518,10 +561,10 @@ export function ResultScreen({
             </table>
           </div>
         )}
-      </div>
-
-      <Conversation messages={messages} loading={loading} error={error} onSubmit={onFollowup} />
-    </div>
+        </div>
+        <Conversation messages={messages} loading={loading} error={error} onSubmit={onFollowup} />
+        </div>
+    </main>
   );
 }
 
@@ -548,6 +591,7 @@ function PlanCard({
             <span className={`tag ${plan.best ? 'tag-accent' : 'tag-muted'}`}>{plan.rank}순위</span>
             {plan.best && !delta && <span className="tag tag-green">종합 추천</span>}
             {delta?.changed && <span className="tag tag-amber">갱신</span>}
+            {plan.networkGen && <span className="tag tag-muted">{plan.networkGen}</span>}
           </div>
           <span className={`tier-chip tier-${plan.dataTier}`}>{plan.dataTierLabel}</span>
         </div>
@@ -555,6 +599,8 @@ function PlanCard({
         <div className="plan-name">{plan.name}</div>
         <div className="plan-carrier">{plan.carrier}</div>
       </div>
+
+      <FitSummary plan={plan} />
 
       <div className="price-block">
         <div className="line">
@@ -587,7 +633,9 @@ function PlanCard({
       </div>
 
       <details className="score-details"><summary>항목별 비교 점수</summary>
-        <p>후보 비교를 위한 항목별 효용값을 0~100으로 표시합니다. 충족률이나 만족 확률이 아니며, 점수가 높은 항목을 더 유리하게 평가합니다.</p>
+        <p>후보 비교를 위한 항목별 효용값을 0~100으로 표시합니다. 충족률이나 만족 확률이 아니며, 점수가 높은 항목을 더 유리하게 평가합니다.
+        위 추천 적합도가 이 축들을 가중 평균한 종합 지표라면, 아래 막대는 가격·데이터 등 축별 점수이고, 상위권 안정성은 가중치를 달리한 300개
+        시나리오에서도 이 순위가 자주 유지되는지를 보여줍니다 — 셋 다 뜻이 다릅니다.</p>
         <FitBars fit={plan.criteriaFit} keys={fitKeys} />
       </details>
 

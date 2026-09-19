@@ -56,6 +56,8 @@ export function describeProfile(p: Profile | null | undefined): Condition[] {
     .filter(Boolean)
     .join(' · ');
   if (carrier) rows.push({ k: '사업자', value: carrier, kind: '요청' });
+  if (p.network_preference)
+    rows.push({ k: '통신 세대 우선', value: `${p.network_preference} 우선 · 다른 세대도 포함`, kind: '요청' });
 
   const benefits = [...(p.wanted_benefits ?? []), ...(p.wanted_benefit_categories ?? [])];
   if (benefits.length > 0) {

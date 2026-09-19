@@ -319,7 +319,19 @@ def _offer_character(plan: dict) -> tuple:
     return (str(plan.get("carrier")), _data_band(plan), str(plan.get("data_tier")))
 
 
-def _diverse_selection(ordered: list, by_id: dict[str, dict], limit: int = 3) -> list:
+def _prefer_network_generation(ordered: list, by_id: dict[str, dict], preference: str | None) -> list:
+    """세대 우선은 결과 순서만 바꾼다. 반대 세대 후보를 없애지 않는다."""
+    if preference not in ("LTE", "5G"):
+        return ordered
+    matching = [decision for decision in ordered if by_id[decision.plan_id].get("network_gen") == preference]
+    return matching + [decision for decision in ordered if by_id[decision.plan_id].get("network_gen") != preference]
+
+
+# 화면에 내보내는 추천 개수. 여기 한 곳만 바꾸면 선정·테스트가 모두 따라온다.
+TOP_N = 3
+
+
+def _diverse_selection(ordered: list, by_id: dict[str, dict], limit: int = TOP_N) -> list:
     """순위를 지키면서, 성격이 겹치는 상품이 자리를 나눠 먹지 않게 고른다.
 
     한 사업자의 비슷한 라인업이 상위를 채우던 문제를 막는다(실측: 3만원 이하 20GB 이상
@@ -352,8 +364,9 @@ def _diverse_selection(ordered: list, by_id: dict[str, dict], limit: int = 3) ->
         picked.append(decision)
         if len(picked) == limit:
             break
-    # 채우면서 순서가 흐트러졌으므로 기대순위로 되돌린다(평가가 순위 정합성을 본다).
-    return sorted(picked, key=lambda decision: decision.smaa2_expected_rank)
+    # 채우면서 순서가 흐트러졌으므로 최초 순위(세대 우선 포함)로 되돌린다.
+    position = {decision.plan_id: index for index, decision in enumerate(ordered)}
+    return sorted(picked, key=lambda decision: position[decision.plan_id])
 
 
 def _shortlist(
@@ -487,6 +500,9 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
         comparison_goals=profile.comparison_goals,
         profile=ranking_profile,
     )
+    ordered = _prefer_network_generation(
+        rank_smaa2(decisions), by_id, profile.network_preference
+    )
     ranked = [
         ScoredPlan(
             plan_id=decision.plan_id,
@@ -499,8 +515,10 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             criteria_fit=dict(zip(CRITERIA, (round(value, 3) for value in decision.utilities))),
             expected_rank=decision.smaa2_expected_rank,
             first_rank_acceptability=decision.smaa2_first_rank_acceptability,
+            recommendation_fit=round(decision.recommendation_fit, 1),
+            top3_acceptability=decision.top3_acceptability,
         )
-        for decision in _diverse_selection(rank_smaa2(decisions), by_id)
+        for decision in _diverse_selection(ordered, by_id)
     ]
 
     return {
@@ -533,3 +551,22 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             )
         ],
     }
+
+
+if __name__ == "__main__":
+    from types import SimpleNamespace
+
+    rows = {
+        "five": {"network_gen": "5G"},
+        "lte": {"network_gen": "LTE"},
+        "unknown": {},
+    }
+    ordered = [
+        SimpleNamespace(plan_id="five"),
+        SimpleNamespace(plan_id="unknown"),
+        SimpleNamespace(plan_id="lte"),
+    ]
+    preferred = _prefer_network_generation(ordered, rows, "LTE")
+    assert [decision.plan_id for decision in preferred] == ["lte", "five", "unknown"]
+    assert {decision.plan_id for decision in preferred} == {decision.plan_id for decision in ordered}
+    print("self-check ok: network preference keeps all candidates")

@@ -79,6 +79,11 @@ class MCDAResult:
     # 축별 효용(0~1). SMAA-2 계산에는 쓰지 않고 "왜 이 순위인지"를 화면에 보여주는 용도다.
     # 후보가 2천 건이면 smaa2_score 는 상위 3개가 전부 100 으로 포화해 변별력이 없다.
     utilities: tuple[float, ...] = ()
+    # 300개 가중치 시나리오에서 sum(weight*utility)의 평균을 0~100으로 환산한 값.
+    # "현재 조건에 대한 다기준 적합도"이지 만족 확률·가입 성공 확률·절대 품질 점수가 아니다.
+    recommendation_fit: float = 0.0
+    # 300개 가중치 시나리오 중 상위 3위 안에 든 비율. 화면에서는 "상위권 안정성"으로 부른다.
+    top3_acceptability: float = 0.0
 
 
 def _minmax(values: list[float], *, cost: bool = False) -> list[float]:
@@ -343,10 +348,13 @@ def evaluate_mcda(
     rank_counts = [[0] * n for _ in candidates]
     favorable_weight_sums = [[0.0] * len(CRITERIA) for _ in candidates]
     favorable_counts = [0] * n
+    fit_sums = [0.0] * n
 
     for weight in weights:
         totals = [sum(w * u for w, u in zip(weight, row)) for row in utilities]
         order = sorted(range(n), key=lambda i: (-totals[i], str(candidates[i]["plan_id"])))
+        for index, total in enumerate(totals):
+            fit_sums[index] += total
         for rank, index in enumerate(order):
             rank_counts[index][rank] += 1
             if rank < min(3, n):
@@ -358,6 +366,8 @@ def evaluate_mcda(
         sum((rank + 1) * count for rank, count in enumerate(row)) / samples
         for row in rank_counts
     ]
+    # 상위 3위 안에 든 비율. favorable_counts 는 이미 rank < 3 조건으로 집계돼 있다.
+    top3_acceptabilities = [count / samples for count in favorable_counts]
     return [
         MCDAResult(
             plan_id=plan_ids[i],
@@ -372,6 +382,8 @@ def evaluate_mcda(
                 for value in favorable_weight_sums[i]
             ),
             utilities=tuple(utilities[i]),
+            recommendation_fit=max(0.0, min(100.0, 100 * fit_sums[i] / samples)),
+            top3_acceptability=top3_acceptabilities[i],
         )
         for i, candidate in enumerate(candidates)
     ]
@@ -481,4 +493,14 @@ if __name__ == "__main__":
     no_target = [row[data_index] for row in _utility_rows(unlimited_ask, {"data_unlimited": True})]
     assert no_target[0] == no_target[2] < no_target[1], no_target
     assert len(evaluate_mcda(valued)[0].utilities) == len(CRITERIA)
+
+    # recommendation_fit/top3_acceptability: 0~100, 0~1 범위 안에 있고, 1위가 꼴찌보다 높아야 한다.
+    fit_check = evaluate_mcda(sample, ["price"])
+    for decision in fit_check:
+        assert 0.0 <= decision.recommendation_fit <= 100.0
+        assert 0.0 <= decision.top3_acceptability <= 1.0
+    ranked_fit_check = rank_smaa2(fit_check)
+    assert ranked_fit_check[0].recommendation_fit >= ranked_fit_check[-1].recommendation_fit
+    # 후보 2건이면 둘 다 항상 상위 3위 안이라 top3_acceptability는 1.0이어야 한다.
+    assert all(decision.top3_acceptability == 1.0 for decision in fit_check)
     print("self-check ok: SMAA-2 ranking (bootstrap weights)")

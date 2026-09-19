@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import threading
+from functools import lru_cache
 import unicodedata
 from pathlib import Path
 
@@ -25,6 +26,20 @@ BENEFITS_CSV = DATA_DIR / "통신요금제_혜택상세_최종.csv"
 # crawler/src/verify_payback_prices.py 가 만들고, 사람이 확인한 뒤 여기로 옮긴다.
 # 이 표에 있는 상품만 청구액이 확인된 것으로 보고 추천 계산에 넣는다.
 VERIFIED_BILLING_CSV = DATA_DIR / "페이백_청구액_검증.csv"
+
+# ── 산출과 적용의 분리 ────────────────────────────────────────
+# 서비스가 읽는 PLANS_CSV 는 **최신 수집본**이다(매 수집마다 상품이 들고 난다).
+# 반면 기준을 **유도**하는 계산 - 가중치, 무제한 문턱, 등급 임계값 - 은 데이터가
+# 바뀔 때마다 답이 흔들리면 안 된다. 그래서 유도는 아래 고정 분석본으로 한다.
+#
+#   기준 유도(재현되어야 함)  -> BASELINE_DIR   고정
+#   서비스 적용·현황 진단     -> PLANS_CSV      최신
+#
+# 가중치는 이미 weight_bootstrap.json 에 박제돼 있다(노트북 산출물). 이 상수는
+# 나머지 산출(분포·문턱 민감도)이 같은 원칙을 따르게 하는 자리다.
+BASELINE_DATE = "2026-08-21"
+BASELINE_DIR = DATA_DIR / "baseline" / BASELINE_DATE
+BASELINE_PLANS_CSV = BASELINE_DIR / "통신요금제_통합데이터_최종.csv"
 
 _plans = None
 _load_lock = threading.Lock()
@@ -176,6 +191,7 @@ QOS_LITE_MBPS = 0.46
 # 올라온 원인이다. 그래서 기본 제공량 조건을 함께 건다.
 #
 # 근거 셋이 100GB 로 모인다. 규제가 정한 숫자가 아니라 **서비스 정책값**이다.
+# 아래 수치는 모두 BASELINE_DATE 고정 분석본에서 뽑았다(baseline_plans()로 재현된다).
 #  1) 상품 군집: 수집 데이터에서 제공량 100GB 를 경계로 소진 후 속도가 3Mbps -> 5Mbps 로
 #     계단이 진다(71GB 군집 232건은 전부 3.0Mbps, 100GB 군집 196건 중 193건이 5.0Mbps).
 #  2) 사용량: 스마트초이스 생활패턴의 최상위 구간이 '하루 3시간 이상 영상 = 월 90GB 이상,
@@ -231,6 +247,37 @@ def is_effectively_unlimited(
     if qos_mbps is None or qos_mbps < UNLIMITED_QOS_MBPS:
         return False
     return data_gb is not None and float(data_gb) >= UNLIMITED_MIN_GB
+
+
+@lru_cache(maxsize=1)
+def baseline_plans() -> "pd.DataFrame":
+    """기준 유도용 고정 분석본. 최신 수집본이 바뀌어도 이 값은 그대로다.
+
+    문턱을 다시 뽑거나 민감도를 보여줄 때 쓴다. 서비스 추천에는 쓰지 않는다 -
+    추천은 항상 최신 수집본(`load()`)으로 한다.
+
+    혜택은 붙이지 않는다. 문턱 유도에 필요한 것은 제공량·소진 후 속도·요금뿐이고,
+    혜택 조인은 무겁기만 하다. 필요해지면 그때 붙이면 된다.
+    """
+    frame = pd.read_csv(BASELINE_PLANS_CSV, dtype={"plan_id": str})
+    frame["qos_mbps"] = frame["data_throttle_speed"].map(_speed_to_mbps)
+    # 최신본과 같은 규칙을 적용해야 두 기준이 비교 가능하다(로밍 혼입 의심 값 제외).
+    suspect = (
+        (frame["carrier_type"] == "MNO") & (frame["host_mno"] == "KT")
+        & frame["data_unlimited"] & frame["qos_mbps"].isin([0.1, 0.2])
+    )
+    frame.loc[suspect, "qos_mbps"] = float("nan")
+    frame["data_tier"] = [
+        data_tier(unlimited, qos)
+        for unlimited, qos in zip(frame["data_unlimited"], frame["qos_mbps"])
+    ]
+    frame["effective_unlimited"] = [
+        is_effectively_unlimited(unlimited, qos, gb)
+        for unlimited, qos, gb in zip(
+            frame["data_unlimited"], frame["qos_mbps"], frame["data_gb"]
+        )
+    ]
+    return frame
 
 
 def _apply_verified_billing(plans) -> None:

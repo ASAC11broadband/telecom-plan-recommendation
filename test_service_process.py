@@ -6,11 +6,11 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from agent.data import all_plans, filter_candidates
+from agent.data import all_plans, filter_candidates, PLANS_CSV
 from agent.schemas import UserProfile, ScoredPlan, Evaluation
 from agent.agents.recommend import (recommend_node, _apply_comparison, _reference_verdict,
                                     _dedupe_identical_offers, _diverse_selection, _offer_character,
-                                    _is_pareto_better)
+                                    _is_pareto_better, TOP_N)
 from agent.agents.evaluation import _ranking_errors, evaluation_node
 from agent.agents.profiling import _apply_user_age
 from backend.main import app, _llm_calls, LLM_CALLS_PER_MINUTE
@@ -176,6 +176,23 @@ class ServiceProcessTests(unittest.TestCase):
         # 조건만 말한 발화는 정렬 요구가 아니다(_drop_inferred_priorities 와 같은 기준).
         self.assertEqual(_repair_latest_priority(profile, asked).priorities, ['price'])
 
+    def test_baseline_is_frozen_and_separate_from_serving_data(self):
+        """기준 유도는 고정 분석본, 서비스 적용은 최신 수집본. 둘이 섞이면 안 된다.
+
+        고정본이 최신본을 따라 움직이면 문턱을 왜 그 값으로 정했는지가 재현되지 않는다.
+        """
+        from agent.data import baseline_plans, BASELINE_DATE, BASELINE_PLANS_CSV
+        self.assertTrue(BASELINE_PLANS_CSV.exists(), BASELINE_PLANS_CSV)
+        baseline = baseline_plans()
+        collected = {str(value)[:10] for value in baseline['crawled_at']}
+        self.assertEqual(collected, {BASELINE_DATE})
+        # 문턱을 유도한 근거가 고정본에서 그대로 재현된다.
+        old_definition = int((baseline['data_unlimited'] | (baseline['qos_mbps'] >= 1.0)).sum())
+        self.assertEqual((len(baseline), old_definition,
+                          int(baseline['effective_unlimited'].sum())), (2759, 2007, 782))
+        # 서비스가 읽는 최신본과는 다른 파일이다.
+        self.assertNotEqual(BASELINE_PLANS_CSV.resolve(), PLANS_CSV.resolve())
+
     def test_unlimited_needs_both_allowance_and_speed(self):
         """'무제한'은 제공량과 소진 후 속도를 함께 본다.
 
@@ -276,20 +293,50 @@ class ServiceProcessTests(unittest.TestCase):
         for (min_gb, speed), count in grid.items():
             for tighter in (k for k in grid if k[0] >= min_gb and k[1] >= speed):
                 self.assertLessEqual(grid[tighter], count, (tighter, (min_gb, speed)))
+        # 민감도 표는 기준 유도용이라 고정 분석본으로 계산한다. 현황 통계(최신 수집본)와
+        # 기준일이 다르므로 '현재 기준' 칸은 고정본의 건수와 맞아야 한다.
+        from agent.data import baseline_plans, BASELINE_DATE
+        self.assertEqual(facts['unlimitedPolicy']['baselineDate'], BASELINE_DATE)
+        baseline = baseline_plans()
+        self.assertEqual(facts['unlimitedPolicy']['baselineTotal'], len(baseline))
         current = [r for r in facts['unlimitedPolicy']['sensitivity'] if r['current']]
         self.assertEqual(len(current), 1)
-        self.assertEqual(current[0]['count'], sum(r['effective_unlimited'] for r in self.rows))
+        self.assertEqual(current[0]['count'], int(baseline['effective_unlimited'].sum()))
         self.assertEqual((current[0]['minGb'], current[0]['threshold']),
                          (facts['unlimitedPolicy']['minGb'], facts['unlimitedPolicy']['threshold']))
         self.assertAlmostEqual(sum(r['mean'] for r in facts['weights']), 1, places=4)
         self.assertEqual(self.client.get('/api/stats').json()['dataAsOf'], facts['collectedTo'])
 
     def test_roaming_suspects_are_excluded_without_changing_basic_allowance(self):
+        """로밍 혼입 의심 값을 국내 QoS 로 쓰지 않는 가드.
+
+        KT 자사 무제한의 '소진 후 100/200Kbps'가 국내 속도인지 해외 로밍 속도인지
+        확인되지 않아, 값을 믿지도 0 으로 쓰지도 않고 '미수집'으로 되돌린다.
+
+        가드가 동작하는지는 **고정 분석본**으로 본다. 최신 수집본에서는 이 표기가
+        아예 비어 버려(08-21 에는 180건, 09-17 에는 0건) 최신본만 보면 가드가
+        살아 있는지 확인할 수 없다. 왜 사라졌는지는 원문 확인이 필요한 별개 숙제다.
+        """
+        from agent.data import baseline_plans
+        baseline = baseline_plans()
+        suspect_ids = set(
+            baseline.loc[
+                (baseline['carrier_type'] == 'MNO') & (baseline['host_mno'] == 'KT')
+                & baseline['data_unlimited']
+                & baseline['data_throttle_speed'].isin(['100Kbps', '200Kbps']),
+                'plan_id',
+            ]
+        )
+        self.assertGreater(len(suspect_ids), 0)
+        # 고정본에서 의심 행의 속도는 전부 '모름'으로 지워져 있어야 한다.
+        self.assertTrue(baseline.loc[baseline['plan_id'].isin(suspect_ids), 'qos_mbps'].isna().all())
+
+        # 최신 수집본에 남아 있는 의심 행은 화면에서도 '확인 필요'로 나와야 한다.
         suspects = [r for r in self.rows if r['qos_source_suspect']]
-        self.assertGreater(len(suspects), 0)
-        self.assertTrue(all(r['qos_mbps'] is None and r['data_unlimited'] for r in suspects))
-        self.assertTrue(to_plan_item(suspects[0])['dataWarnings'])
-        self.assertFalse(to_plan_item(suspects[0])['qosKnown'])
+        for row in suspects:
+            self.assertTrue(row['qos_mbps'] is None and row['data_unlimited'])
+            self.assertTrue(to_plan_item(row)['dataWarnings'])
+            self.assertFalse(to_plan_item(row)['qosKnown'])
 
     def test_unlimited_policy_and_explicit_constraints(self):
         rows = filter_candidates({'data_unlimited': True, 'budget_max_won': 30000})
@@ -491,8 +538,11 @@ class ServiceProcessTests(unittest.TestCase):
         names_only = len({r['plan_name'] for r in self.rows})
         self.assertGreater(len(_dedupe_identical_offers(self.rows)), names_only)
 
-    def test_top5_does_not_repeat_the_same_kind_of_plan(self):
-        """한 사업자의 비슷한 라인업이 상위를 나눠 먹지 않는다. 다만 억지로 채우지도 않는다."""
+    def test_top_picks_do_not_repeat_the_same_kind_of_plan(self):
+        """한 사업자의 비슷한 라인업이 상위를 나눠 먹지 않는다. 다만 억지로 채우지도 않는다.
+
+        개수는 TOP_N 을 읽는다. 숫자를 박아 두면 노출 개수를 바꿀 때마다 테스트가 깨진다.
+        """
         from agent.mcda import evaluate_mcda, rank_smaa2
         profile = UserProfile(budget_max_won=30000, min_data_gb=20.0, user_age=30,
                               hard_constraints=['budget_max_won', 'min_data_gb'])
@@ -501,11 +551,11 @@ class ServiceProcessTests(unittest.TestCase):
         ordered = rank_smaa2(evaluate_mcda(ranking, profile.priorities, profile=profile))
 
         picked = _diverse_selection(ordered, by_id)
-        self.assertEqual(len(picked), 5)
+        self.assertEqual(len(picked), TOP_N)
         characters = [_offer_character(by_id[d.plan_id]) for d in picked]
-        self.assertEqual(len(set(characters)), 5, characters)
-        # 변경 전(단순 상위 5)은 성격이 겹쳤다 — 이 테스트가 지키려는 회귀 지점이다
-        self.assertLess(len({_offer_character(by_id[d.plan_id]) for d in ordered[:5]}), 5)
+        self.assertEqual(len(set(characters)), TOP_N, characters)
+        # 다양화 없이 상위만 자르면 성격이 겹친다 — 이 테스트가 지키려는 회귀 지점이다
+        self.assertLess(len({_offer_character(by_id[d.plan_id]) for d in ordered[:TOP_N]}), TOP_N)
         # 순위 정합성과 중복 추천 검증을 그대로 통과해야 한다
         ranks = [d.smaa2_expected_rank for d in picked]
         self.assertEqual(ranks, sorted(ranks))
@@ -521,7 +571,7 @@ class ServiceProcessTests(unittest.TestCase):
                               smaa2_expected_rank=float(i + 1), smaa2_score=100 - i,
                               favorable_weights=()) for i in range(7)]
         picked = _diverse_selection(ordered, by_id)
-        self.assertEqual([d.plan_id for d in picked], ['0', '1', '2', '3', '4'])
+        self.assertEqual([d.plan_id for d in picked], [str(i) for i in range(TOP_N)])
 
     def test_manual_current_plan_no_longer_crashes_api(self):
         state = {'profile': UserProfile(reference_fee_won=50000), 'reference': {'discounted_fee': 50000},

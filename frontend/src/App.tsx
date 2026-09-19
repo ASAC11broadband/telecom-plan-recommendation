@@ -76,7 +76,6 @@ export default function App() {
     setPrevPlans(before?.plans ?? []);
     setLoading(true);
     setError(null);
-    navigate('s-result');
     try {
       // 백엔드가 준 상위 3개 순위를 그대로 쓴다. 잘라내면 리포트 본문과 카드가 어긋난다.
       const data = await recommend(next);
@@ -98,6 +97,8 @@ export default function App() {
         ...rows,
       ]);
       setMessages([...next, { role: 'assistant', content: data.followupQuestion || (data.plans.length ? `${data.plans.length}개의 요금제를 찾았어요. 요금과 제공량을 비교하고 관심 요금제를 비교함에 담아보세요.` : '조건에 맞는 요금제를 찾지 못했어요. 예산이나 사용량 조건을 조정해 주세요.') }]);
+      // 필수 정보가 부족하면 결과 0건 화면이 아니라, 방금 입력하던 곳에서 답을 이어 받는다.
+      navigate(data.needsMoreInput ? 's-input' : 's-result');
     } catch (err) {
       setError(err instanceof Error ? err.message : '알 수 없는 오류');
     } finally {
@@ -126,17 +127,20 @@ export default function App() {
       />
       {messages.length > 0 && !loading && (screen === 's-input' || screen === 's-result') && <div className="session-reset"><button className="btn btn-sm" onClick={resetConsultation}>새 상담 시작 (이전 조건 초기화)</button></div>}
       {screen !== 's-home' && screen !== 's-browse' && screen !== 's-compare' && (
-        <Stepper current={step} hasResult={!!result} onStepClick={navigate} />
+        <Stepper current={step} hasResult={!!result && !result.needsMoreInput} onStepClick={navigate} />
       )}
 
-      {screen === 's-home' && <HomeScreen onNavigate={navigate} />}
+      {screen === 's-home' && <HomeScreen onNavigate={navigate} onRecommend={(query) => {
+        navigate('s-input');
+        runRecommend(query);
+      }} />}
       {screen === 's-input' && (
         <InputScreen
           messages={messages}
           result={result}
           loading={loading}
+          error={error}
           onSubmit={runRecommend}
-          onNavigate={navigate}
         />
       )}
       {screen === 's-result' && (
@@ -165,7 +169,12 @@ export default function App() {
         />
       )}
 
-      {screen === 's-compare' && <CompareScreen plans={compare} onRemove={toggleCompare} onNavigate={navigate} />}
+      {screen === 's-compare' && <CompareScreen
+        plans={compare}
+        recommendedIds={result?.plans.map((plan) => plan.id) ?? []}
+        onRemove={toggleCompare}
+        onNavigate={navigate}
+      />}
     </div>
   );
 }

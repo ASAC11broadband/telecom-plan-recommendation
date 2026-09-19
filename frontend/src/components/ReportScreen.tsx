@@ -445,7 +445,7 @@ export function ReportScreen({
           </p>
           {plan.signupNotice && <p>사업자 고지: {plan.signupNotice}</p>}
           {plan.dataWarnings.map(warning => <p key={warning}>{warning}</p>)}
-          <RecommendationTrace result={result} />
+          <RecommendationTrace result={result} plan={plan} />
           <p>
             본 산정은 {result.dataAsOf} 수집 데이터 기준이며 프로모션은 사업자 정책에 따라 변경될 수 있습니다.
           </p>

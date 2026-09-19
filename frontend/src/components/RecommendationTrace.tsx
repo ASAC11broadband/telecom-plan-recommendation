@@ -3,9 +3,9 @@ import { describeProfile } from '../profileText';
 
 /** "왜 이게 1순위인가" 에 답한다.
  *
- *  내부 지표(기대순위·1위 수용도)는 싣지 않는다. 순위 1·2·3 으로 이미 보여준 것을 어려운 말로
- *  반복할 뿐이고, "만족 확률이 아니다" 라는 부인 문장을 달아야 할 만큼 오해를 부른다.
- *  대신 후보들이 실제로 갈린 지점(축별 충족도)과 비용 기준 차이를 보여준다.
+ *  후보들이 실제로 갈린 지점(축별 충족도)과 비용 기준 차이를 보여주는 게 기본이다.
+ *  기대순위·1위 수용도 같은 내부 지표는 "만족 확률이 아니다"라는 부인 문장을 달아야 할 만큼
+ *  오해를 부르기 쉬워 여기서는 "5. 추천 지표 해석" 절 하나에 정의를 명확히 달아 모아 둔다.
  */
 
 const AXES: [string, string][] = [
@@ -25,7 +25,7 @@ function decidingAxes(plans: PlanItem[]): [string, string][] {
   });
 }
 
-export function RecommendationTrace({ result }: { result: RecommendResponse }) {
+export function RecommendationTrace({ result, plan }: { result: RecommendResponse; plan?: PlanItem }) {
   const trace = result.trace;
   if (!trace?.rankedCount) return null;
 
@@ -138,8 +138,44 @@ export function RecommendationTrace({ result }: { result: RecommendResponse }) {
         </div>
       )}
 
+      {plan && (
+        <div className="trace-sec">
+          <div className="section-label">4. 추천 지표 해석</div>
+          <div className="mini-table">
+            <div className="r">
+              <span>지표</span>
+              <span>값</span>
+            </div>
+            <div className="r">
+              <span>추천 적합도</span>
+              <span className="v num">
+                {plan.recommendationFit === null ? '확인 필요' : `${Math.round(plan.recommendationFit)}점`}
+              </span>
+            </div>
+            <div className="r">
+              <span>상위권 안정성</span>
+              <span className="v num">
+                {plan.top3Acceptability === null ? '확인 필요' : `${Math.round(plan.top3Acceptability * 100)}%`}
+              </span>
+            </div>
+            <div className="r">
+              <span>1위 수용도</span>
+              <span className="v num">
+                {plan.firstRankAcceptability === null ? '확인 필요' : `${Math.round(plan.firstRankAcceptability * 100)}%`}
+              </span>
+            </div>
+          </div>
+          <p className="trace-note">
+            추천 적합도는 현재 조건에서 가격·데이터·속도·혜택 등을 함께 반영한 상대적 적합도입니다.
+            상위권 안정성은 가중치를 달리한 300개 시나리오 중 이 요금제가 상위 3위 안에 든 비율이고,
+            1위 수용도는 그중 1위가 된 비율입니다. 세 수치 모두 만족도·가입 성공 확률이 아니라 후보
+            간 상대 비교 지표입니다.
+          </p>
+        </div>
+      )}
+
       <div className="trace-sec">
-        <div className="section-label">4. 비용 비교 기준</div>
+        <div className="section-label">5. 비용 비교 기준</div>
         <p className="trace-note">
           순위의 가격 평가도 카드의 총비용도 <b>{compareMonths}개월</b> 기준입니다. 할인이 끝난 뒤의
           정가까지 합산하므로, 지금 당장 싼 단기 프로모션 상품이 아래 순위일 수 있습니다.

@@ -206,6 +206,8 @@ def to_plan_item(
     criteria_fit: dict | None = None,
     expected_rank: float | None = None,
     first_rank_acceptability: float | None = None,
+    recommendation_fit: float | None = None,
+    top3_acceptability: float | None = None,
     reference: dict | None = None,
 ) -> dict:
     total = total_cost(row)
@@ -264,6 +266,8 @@ def to_plan_item(
         "criteriaFit": criteria_fit or {},
         "expectedRank": expected_rank,
         "firstRankAcceptability": first_rank_acceptability,
+        "recommendationFit": recommendation_fit,
+        "top3Acceptability": top3_acceptability,
         "rankingMonths": _PRICE_HORIZON_MONTHS,
         "rankingAverageFee": round(_effective_monthly_fee(row)) if billing_known else None,
         "costIsEstimate": bool(is_promo and period is None),
@@ -327,6 +331,8 @@ def to_plan_items(rows: list[dict], ranked: list[dict] | None = None,
                 criteria_fit=scored.get("criteria_fit", {}),
                 expected_rank=scored.get("expected_rank"),
                 first_rank_acceptability=scored.get("first_rank_acceptability"),
+                recommendation_fit=scored.get("recommendation_fit"),
+                top3_acceptability=scored.get("top3_acceptability"),
                 reference=reference,
             )
         )

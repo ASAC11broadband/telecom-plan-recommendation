@@ -5,8 +5,8 @@ from hashlib import sha256
 import json
 from statistics import mean, median
 
-from agent.data import (all_plans, PLANS_CSV, BENEFITS_CSV, DATA_TIERS,
-                        UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS)
+from agent.data import (all_plans, baseline_plans, BASELINE_DATE, PLANS_CSV, BENEFITS_CSV,
+                        DATA_TIERS, UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS)
 from agent.mcda import CRITERIA, _WEIGHT_DATA_PATH, _PRICE_HORIZON_MONTHS
 
 LABELS = dict(zip(CRITERIA, ["가격", "데이터", "소진 후 속도", "혜택", "통화", "테더링"]))
@@ -30,14 +30,27 @@ def analysis_snapshot() -> dict:
     ]
     # '무제한' 정의의 두 문턱을 함께 흔든다. 속도만 흔들면 실제 정의와 다른 표가 된다 -
     # 서비스는 제공량과 소진 후 속도를 함께 본다. minGb=0 줄이 속도만 보던 옛 정의다.
+    #
+    # 이 표는 **문턱을 왜 그 값으로 정했는지**를 보이는 자리라 고정 분석본으로 계산한다.
+    # 최신 수집본으로 계산하면 수집할 때마다 근거 숫자가 흔들려 재현이 안 된다.
+    # 위쪽 현황 통계(총계·결측·등급)는 지금 서비스하는 데이터라 최신본 그대로다.
+    baseline = baseline_plans()
+    baseline_rows = [
+        {"data_unlimited": bool(r.data_unlimited),
+         "qos_mbps": None if r.qos_mbps != r.qos_mbps else float(r.qos_mbps),
+         "data_gb": None if r.data_gb != r.data_gb else float(r.data_gb),
+         "discounted_fee": int(r.discounted_fee)}
+        for r in baseline.itertuples()
+    ]
     sensitivity = []
     for min_gb in [0.0, 70.0, UNLIMITED_MIN_GB, 150.0]:
         for speed in [1.0, 3.0, UNLIMITED_QOS_MBPS]:
-            selected = [r for r in rows if r["data_unlimited"]
+            selected = [r for r in baseline_rows if r["data_unlimited"]
                         or ((r["qos_mbps"] or 0) >= speed and (r["data_gb"] or 0) >= min_gb)]
             sensitivity.append({
                 "minGb": min_gb, "threshold": speed, "count": len(selected),
-                "medianDataGb": median([r["data_gb"] for r in selected if not r["data_unlimited"]]
+                "medianDataGb": median([r["data_gb"] for r in selected
+                                        if not r["data_unlimited"] and r["data_gb"] is not None]
                                        or [0]),
                 "under30k": sum(r["discounted_fee"] <= 30000 for r in selected),
                 "current": min_gb == UNLIMITED_MIN_GB and speed == UNLIMITED_QOS_MBPS,
@@ -61,6 +74,9 @@ def analysis_snapshot() -> dict:
         "qosDistribution": [{"name": "미확인" if speed is None else f"{speed:g}Mbps", "count": count}
                             for speed, count in sorted(qos.items(), key=lambda x: -1 if x[0] is None else x[0])],
         "unlimitedPolicy": {"threshold": UNLIMITED_QOS_MBPS, "minGb": UNLIMITED_MIN_GB,
+                            # 민감도 표의 기준 데이터. 위 현황 통계와 기준일이 다르다.
+                            "baselineDate": BASELINE_DATE,
+                            "baselineTotal": len(baseline_rows),
                             "sensitivity": sensitivity,
                             "definition": (
                                 f"기본량 무제한, 또는 제공량 {UNLIMITED_MIN_GB:g}GB 이상이면서 소진 후 "
@@ -84,6 +100,8 @@ def analysis_snapshot() -> dict:
         "limitations": [
             "가입자 데이터 기반의 시장 사전분포입니다. 개인 만족도나 추천 정확도 검증을 대신하지 않습니다.",
             "학습 출처는 MVNO 2,158건으로 기록되어 있습니다. 통신 3사로의 적용에는 분포 차이가 있습니다.",
+            f"기준 유도는 {BASELINE_DATE} 고정 분석본으로 하고, 서비스 추천은 최신 수집본에 "
+            "그 기준을 적용합니다. 위 현황 통계와 무제한 민감도 표는 기준일이 다릅니다.",
             f"'무제한' 기준(기본량 무제한 또는 제공량 {UNLIMITED_MIN_GB:g}GB 이상＋소진 후 "
             f"{UNLIMITED_QOS_MBPS:g}Mbps 이상)은 서비스 정책입니다. 수집 데이터에서 상품 군집이 "
             "갈리는 경계를 따랐을 뿐, 규제나 표준이 정한 값도 최적 기준의 증명도 아닙니다. "

@@ -47,6 +47,10 @@ export interface PlanItem {
   criteriaFit: Record<string, number>;
   expectedRank: number | null;
   firstRankAcceptability: number | null;
+  /** 현재 조건에 대한 다기준 적합도(0~100). 만족 확률·가입 성공 확률이 아니다. */
+  recommendationFit: number | null;
+  /** 가중치 300세트 중 상위 3위 안에 든 비율(0~1). */
+  top3Acceptability: number | null;
   rankingMonths: number;
   rankingAverageFee: number | null;
   costIsEstimate: boolean;
@@ -120,6 +124,7 @@ export interface Profile {
   carrier_type?: string;
   mvno_brand?: string;
   network_gen?: string;
+  network_preference?: string;
   require_full_unlimited?: boolean;
   min_qos_mbps?: number;
   requires_qos?: boolean;

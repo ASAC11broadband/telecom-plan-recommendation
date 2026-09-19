@@ -1,11 +1,20 @@
 import { PlanItem, ScreenType } from '../types';
 import { CompareTable } from './ResultScreen';
 
-export function CompareScreen({ plans, onRemove, onNavigate }: {
+export function CompareScreen({ plans, recommendedIds, onRemove, onNavigate }: {
   plans: PlanItem[];
+  recommendedIds: string[];
   onRemove: (plan: PlanItem) => void;
   onNavigate: (screen: ScreenType) => void;
 }) {
+  const totals = plans.filter((plan) => plan.totalNum !== null);
+  const lowestTotal = totals.reduce<PlanItem | null>(
+    (best, plan) => !best || plan.totalNum! < best.totalNum! ? plan : best,
+    null,
+  );
+  const fiveG = plans.filter((plan) => plan.networkGen === '5G');
+  const promoRise = plans.filter((plan) => plan.priceRisesAfter !== null);
+
   return <main className="body">
     <div className="row-between section-heading">
       <div><h1>내 비교함 <span className="tag tag-accent">{plans.length}개</span></h1>
@@ -16,8 +25,28 @@ export function CompareScreen({ plans, onRemove, onNavigate }: {
       <h2>아직 담은 요금제가 없습니다</h2><p>전체 요금제나 AI 추천 결과에서 ‘비교함에 담기’를 눌러보세요.</p>
       <button className="btn btn-primary" onClick={() => onNavigate('s-browse')}>전체 요금제 둘러보기</button>
     </div> : <>
+      <section className="card compare-summary" aria-label="비교 요약">
+        <div>
+          <span className="k">가장 낮은 {plans[0].compareMonths}개월 총비용</span>
+          <strong>{lowestTotal ? `${lowestTotal.name} · ${lowestTotal.total}` : '청구액 확인 필요'}</strong>
+        </div>
+        <div>
+          <span className="k">5G 선택지</span>
+          <strong>{fiveG.length ? `${fiveG.length}개 포함` : '담긴 상품에 없음'}</strong>
+        </div>
+        <div>
+          <span className="k">프로모션 종료 주의</span>
+          <strong>{promoRise.length ? `${promoRise.length}개 · 종료 뒤 요금 상승` : '비교 기간 내 상승 없음'}</strong>
+        </div>
+      </section>
       <div className="saved-plans">{plans.map(plan => <div className="card saved-plan" key={plan.id}>
-        <span className="tag tag-muted">{plan.carrier}</span><strong>{plan.name}</strong>
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+          <span className="tag tag-muted">{plan.carrier}</span>
+          <span className={`tag ${recommendedIds.includes(plan.id) ? 'tag-accent' : 'tag-green'}`}>
+            {recommendedIds.includes(plan.id) ? 'AI 추천' : '직접 탐색'}
+          </span>
+        </div>
+        <strong>{plan.name}</strong>
         <p>{plan.billingPriceKnown ? '월' : '페이백 반영 표시가'} {plan.price}원 · {plan.data}</p>
         <button className="btn btn-sm" onClick={() => onRemove(plan)} aria-label={`${plan.name} 비교함에서 삭제`}>삭제</button>
       </div>)}</div>
