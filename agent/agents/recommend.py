@@ -294,7 +294,7 @@ def _dedupe_identical_offers(candidates: list[dict]) -> list[dict]:
     가입 조건·포함 혜택·망·데이터가 다른 별개 상품이었다. 혜택이 하나 더 많은 청년 전용
     상품이 같은 요금인데도 조용히 빠지고 있었다.
 
-    이름이 같은 변형이 상위 3개를 나눠 먹는 문제는 여기서 지워서 막는 게 아니라
+    이름이 같은 변형이 상위 몇 개를 나눠 먹는 문제는 여기서 지워서 막는 게 아니라
     _diverse_selection 이 고를 때 막는다. 후보에서 없애면 그 상품은 아예 볼 수 없다.
     """
     best: dict[tuple, dict] = {}
@@ -327,8 +327,8 @@ def _prefer_network_generation(ordered: list, by_id: dict[str, dict], preference
     return matching + [decision for decision in ordered if by_id[decision.plan_id].get("network_gen") != preference]
 
 
-# 화면에 내보내는 추천 개수. 여기 한 곳만 바꾸면 선정·테스트가 모두 따라온다.
-TOP_N = 3
+# 화면에 내보내는 추천 개수. 여기 한 곳만 바꾸면 선정·리포트·테스트가 모두 따라온다.
+TOP_N = 5
 
 
 def _diverse_selection(ordered: list, by_id: dict[str, dict], limit: int = TOP_N) -> list:
@@ -535,7 +535,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
                 "이름이 같아도 조건이 다르면 별개 상품으로 남김"
             ),
             "diversification": (
-                "상위 3개는 사업자·데이터 구간·소진 후 등급이 겹치지 않게 고름. "
+                f"상위 {TOP_N}개는 사업자·데이터 구간·소진 후 등급이 겹치지 않게 고름. "
                 "겹치지 않는 후보가 모자라면 기대순위 순서로 채움"
             ),
         },

@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..data import has_benefit, normalize_benefit_category
+from .recommend import TOP_N
 from ..mcda import COMPARE_MONTHS, _effective_monthly_fee
 from ..state import PipelineState, get_llm, user_query
 
@@ -171,7 +172,7 @@ def _ranked_recommendations(state: PipelineState) -> list[dict[str, Any]]:
     }
 
     recommendations: list[dict[str, Any]] = []
-    for rank, scored in enumerate(ranked[:3], start=1):
+    for rank, scored in enumerate(ranked[:TOP_N], start=1):
         if not isinstance(scored, Mapping):
             continue
         scored_row = dict(scored)
@@ -287,7 +288,7 @@ _COMMON_SECTION = re.compile(r"^###\s+(?:현재 요금제와 비교|가입 전 �
 def _ensure_all_ranks(report: str, recommendations: list[dict[str, Any]]) -> str:
     """리포트에서 빠진 순위를 코드로 채운다.
 
-    상위 3개를 모두 서술하라고 지시해도 모델이 뒤쪽 상품을 통째로 빼먹는다. 그때마다
+    상위 후보를 모두 서술하라고 지시해도 모델이 뒤쪽 상품을 통째로 빼먹는다. 그때마다
     리포트 단계를 다시 돌리면 한 번에 10초씩 쓰고도 같은 결과가 나오기 일쑤고, 재시도 예산을
     소진하면 화면에 "잠정 결과" 딱지가 붙는다. 빠진 상품만 확정된 숫자로 채워 넣는 편이
     빠르고 정확하다(_fallback_reason 은 후보 원본 값만 쓴다).
