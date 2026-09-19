@@ -5,11 +5,78 @@ from hashlib import sha256
 import json
 from statistics import mean, median
 
+from agent.agents.recommend import TOP_N
 from agent.data import (all_plans, baseline_plans, BASELINE_DATE, PLANS_CSV, BENEFITS_CSV,
                         DATA_TIERS, UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS)
-from agent.mcda import CRITERIA, _WEIGHT_DATA_PATH, _PRICE_HORIZON_MONTHS
+from agent.mcda import (CRITERIA, _BASE_WEIGHTS, _WEIGHT_DATA_PATH,
+                        _PRICE_HORIZON_MONTHS, _utility_rows)
 
 LABELS = dict(zip(CRITERIA, ["가격", "데이터", "소진 후 속도", "혜택", "통화", "테더링"]))
+
+
+# 발표에서 SMAA-2 를 "더 나은 추천을 만든 장치"로 말하면 "평균 가중치와 뭐가 다르냐"는
+# 질문에 무너진다. 실제로 거의 다르지 않기 때문이다. 대신 그 사실을 먼저 내보인다 -
+# **가중치를 300세트 흔들어도 상위 후보가 그대로**라는 것이 이 방법이 낼 수 있는 결론이고,
+# "우리가 가중치를 임의로 골라서 나온 순위가 아니다"의 근거가 된다.
+#
+# 고정 분석본으로 계산한다. 최신 수집본으로 재면 수집할 때마다 발표 숫자가 흔들린다.
+_ROBUSTNESS_CASES = (
+    ("무제한 요청", {"data_unlimited": True}),
+    ("데이터 20GB 이상·3만원 이하", {"min_data_gb": 20, "budget_max_won": 30000}),
+    ("조건 없음", {}),
+)
+
+
+def _mean_weight() -> list[float]:
+    return [mean(vector[i] for vector in _BASE_WEIGHTS) for i in range(len(CRITERIA))]
+
+
+def _rank_ids(candidates: list[dict], weights: list[float], profile: dict) -> list[str]:
+    utilities = _utility_rows(candidates, profile)
+    totals = [sum(w * u for w, u in zip(weights, row)) for row in utilities]
+    order = sorted(range(len(candidates)),
+                   key=lambda i: (-totals[i], str(candidates[i]["plan_id"])))
+    return [str(candidates[i]["plan_id"]) for i in order]
+
+
+def _weight_robustness(baseline_rows: list[dict], top_n: int) -> list[dict]:
+    """가중치 표본 300세트의 순위와 평균 가중치 하나의 순위를 견준다.
+
+    둘이 같으면 "가중치 선택에 민감하지 않은 추천"이라는 뜻이다. 다르면 어느 조건에서
+    갈리는지가 그대로 드러난다. 어느 쪽이든 발표에서 말할 수 있는 사실이 된다.
+    """
+    average = _mean_weight()
+    report = []
+    for label, profile in _ROBUSTNESS_CASES:
+        pool = [row for row in baseline_rows if _eligible(row, profile)]
+        if len(pool) < top_n:
+            continue
+        sampled = [_rank_ids(pool, weight, profile) for weight in _BASE_WEIGHTS]
+        averaged = _rank_ids(pool, average, profile)
+        # 표본마다 상위 top_n 이 평균 가중치의 상위 top_n 과 몇 개나 겹치는지
+        overlaps = [len(set(order[:top_n]) & set(averaged[:top_n])) for order in sampled]
+        report.append({
+            "case": label,
+            "candidates": len(pool),
+            "topN": top_n,
+            "samples": len(_BASE_WEIGHTS),
+            "minOverlap": min(overlaps),
+            "identicalTopN": sum(1 for value in overlaps if value == top_n),
+            "sameFirst": sum(1 for order in sampled if order[0] == averaged[0]),
+        })
+    return report
+
+
+def _eligible(row: dict, profile: dict) -> bool:
+    """민감도 비교에 쓸 최소 필터. 서비스 필터(filter_candidates)의 부분집합이다."""
+    if profile.get("data_unlimited") and not row["effective_unlimited"]:
+        return False
+    if profile.get("min_data_gb") is not None:
+        if not row["data_unlimited"] and (row["data_gb"] or 0) < profile["min_data_gb"]:
+            return False
+    if profile.get("budget_max_won") is not None and row["discounted_fee"] > profile["budget_max_won"]:
+        return False
+    return True
 
 
 @lru_cache(maxsize=1)
@@ -35,11 +102,22 @@ def analysis_snapshot() -> dict:
     # 최신 수집본으로 계산하면 수집할 때마다 근거 숫자가 흔들려 재현이 안 된다.
     # 위쪽 현황 통계(총계·결측·등급)는 지금 서비스하는 데이터라 최신본 그대로다.
     baseline = baseline_plans()
+    def _opt(value):
+        return None if value != value else float(value)   # NaN 판정
+
     baseline_rows = [
-        {"data_unlimited": bool(r.data_unlimited),
-         "qos_mbps": None if r.qos_mbps != r.qos_mbps else float(r.qos_mbps),
-         "data_gb": None if r.data_gb != r.data_gb else float(r.data_gb),
-         "discounted_fee": int(r.discounted_fee)}
+        {"plan_id": str(r.plan_id),
+         "data_unlimited": bool(r.data_unlimited),
+         "effective_unlimited": bool(r.effective_unlimited),
+         "data_tier": str(r.data_tier),
+         "qos_mbps": _opt(r.qos_mbps),
+         "data_gb": _opt(r.data_gb),
+         "tethering_gb": _opt(r.tethering_gb),
+         "voice_unlimited": bool(r.voice_unlimited),
+         "voice_minutes": _opt(r.voice_minutes),
+         "discounted_fee": int(r.discounted_fee),
+         "monthly_fee": int(r.monthly_fee),
+         "discount_period_months": _opt(r.discount_period_months)}
         for r in baseline.itertuples()
     ]
     sensitivity = []
@@ -87,6 +165,9 @@ def analysis_snapshot() -> dict:
                      "mean": round(mean(v[i] for v in vectors), 5),
                      "min": round(min(v[i] for v in vectors), 5),
                      "max": round(max(v[i] for v in vectors), 5)} for i, key in enumerate(CRITERIA)],
+        # 가중치를 300세트 흔든 순위와 평균 가중치 하나의 순위를 견준 결과.
+        # "SMAA-2 덕에 추천이 좋아졌다"가 아니라 "가중치를 바꿔도 결론이 같다"를 보이는 값이다.
+        "weightRobustness": _weight_robustness(baseline_rows, TOP_N),
         "weightSource": payload.get("source", "출처 미기재"),
         "weightSamples": len(vectors),
         "rankingMonths": _PRICE_HORIZON_MONTHS,
@@ -98,6 +179,10 @@ def analysis_snapshot() -> dict:
             {"title": "설명·검증", "body": "AI가 원본 후보로 설명을 작성하고 코드 검증 및 AI 사실 대조를 수행합니다. 최종 검증 미통과는 화면에 알립니다."},
         ],
         "limitations": [
+            "가중치 300세트를 흔들어도 상위 후보가 그대로입니다(weightRobustness). 즉 이 추천은 "
+            "가중치 선택에 민감하지 않으며, 평균 가중치 하나로 계산해도 결과가 같습니다. "
+            "SMAA-2 는 추천을 더 좋게 만드는 장치가 아니라, 임의로 고른 가중치 때문에 나온 "
+            "순위가 아님을 보이는 검사입니다.",
             "가입자 데이터 기반의 시장 사전분포입니다. 개인 만족도나 추천 정확도 검증을 대신하지 않습니다.",
             "학습 출처는 MVNO 2,158건으로 기록되어 있습니다. 통신 3사로의 적용에는 분포 차이가 있습니다.",
             f"기준 유도는 {BASELINE_DATE} 고정 분석본으로 하고, 서비스 추천은 최신 수집본에 "

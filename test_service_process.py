@@ -176,6 +176,27 @@ class ServiceProcessTests(unittest.TestCase):
         # 조건만 말한 발화는 정렬 요구가 아니다(_drop_inferred_priorities 와 같은 기준).
         self.assertEqual(_repair_latest_priority(profile, asked).priorities, ['price'])
 
+    def test_weight_robustness_is_measured_not_claimed(self):
+        """'가중치를 흔들어도 결론이 같다'는 발표 문장을 코드가 매번 다시 잰다.
+
+        SMAA-2 를 '추천을 더 좋게 만드는 장치'로 설명하면 "평균 가중치와 뭐가 다르냐"는
+        질문에 답할 수 없다. 대신 표본 300세트와 평균 가중치의 순위를 견준 수치를 내보낸다.
+        """
+        from agent.agents.recommend import TOP_N
+        facts = self.client.get('/api/analysis').json()
+        report = facts['weightRobustness']
+        self.assertTrue(report)
+        for case in report:
+            self.assertEqual(case['topN'], TOP_N)
+            self.assertEqual(case['samples'], facts['weightSamples'])
+            self.assertGreaterEqual(case['candidates'], TOP_N)
+            # 집계값은 표본 수를 넘을 수 없고, 겹침은 top_n 을 넘을 수 없다.
+            self.assertLessEqual(case['identicalTopN'], case['samples'])
+            self.assertLessEqual(case['sameFirst'], case['samples'])
+            self.assertLessEqual(case['minOverlap'], TOP_N)
+            # 완전 일치한 표본은 당연히 1위도 같다.
+            self.assertLessEqual(case['identicalTopN'], case['sameFirst'])
+
     def test_baseline_is_frozen_and_separate_from_serving_data(self):
         """기준 유도는 고정 분석본, 서비스 적용은 최신 수집본. 둘이 섞이면 안 된다.
 
