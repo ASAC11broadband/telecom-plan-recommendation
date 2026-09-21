@@ -14,7 +14,7 @@ crawler/      통신 3사·모요 수집·일일 갱신 (결과는 crawler/data/
 data/         서비스가 읽는 CSV(고정) · baseline/(기준 유도용 고정본) · eval/(평가용 입력·결과) · synthetic_original/(합성 가입이력)
 experiments/  실험·평가 스크립트. 서비스는 import 하지 않는다 → experiments/README.md
 notebooks/    가중치 학습·EDA 노트북
-outputs/      발표/ (PPT·스크립트·그림) · 분석노트/ · 데이터수집/ · 지표표_방법별비교.json
+outputs/      발표/ (발표_가이드.md · 질의응답_근거점검.md · 캔바_추가장.pptx · 그림/ · 화면/) · 분석노트/ · 데이터수집/ · 지표표_방법별비교.json
 ```
 
 ### 지금 적용 중인 정책값 — 바꿀 곳은 각각 한 줄이다
@@ -36,8 +36,9 @@ outputs/      발표/ (PPT·스크립트·그림) · 분석노트/ · 데이터�
 python -m unittest test_service_process            # 고정본 건수(현재 403) 단언이 같이 바뀐다
 python -m experiments.run_metric_table              # outputs/지표표_방법별비교.json
 python -m experiments.weight_scale_check            # 가중치 재현 + 고정 눈금이 카탈로그를 덮는지
-python -m experiments.run_presentation_evidence     # 약 10분. outputs/발표/ 그림·수치
-python outputs/발표/build_deck.py                    # 발표_초안.pptx + 발표초안.md
+python -m experiments.run_presentation_evidence     # 약 10분. outputs/발표/그림/fig_* · 근거보강_수치.json
+python -m experiments.make_figures                  # 그림 01~08 · eda_수치.json
+python outputs/발표/build_slides.py                  # 캔바_추가장.pptx
 ```
 
 ### 미해결
@@ -48,7 +49,7 @@ python outputs/발표/build_deck.py                    # 발표_초안.pptx + �
 - **순위를 실제로 가르는 축은 질의마다 다르다.** 사용자가 조건으로 말한 축(N GB 이상·혜택·통화량)은 필터가 되어 통과한 후보가 전부 같은 값이 된다. 남는 것은 가격, (요구량을 필수로 말하지 않았을 때의) 데이터, 소진 후 속도다. '속도 우선'·'데이터 우선'은 Top-5 를 움직이고 '통화 우선'은 요청이 없으면 그대로다.
 - **혜택 가중치의 의미가 다르다.** 학습은 "OTT 구독료", 서비스 축은 "요청 혜택 충족". 순위에서는 상수라 영향은 없지만 "학습된 가중치"라고 말할 수 없다.
 - **설명 검증(Evaluation) 미통과가 실제 요청에서 관찰됐고** 통과율을 집계한 적이 없다.
-- **`experiments/run_weight_arms` 는 실행되지 않는다**(de85a04 이후). 발표의 Precision +27% 표를 현재 코드로 재현할 수 없다.
+- Precision +27% 표를 만든 `run_weight_arms`(de85a04 이후 실행 불가)와 그 결과 파일은 2026-09-21 삭제했다. 발표 덱은 이 수치를 쓰지 않는다(복구: `git checkout 3f849c1 -- experiments/run_weight_arms.py experiments/mcda_original.py data/eval`).
 - '무제한' 10Mbps 로 "무제한 + 3만원 이하" 후보가 9건뿐이다. 대용량+5Mbps 를 다시 포함하는 방향 전환 버튼은 미정.
 - 발표 근거의 빈 곳 전체 목록: `outputs/발표/질의응답_근거점검.md`.
 
