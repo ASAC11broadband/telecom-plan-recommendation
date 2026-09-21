@@ -71,7 +71,7 @@ def prepare_plan_catalog(rows: list[dict] | None = None) -> pd.DataFrame:
 
     - **'무제한'의 정의가 한 곳에서 나온다.** 원본 `data_unlimited` 플래그를 그대로
       200GB 로 환산하면 *7GB 쓰고 1Mbps* 짜리가 200GB 로 둔갑한다. `effective_unlimited`
-      는 제공량 100GB 와 소진 후 4.44Mbps 를 **둘 다** 넘어야 무제한으로 친다.
+      는 제공량 100GB 와 소진 후 10Mbps 를 **둘 다** 넘어야 무제한으로 친다.
     - **청구액이 확인되지 않은 페이백 상품을 뺀다.** 표시가가 실제 납부액이 아니라
       가격 축이 통째로 어긋난다. MCDA 쪽 `filter_candidates` 는 이미 빼고 있었다.
     """

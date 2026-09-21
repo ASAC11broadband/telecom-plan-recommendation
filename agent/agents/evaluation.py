@@ -405,7 +405,7 @@ if __name__ == "__main__":
 
     # '무제한' 요청은 QoS형도 충족으로 본다. 완전 무제한만 원하면 따로 지정한다.
     loose = UserProfile(data_unlimited=True, hard_constraints=["data_unlimited"])
-    qos_plan = _plan("1", "A", data_unlimited=False, effective_unlimited=True, qos_mbps=5.0)
+    qos_plan = _plan("1", "A", data_unlimited=False, effective_unlimited=True, qos_mbps=10.0)
     errors, _ = _code_checks(_state([qos_plan], ranked[:1], "| 1 | A | 30,000원 |", loose))
     assert errors == [], errors
     strict = UserProfile(

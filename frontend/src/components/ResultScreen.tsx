@@ -217,9 +217,9 @@ function UnlimitedBasis({ result, loading, onFollowup }: {
         {' '}이번 추천 {result.plans.length}개 중 기본량 무제한 {full}개, 대용량＋속도 유지 {qosKept}개입니다.
       </p>
       <p className="comparison-note">
-        제공량과 소진 후 속도를 함께 보는 기준입니다. 속도만 보면 소량 요금제가, 제공량만 보면
-        소진 뒤 문자만 되는 상품이 섞입니다. {minGb.toLocaleString()}GB는 수집 데이터에서 소진 후
-        속도가 한 단계 올라가는 경계이고, 규제가 정한 값이 아니라 저희가 정한 기준입니다.
+        제공량과 소진 후 속도를 함께 보는 기준입니다. 통신 3사는 100GB대＋5Mbps 상품을 무제한으로
+        부르지 않아, 알뜰폰도 소진 후 {qosMbps}Mbps 이상만 ‘무제한’으로 봤습니다. 규제가 정한 값이
+        아니라 저희가 정한 기준입니다.
       </p>
       <fieldset disabled={loading} className="plain-fieldset">
         <div className="pref-switch">

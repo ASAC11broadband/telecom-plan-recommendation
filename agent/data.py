@@ -190,20 +190,25 @@ QOS_LITE_MBPS = 0.46
 # 절반 이상(868건)이 50GB 미만이었다. "무제한 추천해줘"에 4.5GB / 100원 상품이 1순위로
 # 올라온 원인이다. 그래서 기본 제공량 조건을 함께 건다.
 #
-# 근거 셋이 100GB 로 모인다. 규제가 정한 숫자가 아니라 **서비스 정책값**이다.
+# 속도 문턱은 10Mbps 다(2026-09-21, 팀 결정 "일단"). 규제가 정한 숫자가 아니라 **서비스 정책값**이다.
 # 아래 수치는 모두 BASELINE_DATE 고정 분석본에서 뽑았다(baseline_plans()로 재현된다).
-#  1) 상품 군집: 수집 데이터에서 제공량 100GB 를 경계로 소진 후 속도가 3Mbps -> 5Mbps 로
-#     계단이 진다(71GB 군집 232건은 전부 3.0Mbps, 100GB 군집 196건 중 193건이 5.0Mbps).
-#  2) 사용량: 스마트초이스 생활패턴의 최상위 구간이 '하루 3시간 이상 영상 = 월 90GB 이상,
-#     상한 없음'이다(usage.py SMARTCHOICE_USAGE_RANGES_GB). 100GB 는 그 구간을 기본
-#     제공량만으로 덮는 최소 규격이다.
-#  3) 평균 사용량: 과기정통부 통계 기준 5G 월평균이 26GB 대(2022년 6월 26.16GB)로, 그 약 4배.
+# '통신 3사'는 carrier_type=MNO 에 모요에 올라온 3사 직판(mvno_brand 가 SKT/KT/LG U+)을 더한 것.
 #
-# 속도 문턱을 1Mbps 에서 HD 기준으로 올린 이유는 규제 쪽이다. 공정위는 2021년 SKT 5G
-# 요금제에 대해 "소진 후 최대 1Mbps 인데 명시하지 않아 소비자 오인" 으로 경고했다.
-# 1Mbps 는 규제가 무제한으로 인정한 속도가 아니라 문제 삼은 속도다.
+#     등급             조건                         알뜰폰   통신 3사
+#     무제한           기본량 무제한                     0       363
+#     사실상 무제한    소진 후 10Mbps 이상              40         0
+#     대용량 + 5Mbps   5Mbps + 기본량 100GB 이상       350        29
+#
+# 직전 기준(100GB + 4.44Mbps)은 셋째 줄까지 '무제한'으로 받았다. 그런데 통신 3사는 바로 그
+# 규격(100GB 대 + 5Mbps, 라이트·베이직·데이터플랜 계열)을 무제한이라 부르지 않고 무제한 아래
+# 등급으로 판다. 시장이 무제한으로 치지 않는 규격을 우리만 무제한이라 부를 근거가 없다.
+# 알뜰폰에는 기본량 무제한이 0건이라, 알뜰폰에서 '무제한'에 해당하는 최상위 군집은
+# 소진 후 10Mbps(40건, 전부 제공량 180~200GB)다.
+#
+# 제공량 조건(100GB)은 그대로 함께 건다. 지금은 10Mbps 상품이 전부 180GB 이상이라 결과를
+# 바꾸지 않지만, '소량 + 속도'가 무제한으로 들어오던 원래 버그를 막는 안전장치다.
 UNLIMITED_MIN_GB = 100.0
-UNLIMITED_QOS_MBPS = QOS_HD_MBPS
+UNLIMITED_QOS_MBPS = 10.0
 
 DATA_TIERS = {
     "unlimited_full": "기본량 무제한",
@@ -1113,10 +1118,11 @@ if __name__ == "__main__":
     tier_counts = pd.Series([r["data_tier"] for r in all_plans()]).value_counts()
     assert tier_counts.get("capped", 0) > 500, tier_counts.to_dict()
     # 속도만 빠른 소량 상품은 '무제한'이 아니다. 제공량도 함께 넘겨야 통과한다.
-    assert is_effectively_unlimited(False, 5.0, 150.0)
-    assert not is_effectively_unlimited(False, 5.0, 4.5)
+    assert is_effectively_unlimited(False, 10.0, 180.0)
+    assert not is_effectively_unlimited(False, 5.0, 150.0)  # 대용량+5Mbps: 통신 3사도 무제한이라 부르지 않는다
+    assert not is_effectively_unlimited(False, 10.0, 4.5)
     assert not is_effectively_unlimited(False, 1.0, 150.0)
-    assert not is_effectively_unlimited(False, 5.0, None)
+    assert not is_effectively_unlimited(False, 10.0, None)
     assert is_effectively_unlimited(True, None, None)
 
     # '무제한' 요청은 완전 무제한과 QoS형을 함께 본다. 라벨만 보면 3만원 이하가 1건뿐이다.

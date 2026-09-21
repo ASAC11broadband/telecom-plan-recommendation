@@ -122,7 +122,8 @@ def analysis_snapshot() -> dict:
     ]
     sensitivity = []
     for min_gb in [0.0, 70.0, UNLIMITED_MIN_GB, 150.0]:
-        for speed in [1.0, 3.0, UNLIMITED_QOS_MBPS]:
+        # 5Mbps 줄은 직전 기준(대용량+5Mbps)이다. 지금 기준이 무엇을 빼는지 보이게 남긴다.
+        for speed in [1.0, 3.0, 5.0, UNLIMITED_QOS_MBPS]:
             selected = [r for r in baseline_rows if r["data_unlimited"]
                         or ((r["qos_mbps"] or 0) >= speed and (r["data_gb"] or 0) >= min_gb)]
             sensitivity.append({
@@ -188,8 +189,8 @@ def analysis_snapshot() -> dict:
             f"기준 유도는 {BASELINE_DATE} 고정 분석본으로 하고, 서비스 추천은 최신 수집본에 "
             "그 기준을 적용합니다. 위 현황 통계와 무제한 민감도 표는 기준일이 다릅니다.",
             f"'무제한' 기준(기본량 무제한 또는 제공량 {UNLIMITED_MIN_GB:g}GB 이상＋소진 후 "
-            f"{UNLIMITED_QOS_MBPS:g}Mbps 이상)은 서비스 정책입니다. 수집 데이터에서 상품 군집이 "
-            "갈리는 경계를 따랐을 뿐, 규제나 표준이 정한 값도 최적 기준의 증명도 아닙니다. "
+            f"{UNLIMITED_QOS_MBPS:g}Mbps 이상)은 서비스 정책입니다. 통신 3사가 100GB대＋5Mbps 상품을 "
+            "무제한으로 부르지 않는 시장 관행을 따랐을 뿐, 규제나 표준이 정한 값도 최적 기준의 증명도 아닙니다. "
             "문턱별 후보 수 비교는 민감도 분석입니다.",
             "1위 수용도는 고정된 표본 가중치에서 1위가 된 비율입니다. 동일 효용이면 ID 정렬 영향을 받을 수 있습니다.",
             "추천과 총비용은 12개월 기준입니다. 할인 기간 미상은 현재가 유지 가정이며, 페이백 반영 표시가만 있는 상품은 추천에서 제외합니다.",

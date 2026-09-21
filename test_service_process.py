@@ -210,7 +210,7 @@ class ServiceProcessTests(unittest.TestCase):
         # 문턱을 유도한 근거가 고정본에서 그대로 재현된다.
         old_definition = int((baseline['data_unlimited'] | (baseline['qos_mbps'] >= 1.0)).sum())
         self.assertEqual((len(baseline), old_definition,
-                          int(baseline['effective_unlimited'].sum())), (2759, 2007, 782))
+                          int(baseline['effective_unlimited'].sum())), (2759, 2007, 403))
         # 서비스가 읽는 최신본과는 다른 파일이다.
         self.assertNotEqual(BASELINE_PLANS_CSV.resolve(), PLANS_CSV.resolve())
 
