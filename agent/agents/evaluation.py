@@ -145,16 +145,6 @@ def _constraint_errors(profile: UserProfile | None, plan: dict) -> list[str]:
     return errors
 
 
-# 우선순위 축별 정렬값. 클수록 좋은 값으로 통일한다.
-PRIORITY_VALUES = {
-    "price": lambda plan: -plan["discounted_fee"],
-    "data": lambda plan: math.inf if plan["data_unlimited"] else float(plan.get("data_gb") or 0),
-    "qos": lambda plan: float(plan.get("qos_mbps") or 0),
-    "voice": lambda plan: math.inf if plan["voice_unlimited"] else float(plan.get("voice_minutes") or 0),
-    "benefit": lambda plan: float(len(plan.get("included_benefits") or [])),
-}
-
-
 def _ranking_errors(profile: UserProfile | None, ranked: list, rows: list[dict]) -> list[str]:
     """점수 역전, 중복 추천, 명백한 우선순위 위반을 잡는다."""
     errors: list[str] = []

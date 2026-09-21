@@ -200,12 +200,6 @@ class ScoredPlan(BaseModel):
     )
 
 
-class RankingResult(BaseModel):
-    """2단계 LLM 구조화 출력 컨테이너."""
-
-    plans: list[ScoredPlan] = Field(default_factory=list, description="상위 3개, 적합도 순")
-
-
 class Evaluation(BaseModel):
     """4단계 산출물 — 채점 결과와 재시도 지시."""
 

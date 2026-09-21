@@ -7,14 +7,13 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from agent.data import all_plans, filter_candidates, PLANS_CSV
-from agent.schemas import UserProfile, ScoredPlan, Evaluation
+from agent.schemas import UserProfile, ScoredPlan
 from agent.agents.recommend import (recommend_node, _apply_comparison, _reference_verdict,
                                     _dedupe_identical_offers, _diverse_selection, _offer_character,
                                     _is_pareto_better, TOP_N)
 from agent.agents.evaluation import _ranking_errors, evaluation_node
 from agent.agents.profiling import _apply_user_age
 from backend.main import app, _llm_calls, LLM_CALLS_PER_MINUTE
-from backend.analysis import analysis_snapshot
 from backend.plans import (COMPARE_MONTHS, monthly_fee_schedule, reference_delta,
                            to_plan_item, total_cost)
 

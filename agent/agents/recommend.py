@@ -247,21 +247,6 @@ def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict |
     }
 
 
-def _similarity_distance(plan: dict, reference: dict) -> float:
-    distance = 0.0
-    if reference.get("discounted_fee"):
-        distance += abs(plan["discounted_fee"] - reference["discounted_fee"]) / reference["discounted_fee"]
-    if reference.get("data_unlimited") is not None:
-        distance += 1.0 if plan.get("data_unlimited") != reference["data_unlimited"] else 0.0
-    if not reference.get("data_unlimited") and reference.get("data_gb"):
-        distance += abs((plan.get("data_gb") or 0) - reference["data_gb"]) / reference["data_gb"]
-    if reference.get("qos_mbps"):
-        distance += abs((plan.get("qos_mbps") or 0) - reference["qos_mbps"]) / reference["qos_mbps"]
-    if reference.get("network_gen"):
-        distance += 0.5 if plan.get("network_gen") != reference["network_gen"] else 0.0
-    return distance
-
-
 # 사용자가 상품을 고를 때 실제로 보고 갈라지는 값들. 이게 다르면 다른 상품이다.
 _OFFER_FIELDS = (
     "plan_name",
@@ -367,53 +352,6 @@ def _diverse_selection(ordered: list, by_id: dict[str, dict], limit: int = TOP_N
     # 채우면서 순서가 흐트러졌으므로 최초 순위(세대 우선 포함)로 되돌린다.
     position = {decision.plan_id: index for index, decision in enumerate(ordered)}
     return sorted(picked, key=lambda decision: position[decision.plan_id])
-
-
-def _shortlist(
-    candidates: list[dict],
-    profile: UserProfile,
-    reference: dict | None = None,
-    limit_per_axis: int = 6,
-) -> list[dict]:
-    """고정 총점 없이 여러 축의 우수 후보를 합쳐 LLM 입력을 제한한다."""
-    if len(candidates) <= limit_per_axis * 5:
-        return candidates
-
-    axes = {
-        "price": lambda p: (p["discounted_fee"], -_data_value(p)),
-        "data": lambda p: (-_data_value(p), p["discounted_fee"]),
-        "benefit": lambda p: (-len(p.get("included_benefits") or []), p["discounted_fee"]),
-        "qos": lambda p: (-(p.get("qos_mbps") or 0), p["discounted_fee"]),
-        "voice": lambda p: (-_voice_value(p), -int(p.get("sms_unlimited", False)), p["discounted_fee"]),
-    }
-    axis_order = list(
-        dict.fromkeys((profile.priorities or []) + ["price", "data", "benefit", "qos", "voice"])
-    )
-
-    selected: dict[str, dict] = {}
-    for axis in axis_order:
-        key = axes.get(axis)
-        if key is None:
-            continue
-        for plan in sorted(candidates, key=key)[:limit_per_axis]:
-            selected.setdefault(plan["plan_id"], plan)
-
-    if profile.estimated_monthly_data_gb is not None:
-        target = profile.estimated_monthly_data_gb
-        usage_fit = sorted(
-            candidates,
-            key=lambda p: (
-                0 if p.get("data_unlimited") or (p.get("data_gb") or 0) >= target else 1,
-                abs((p.get("data_gb") or 0) - target),
-                p["discounted_fee"],
-            ),
-        )
-        for plan in usage_fit[:limit_per_axis]:
-            selected.setdefault(plan["plan_id"], plan)
-    if reference and "similar" in (profile.comparison_goals or []):
-        for plan in sorted(candidates, key=lambda p: _similarity_distance(p, reference))[:limit_per_axis]:
-            selected.setdefault(plan["plan_id"], plan)
-    return list(selected.values())
 
 
 def _with_reference_baseline(profile: UserProfile, reference: dict | None) -> UserProfile:
