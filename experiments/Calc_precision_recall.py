@@ -28,9 +28,9 @@ from openpyxl import Workbook
 from collections import defaultdict
 
 # 인자로 덮어쓸 수 있다: python -m experiments.Calc_precision_recall [정답지] [챗봇결과] [출력]
-ANSWER_KEY_PATH = "data/test_cases_정답지 - 복사본.xlsx"
-RESULTS_PATH = "data/recommend_results.xlsx"
-OUTPUT_PATH = "data/precision_recall_results.xlsx"
+ANSWER_KEY_PATH = "data/eval/test_cases_정답지.xlsx"
+RESULTS_PATH = "data/eval/recommend_results.xlsx"
+OUTPUT_PATH = "data/eval/precision_recall_results.xlsx"
 SHEET_NAME = "테스트케이스_v2"
 MAX_RANK = 5
 PRICE_TOLERANCE = 1  # 원 단위 오차 허용

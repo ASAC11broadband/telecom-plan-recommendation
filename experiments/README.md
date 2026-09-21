@@ -16,4 +16,4 @@
 python -m experiments.run_metric_table
 ```
 
-`results/`는 어떤 코드도 읽지 않는 과거 실행 결과 보관소다. `scenarios.txt`는 팀이 작성한 시나리오 질의 목록.
+평가용 입력(정답지·프로필 캐시)과 결과는 `data/eval/`에 있다. `results/`는 어떤 코드도 읽지 않는 과거 실행 결과 보관소다. `scenarios.txt`는 팀이 작성한 시나리오 질의 목록.

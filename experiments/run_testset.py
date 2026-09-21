@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """정답지 문항을 파이프라인에 태워 Calc_precision_recall.py 가 읽는 wide 포맷으로 저장한다.
 
-    python -m experiments.run_testset                       # 100문항 전체 -> data/recommend_results.xlsx
+    python -m experiments.run_testset                       # 100문항 전체 -> data/eval/recommend_results.xlsx
     python -m experiments.run_testset --limit 5             # 스모크 테스트
     python -m experiments.run_testset --out results_4o.xlsx --workers 8
     python -m experiments.run_testset --ids L2-28,L3-09 --workers 1   # 429 등으로 실패한 문항만 재실행
@@ -21,7 +21,7 @@ from openpyxl import Workbook
 
 from agent.graph import graph
 
-ANSWER_KEY_PATH = "data/test_cases_정답지 - 복사본.xlsx"
+ANSWER_KEY_PATH = "data/eval/test_cases_정답지.xlsx"
 SHEET_NAME = "테스트케이스_v2"
 MAX_RANK = 5
 
@@ -56,7 +56,7 @@ def answer_one(question: str) -> list[dict]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--answer-key", default=ANSWER_KEY_PATH)
-    ap.add_argument("--out", default="data/recommend_results.xlsx")
+    ap.add_argument("--out", default="data/eval/recommend_results.xlsx")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--ids", help="쉼표로 구분한 문항 id만 재실행. 나머지 문항은 기존 --out 파일 값을 유지한다")
     ap.add_argument("--workers", type=int, default=4)

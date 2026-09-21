@@ -3,7 +3,7 @@
 
 **지금은 실행되지 않는다(보관용).** de85a04 에서 `agent.agents.recommend._dedupe_by_name` 이
 `_dedupe_identical_offers` 로 바뀌고 `agent.mcda._finite_voice` 가 없어졌다. 중복 정리 규칙 자체가
-달라져서 이름만 고쳐서는 data/weight_arms_* 의 수치(난수 0.292 / Ridge 0.370)가 재현되지 않는다.
+달라져서 이름만 고쳐서는 data/eval/weight_arms_* 의 수치(난수 0.292 / Ridge 0.370)가 재현되지 않는다.
 
 가중치는 `evaluate_mcda` 에만 들어간다. 후보군 생성(필터·비교목표)까지는 가중치와
 무관하고, 그 앞의 프로파일링은 LLM 이라 돌릴 때마다 달라진다. arm 마다 파이프라인을
@@ -13,7 +13,7 @@
     python -m experiments.run_weight_arms                 # 캐시 있으면 LLM 안 태움
     python -m experiments.run_weight_arms --refresh       # 프로파일·가중치 캐시 재생성
 
-산출: data/weight_arms_results.csv (arm x 문항 P/R)
+산출: data/eval/weight_arms_results.csv (arm x 문항 P/R)
 """
 
 from __future__ import annotations
@@ -40,13 +40,14 @@ from agent.mcda import _finite_data, _finite_voice, _minmax
 from agent.schemas import UserProfile
 
 DATA = Path("data")
-ANSWER_KEY = DATA / "test_cases_정답지.xlsx"
-PROFILE_CACHE = DATA / "testset_profiles.json"
-ARM_CACHE = DATA / "weight_arms.json"
-SHAP_WEIGHTS = DATA / "weight_bootstrap_shap.json"
-OUT_CSV = DATA / "weight_arms_results.csv"
-OUT_DETAIL = DATA / "weight_arms_detail.xlsx"
-OUT_BENCH = DATA / "benchmark"
+EVAL = DATA / "eval"  # 평가용 입력·결과. 서비스는 읽지 않는다
+ANSWER_KEY = EVAL / "test_cases_정답지.xlsx"
+PROFILE_CACHE = EVAL / "testset_profiles.json"
+ARM_CACHE = EVAL / "weight_arms.json"
+SHAP_WEIGHTS = EVAL / "weight_bootstrap_shap.json"
+OUT_CSV = EVAL / "weight_arms_results.csv"
+OUT_DETAIL = EVAL / "weight_arms_detail.xlsx"
+OUT_BENCH = EVAL / "benchmark"
 SHEET = "테스트케이스_v2"
 TOP_K = 5
 

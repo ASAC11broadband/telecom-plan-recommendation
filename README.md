@@ -8,7 +8,7 @@ agent/      LLM 파이프라인 (profiling → recommend → report → evaluati
 backend/    FastAPI
 frontend/   React + Vite 화면
 crawler/    통신 3사·모요 수집·일일 갱신
-data/       서비스가 읽는 요금제 CSV(고정) + 기준 유도용 고정본 + 평가용 입력
+data/       서비스가 읽는 요금제 CSV(고정) · baseline/ · eval/(평가용) · synthetic_original/
 experiments/ 실험·평가 스크립트 (서비스는 import 하지 않는다)
 outputs/    발표 자료·분석 노트
 ```

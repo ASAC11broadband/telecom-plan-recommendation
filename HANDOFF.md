@@ -11,7 +11,7 @@
 agent/        LLM 파이프라인 (profiling → recommend → report → evaluation), 추천 로직(mcda.py), 데이터 로드(data.py)
 backend/      FastAPI            frontend/   React + Vite
 crawler/      통신 3사·모요 수집·일일 갱신 (결과는 crawler/data/, git 제외)
-data/         서비스가 읽는 CSV(고정) + baseline/(기준 유도용 고정본) + 평가용 입력
+data/         서비스가 읽는 CSV(고정) · baseline/(기준 유도용 고정본) · eval/(평가용 입력·결과) · synthetic_original/(합성 가입이력)
 experiments/  실험·평가 스크립트. 서비스는 import 하지 않는다 → experiments/README.md
 notebooks/    가중치 학습·EDA 노트북
 outputs/      발표/ (PPT·스크립트·그림) · 분석노트/ · 데이터수집/ · 지표표_방법별비교.json
