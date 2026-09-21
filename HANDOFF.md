@@ -1,6 +1,65 @@
-# HANDOFF — 무제한 정의 / 청구액 분리 / 현재 요금제 대비 변화 / 선호 변경 재계산
+# HANDOFF
 
-## 최신: '무제한' 속도 문턱을 4.44Mbps → 10Mbps 로 (2026-09-21)
+**읽는 법:** "현재 상태"만 읽으면 지금 코드가 어떤 상태인지 안다. 그 아래 "이력"은 결정이 내려진 당시의
+기록을 최신순으로 그대로 둔 것이라, 뒤 항목의 수치·경로는 그 시점 기준이다.
+
+## 현재 상태 (2026-09-21, 브랜치 `fix/plan`)
+
+### 폴더
+
+```
+agent/        LLM 파이프라인 (profiling → recommend → report → evaluation), 추천 로직(mcda.py), 데이터 로드(data.py)
+backend/      FastAPI            frontend/   React + Vite
+crawler/      통신 3사·모요 수집·일일 갱신 (결과는 crawler/data/, git 제외)
+data/         서비스가 읽는 CSV(고정) + baseline/(기준 유도용 고정본) + 평가용 입력
+experiments/  실험·평가 스크립트. 서비스는 import 하지 않는다 → experiments/README.md
+notebooks/    가중치 학습·EDA 노트북
+outputs/      발표/ (PPT·스크립트·그림) · 분석노트/ · 데이터수집/ · 지표표_방법별비교.json
+```
+
+### 지금 적용 중인 정책값 — 바꿀 곳은 각각 한 줄이다
+
+| 정책 | 값 | 위치 |
+|---|---|---|
+| '무제한' | 기본량 무제한 OR (제공량 ≥ 100GB AND 소진 후 ≥ **10Mbps**) — 잠정("일단") | `agent/data.py` `UNLIMITED_MIN_GB` / `UNLIMITED_QOS_MBPS` |
+| 비용 비교 기간 | **12개월** (화면 총비용·혜택 월 환산). 6개월 의견이 있어 팀 확정 대기 | `agent/mcda.py` `COMPARE_MONTHS` |
+| 순위의 가격 축 | 지금 내는 월 요금(할인가). "갈아탈 가치" 비교만 12개월 평균 | `agent/mcda.py` `_PRICE_HORIZON_MONTHS`, `_switching_monthly_fee` |
+| 추천 노출 개수 | 5 | `agent/agents/recommend.py` `TOP_N` |
+| 페이백 상품 | 청구액이 확인된 81건만 추천·총비용에 포함, 미확인 3건 제외 | `data/페이백_청구액_검증.csv` → `agent/data.py` `_apply_verified_billing` |
+| 서비스 입력 CSV | 루트 `data/` 는 **일부러 고정**. 크롤러 결과를 복사하지 않는다 | — |
+
+'무제한' 문턱을 바꾸면 파레토 풀·코사인 카탈로그까지 값이 흘러간다. 아래 순서로 다시 돌려야 발표 수치가 맞는다.
+
+```bash
+python -m unittest test_service_process            # 고정본 건수(현재 403) 단언이 같이 바뀐다
+python -m experiments.run_metric_table              # outputs/지표표_방법별비교.json
+python -m experiments.run_presentation_evidence     # 약 10분. outputs/발표/ 그림·수치
+python outputs/발표/build_deck.py                    # 발표_초안.pptx + 발표초안.md
+```
+
+### 미해결
+
+- **학습 모집단 ≠ 적용 모집단.** Ridge 가중치는 MVNO 로만 학습했는데 후보에는 통신사 필터가 없다.
+- **SMAA-2 가중치가 점추정이다**(price 0.483 ± 0.008). "사람마다 다른 선호"가 들어 있지 않다.
+- **우선순위 반응이 반쪽이다.** '속도 우선'은 Top-5 가 움직이지만 '데이터 우선'·'통화 우선'은 질의 24건 전부 그대로다.
+- **설명 검증(Evaluation) 미통과가 실제 요청에서 관찰됐고** 통과율을 집계한 적이 없다.
+- **`experiments/run_weight_arms` 는 실행되지 않는다**(de85a04 이후). 발표의 Precision +27% 표를 현재 코드로 재현할 수 없다.
+- '무제한' 10Mbps 로 "무제한 + 3만원 이하" 후보가 9건뿐이다. 대용량+5Mbps 를 다시 포함하는 방향 전환 버튼은 미정.
+- 발표 근거의 빈 곳 전체 목록: `outputs/발표/질의응답_근거점검.md`.
+
+### 확인
+
+```bash
+python -m unittest test_service_process
+python -m agent.data && python -m agent.mcda && python -m backend.plans && python -m agent.agents.evaluation
+cd frontend && npm run build
+```
+
+---
+
+# 이력 (최신순 · 당시 기록 그대로)
+
+## '무제한' 속도 문턱을 4.44Mbps → 10Mbps 로 (2026-09-21)
 
 아래 "100GB＋4.44Mbps" 정의 위에서 한 번 더 좁혔다. **팀 결정이고 "일단"이다.**
 
@@ -9,7 +68,7 @@
        OR (기본 제공량 >= 100GB  AND  소진 후 >= 10Mbps)
 ```
 
-근거(고정 분석본 2,759건, `python run_presentation_evidence.py`의 `fig_unlimited`로 재현).
+근거(고정 분석본 2,759건, `python -m experiments.run_presentation_evidence`의 `fig_unlimited`로 재현).
 '통신 3사' = `carrier_type=MNO` + 모요에 올라온 3사 직판(`mvno_brand`가 SKT/KT/LG U+):
 
 | 등급 | 조건 | 알뜰폰 | 통신 3사 |
@@ -32,11 +91,11 @@
 - 확인: `unittest test_service_process` 43개 통과, `agent.data`·`backend.plans`·`agent.cosine_recommendation`·
   `agent.agents.evaluation` self-check, `npm run build` 통과.
 - 남은 것: 대용량＋5Mbps(알뜰폰 329건)를 다시 포함하는 방향 전환 버튼을 둘지 미정.
-  `outputs/무제한_정의_근거표.md`는 옛 정의(4.44Mbps) 기준 문서라 아직 갱신하지 않았다.
+  `outputs/분석노트/무제한_정의_근거표.md`는 옛 정의(4.44Mbps) 기준 문서라 아직 갱신하지 않았다.
 
 ---
 
-## 최신: '무제한' 정의를 제공량＋속도 두 조건으로 (2026-09-18, 위 작업에 이어서)
+## '무제한' 정의를 제공량＋속도 두 조건으로 (2026-09-18, 위 작업에 이어서)
 
 ### 증상
 
@@ -145,7 +204,7 @@
 
 ## 이전: 청구액 분리 / 현재 요금제 대비 변화 / 선호 변경 재계산
 
-## 최신: 멘토 피드백 3건 반영 (2026-09-18, 01e14e4 + 이전 미커밋 변경 위에 이어서 작업)
+## 멘토 피드백 3건 반영 (2026-09-18, 01e14e4 + 이전 미커밋 변경 위에 이어서 작업)
 
 작업 위치 `.claude/worktrees/plan-fix`, 브랜치 `fix/plan`. 이번 변경도 **아직 커밋하지 않았습니다.**
 이전 미커밋 변경(페이백 84건 계산 제외, 발표 초안)은 그대로 보존한 채 그 위에 이어서 고쳤습니다.
@@ -276,7 +335,7 @@ npm run dev -- --host 127.0.0.1 --port 5179 --strictPort
 
 ## 이전: 설명 검증 / 비용 기준 통일 / 혜택 왜곡 / 필수·선호 / 유지 판정 / 비슷한 추천 완화
 
-## 최신: 페이백 표시가 점검 및 발표 초안 (2026-09-18, 01e14e4 이후)
+## 페이백 표시가 점검 및 발표 초안 (2026-09-18, 01e14e4 이후)
 
 - 사용자 요청으로 후속 점검 및 8장 발표 초안을 만들었습니다. 이번 변경은 아직 커밋하지 않았습니다.
 - 원문 확인: 모요 36334는 청구액 49,000원 / 페이백 표시가 7,000원, 37403은 41,900원 / 6,900원입니다. 아래 과거 실검증의 2개 추천은 잘못된 가격 데이터에 의존하므로 성과 사례로 재사용하지 마세요.
@@ -290,7 +349,7 @@ npm run dev -- --host 127.0.0.1 --port 5179 --strictPort
 
 ---
 
-## 최신 기록: Codex 후속 보완 (2026-09-18)
+## Codex 후속 보완 (2026-09-18)
 
 작업 위치는 `.claude/worktrees/plan-fix`, 브랜치 `fix/plan`, Claude 기준 HEAD `c16fb3d`입니다.
 아래 이전 기록의 서버 상태와 미검증 항목은 이 절을 우선하세요. 이번 변경은 미커밋입니다.

@@ -21,13 +21,8 @@ import math
 
 CRITERIA = ("price", "data", "qos", "benefit", "voice", "tethering")
 
-# 우선순위 1단계당/비교 목표당 얼마나 가산할지.
-#
-# 실측 가중치 벡터는 합이 1.0 이다. 여기에 10.0/6 = 1.667 을 더하면 우선순위를 하나만
-# 말해도 그 축이 재정규화 뒤 81% 를 먹는다(price 0.483 -> 0.815). 예전 감마분포 버전은
-# alpha 합계가 6 이라 같은 +10 이 1.6배 기울기였는데, 합계 1 벡터에 그대로 옮기면서
-# 2.7배로 증폭됐다. 실제로 "3만원 이하" 사용자에게 10GB/10원 요금제가 1순위로 올라왔다.
-# 합계 1 기준으로 다시 맞춘다: 우선순위 1개 -> 해당 축 약 0.53, 3개 -> 약 0.6/0.3/0.2 비율.
+# 우선순위 1단계당/비교 목표당 얼마나 가산할지. 가중치 벡터의 합이 1.0 이라 단위도 그 눈금이다:
+# 우선순위 1개 -> 해당 축 약 0.53, 3개 -> 약 0.6/0.3/0.2 비율. 이보다 크면 한 축이 결정을 독점한다.
 _PRIORITY_UNIT = 0.10
 _GOAL_UNIT = 0.12
 # 한 축이 결정을 독점하지 못하게 하는 상한. SMAA-2 는 가중치 불확실성을 탐색하는 방법인데
@@ -36,19 +31,14 @@ _MAX_BOOSTED_SHARE = 0.60
 
 _WEIGHT_DATA_PATH = Path(__file__).resolve().parent / "weight_bootstrap.json"
 
-# 비용 비교 기간. 화면의 총비용과 혜택 월 환산이 이 값을 쓴다.
-# 예전에는 랭킹만 12개월이고 화면은 6개월이라 같은 상품의 "총비용"이 화면마다 달랐다.
-# 기준을 하나로 두지 않으면 어느 쪽이 맞는지 사용자가 판단할 수 없다.
+# 비용 비교 기간. 화면의 총비용과 혜택 월 환산이 모두 이 값 하나를 쓴다.
+# 기준이 둘이면 같은 상품의 "총비용"이 화면마다 달라 보인다.
 COMPARE_MONTHS = 12
 
-# 순위의 가격 축은 "지금 내는 월 요금"(discounted_fee) 하나다. 1 을 넣으면
-# _effective_monthly_fee 가 할인가를 그대로 돌려준다.
-#
-# 12개월 평균을 쓰던 것을 되돌린 것이다. 질의 7종으로 확인해보니 다기준(6축) 순위에서는
-# 두 기준의 Top-5 가 전부 같았다 - 가격은 축 하나일 뿐이라 기준을 바꿔도 순위가 안 바뀐다.
-# 그러면 사용자가 카드에서 보는 금액과 순위가 쓰는 금액을 굳이 다르게 둘 이유가 없다.
-# 할인 종료 후 정가는 순위에서 빼는 대신 근거·유의사항에서 금액과 시점으로 밝힌다
-# (priceRisesAfter / priceRisesLater / monthly_fee_schedule).
+# 순위의 가격 축은 "지금 내는 월 요금"(discounted_fee)이다. 1 이면 _effective_monthly_fee 가
+# 할인가를 그대로 돌려준다. 12개월 평균으로 바꿔도 Top-5 가 같아서(질의 7종), 카드에 보이는
+# 금액과 순위가 쓰는 금액을 맞췄다. 할인 종료 후 정가는 순위가 아니라 근거·유의사항에서
+# 금액과 시점으로 밝힌다(priceRisesAfter / priceRisesLater / monthly_fee_schedule).
 _PRICE_HORIZON_MONTHS = 1
 _DATA_OVERSUPPLY_FLOOR = 0.8
 
@@ -268,9 +258,7 @@ def _utility_rows(
         _profile_value(profile, "wanted_benefit_categories")
     )
     # 혜택을 요청하지 않았으면 혜택 축은 순위를 바꾸지 않는다(통화 축과 같은 규칙).
-    # 예전에는 혜택 금액·개수를 효용으로 썼는데, '혜택은 상관없어'라고 말한 사용자에게도
-    # 페이백이 크거나 혜택 개수가 많은 상품이 위로 올라왔다. 수집된 혜택 금액은 사용자가
-    # 그 서비스를 실제로 쓰는지·지급 조건을 맞추는지가 확인돼야 절약액이 되는 값이라,
+    # 수집된 혜택 금액은 사용자가 그 서비스를 실제로 쓰고 지급 조건을 맞춰야 절약액이 되므로,
     # 요청이 없을 때 순위 근거로 쓸 수 없다. 상수 축은 _discriminating 이 걸러 낸다.
     benefit_utility = (
         [_benefit_fit(p, profile) for p in candidates]
@@ -456,7 +444,7 @@ if __name__ == "__main__":
     assert [row[benefit_index] for row in rows] == [1.0, 0.0, 1.0]
     assert [row[voice_index] for row in rows] == [1.0, 1.0, 1.0]
 
-    # 우선순위 하나가 결정을 독점하면 안 된다 (예전 스케일에서 price 가 0.815 를 먹었다)
+    # 우선순위 하나가 결정을 독점하면 안 된다
     price_index = CRITERIA.index("price")
     boosted_one = _weight_samples(["price"], [])[0]
     assert 0.45 < boosted_one[price_index] <= _MAX_BOOSTED_SHARE, boosted_one[price_index]
