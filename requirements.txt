@@ -12,3 +12,7 @@ python-dotenv>=1.1
 beautifulsoup4
 requests
 selenium
+
+# experiments · outputs/발표 (서비스 실행에는 필요 없다)
+matplotlib
+python-pptx
