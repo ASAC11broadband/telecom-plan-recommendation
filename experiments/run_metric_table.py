@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """추천 방법 5종을 **답지가 필요 없는 지표**로 같은 질의에 올려 비교한다.
 
-    python run_metric_table.py
+    python -m experiments.run_metric_table
 
 왜 답지를 안 쓰나. 공식으로 만든 답지는 결국 또 하나의 추천 로직이라, 그걸로 추천기를
 재면 "내 공식이 내 공식과 얼마나 같은가"를 잴 뿐이다(순환). 합성 가입이력의 Hit@5 도

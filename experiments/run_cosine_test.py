@@ -1,6 +1,6 @@
 """콘텐츠 기반 추천 두 판을 합성 가입이력 100명으로 비교한다.
 
-    python run_cosine_test.py
+    python -m experiments.run_cosine_test
 
 `v1 코사인`은 교과서대로고, `v2 비대칭 충족도`는 그 결함(가격을 벡터에 넣음 / 질의에
 없는 축이 벌점 / 과잉 제공에 벌점)을 고친 판이다. 근거는 agent.cosine_recommendation

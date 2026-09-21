@@ -27,7 +27,7 @@ import openpyxl
 from openpyxl import Workbook
 from collections import defaultdict
 
-# 인자로 덮어쓸 수 있다: python Calc_precision_recall.py [정답지] [챗봇결과] [출력]
+# 인자로 덮어쓸 수 있다: python -m experiments.Calc_precision_recall [정답지] [챗봇결과] [출력]
 ANSWER_KEY_PATH = "data/test_cases_정답지 - 복사본.xlsx"
 RESULTS_PATH = "data/recommend_results.xlsx"
 OUTPUT_PATH = "data/precision_recall_results.xlsx"

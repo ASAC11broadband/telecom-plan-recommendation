@@ -1,6 +1,6 @@
 """원본 합성 가입 이력으로 100명 홀드아웃 추천 실험을 재현한다.
 
-    python run_segment_test.py
+    python -m experiments.run_segment_test
 
 초기안은 ``세그먼트 소속 확률 × 세그먼트별 인기 점수``이고, 전환안은
 ``프로필 유사 이웃 -> 거리 가중 요금제 Top-5``이다. 두 방식 모두 학습 데이터에만

@@ -22,7 +22,7 @@
 잰다. 누수를 줄이려 상수를 바꿔봐야 대체할 값에 근거가 없고, 애초에 이 데이터를 절대
 성능 근거가 아니라 세그먼트 인기 vs 이웃 KNN 의 **상대 비교**에만 쓴다.
 
-    python make_synthetic_customers.py
+    python -m experiments.make_synthetic_customers
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 PLANS_CSV = ROOT / "data" / "통신요금제_통합데이터_최종.csv"
 OUTPUT = ROOT / "data" / "synthetic_original" / "customers_mvno.csv"
 

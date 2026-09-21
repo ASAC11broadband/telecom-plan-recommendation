@@ -60,7 +60,7 @@ cd frontend && npm run lint       # 타입 체크
 
 ```bash
 python -m agent.segmentation
-python run_segment_test.py
+python -m experiments.run_segment_test
 ```
 
 `run_segment_test.py`는 LLM을 호출하지 않는다. `data/synthetic_original/customers_mvno.csv`의
@@ -77,7 +77,7 @@ python run_segment_test.py
 
 ```bash
 python -m agent.cosine_recommendation
-python run_cosine_test.py
+python -m experiments.run_cosine_test
 ```
 
 같은 원본 합성 가입이력에서 100명을 분리해 정답 가입 요금제 Hit@5와 MRR@5를 기록한다.

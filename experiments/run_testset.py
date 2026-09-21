@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """정답지 문항을 파이프라인에 태워 Calc_precision_recall.py 가 읽는 wide 포맷으로 저장한다.
 
-    python run_testset.py                       # 100문항 전체 -> data/recommend_results.xlsx
-    python run_testset.py --limit 5             # 스모크 테스트
-    python run_testset.py --out results_4o.xlsx --workers 8
-    python run_testset.py --ids L2-28,L3-09 --workers 1   # 429 등으로 실패한 문항만 재실행
+    python -m experiments.run_testset                       # 100문항 전체 -> data/recommend_results.xlsx
+    python -m experiments.run_testset --limit 5             # 스모크 테스트
+    python -m experiments.run_testset --out results_4o.xlsx --workers 8
+    python -m experiments.run_testset --ids L2-28,L3-09 --workers 1   # 429 등으로 실패한 문항만 재실행
 
 --ids 로 돌리면 기존 --out 파일을 읽어 그 문항 행만 덮어쓰고 나머지는 그대로 둔다.
 """

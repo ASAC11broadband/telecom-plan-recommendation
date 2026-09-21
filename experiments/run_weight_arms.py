@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """가중치 명세(arm)별 추천 품질 비교 — 후보군을 얼려놓고 순위만 다시 매긴다.
 
+**지금은 실행되지 않는다(보관용).** de85a04 에서 `agent.agents.recommend._dedupe_by_name` 이
+`_dedupe_identical_offers` 로 바뀌고 `agent.mcda._finite_voice` 가 없어졌다. 중복 정리 규칙 자체가
+달라져서 이름만 고쳐서는 data/weight_arms_* 의 수치(난수 0.292 / Ridge 0.370)가 재현되지 않는다.
+
 가중치는 `evaluate_mcda` 에만 들어간다. 후보군 생성(필터·비교목표)까지는 가중치와
 무관하고, 그 앞의 프로파일링은 LLM 이라 돌릴 때마다 달라진다. arm 마다 파이프라인을
 통째로 다시 태우면 그 비결정성이 가중치 효과와 섞인다(빈 응답 22 vs 24 가 P/R 을
 ±0.02 흔든다). 그래서 프로파일링은 한 번만 태워 캐시하고, arm 은 순위만 다시 매긴다.
 
-    python run_weight_arms.py                 # 캐시 있으면 LLM 안 태움
-    python run_weight_arms.py --refresh       # 프로파일·가중치 캐시 재생성
+    python -m experiments.run_weight_arms                 # 캐시 있으면 LLM 안 태움
+    python -m experiments.run_weight_arms --refresh       # 프로파일·가중치 캐시 재생성
 
 산출: data/weight_arms_results.csv (arm x 문항 P/R)
 """
@@ -27,8 +31,8 @@ import openpyxl
 import pandas as pd
 from langchain_core.messages import HumanMessage
 
-from Calc_precision_recall import count_intersection, load_wide_rows
-import mcda_original  # eb0e8a2^ 시점 agent/mcda.py — 감마 난수 가중치 SMAA-2
+from experiments.Calc_precision_recall import count_intersection, load_wide_rows
+from experiments import mcda_original  # eb0e8a2^ 시점 agent/mcda.py — 감마 난수 가중치 SMAA-2
 from agent.agents.profiling import profiling_node
 from agent.agents.recommend import _apply_comparison, _dedupe_by_name, _resolve_reference
 from agent.data import filter_candidates
