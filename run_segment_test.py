@@ -138,9 +138,14 @@ def main() -> None:
     parser.add_argument("--clusters", type=int, default=6)
     parser.add_argument("--neighbors", type=int, default=100)
     parser.add_argument("--limit", type=int, default=5)
+    # 1차 합성은 2026-08-12 스냅샷, 2차는 현행 카탈로그로 만들었다. 둘 다 같은 코드로 재평가한다.
+    parser.add_argument("--customers", type=Path, default=None)
+    parser.add_argument("--plans", type=Path, default=None)
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
-    interactions = load_interactions()
+    paths = {k: v for k, v in (("customers_path", args.customers), ("plans_path", args.plans)) if v}
+    interactions = load_interactions(**paths)
     train, test = holdout_100(interactions, seed=args.seed, size=100)
     model = fit_model(train, clusters=args.clusters, neighbors=args.neighbors)
     baseline = _result_rows(test, segment_popularity_recommend, model, args.limit)
@@ -164,9 +169,9 @@ def main() -> None:
     summary.update({f"personalized_{key}": value for key, value in personalized_metrics.items()})
     summary["hit_at_5_lift"] = round(personalized_metrics["hit_at_5"] - baseline_metrics["hit_at_5"], 4)
     summary["mrr_at_5_lift"] = round(personalized_metrics["mrr_at_5"] - baseline_metrics["mrr_at_5"], 4)
-    write_outputs(baseline, personalized, summary, DEFAULT_OUTPUT, DEFAULT_JSONL)
+    write_outputs(baseline, personalized, summary, args.out, args.out.with_suffix(".jsonl"))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    print(f"결과: {DEFAULT_OUTPUT}")
+    print(f"결과: {args.out}")
 
 
 if __name__ == "__main__":

@@ -397,12 +397,26 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(item['rankingAverageFee'], 1000)
         self.assertEqual(total_cost({**row, 'discount_period_months': 2}), 1000 * 2 + 20000 * (COMPARE_MONTHS - 2))
 
-    def test_compare_period_is_single_source_of_truth(self):
-        """추천 가격 평가와 화면 총비용이 같은 기간을 써야 서로 비교된다."""
+    def test_price_bases_are_two_and_each_has_one_source(self):
+        """가격 기준은 둘뿐이고 각각 상수 한 곳에서만 나온다.
+
+        순위는 '지금 내는 월 요금'(할인가), 총비용·혜택 환산은 COMPARE_MONTHS 평균이다.
+        다기준 순위에서는 두 기준의 Top-5 가 같아서(질의 7종 확인) 순위를 카드에 적힌
+        금액과 맞췄고, 할인 종료 후 금액은 priceRisesAfter/originalPrice 로 따로 밝힌다.
+        갈아타기 판단만은 _switching_monthly_fee 로 정가 복귀를 합산한다.
+        """
         from agent.data import BENEFIT_AMORTIZE_MONTHS
+        from agent.mcda import _PRICE_HORIZON_MONTHS, _effective_monthly_fee, _switching_monthly_fee
         item = to_plan_item(self.rows[0])
-        self.assertEqual(item['compareMonths'], item['rankingMonths'])
+        self.assertEqual(item['rankingMonths'], 1)
+        self.assertEqual(item['compareMonths'], COMPARE_MONTHS)
         self.assertEqual(BENEFIT_AMORTIZE_MONTHS, COMPARE_MONTHS)
+        self.assertEqual(_PRICE_HORIZON_MONTHS, 1)
+
+        promo = {'discounted_fee': 1000, 'monthly_fee': 50000, 'discount_period_months': 1}
+        self.assertEqual(_effective_monthly_fee(promo), 1000)           # 순위: 할인가 그대로
+        self.assertEqual(_switching_monthly_fee(promo),                 # 갈아타기: 정가 복귀 포함
+                         (1000 * 1 + 50000 * (COMPARE_MONTHS - 1)) / COMPARE_MONTHS)
 
     def test_benefit_is_not_deducted_without_confirmed_usage(self):
         """이용 여부·지급 조건이 확인되지 않은 혜택은 납부액에서 빼지 않는다."""

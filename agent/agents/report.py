@@ -16,7 +16,7 @@ from langchain_core.runnables import RunnableConfig
 
 from ..data import has_benefit, normalize_benefit_category
 from .recommend import TOP_N
-from ..mcda import COMPARE_MONTHS, _effective_monthly_fee
+from ..mcda import COMPARE_MONTHS, _switching_monthly_fee
 from ..state import PipelineState, get_llm, user_query
 
 
@@ -205,7 +205,7 @@ def _vs_current(plan: Mapping, reference: Mapping | None) -> dict | None:
         return None
     current = int(reference["discounted_fee"])
     initial = int(plan["discounted_fee"])
-    average_gap = round(_effective_monthly_fee(plan) - current)
+    average_gap = round(_switching_monthly_fee(plan) - current)
     return {
         "현재_월_납부액": current,
         "후보_초기_월_요금": initial,

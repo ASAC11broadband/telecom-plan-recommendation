@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..data import DATA_TIERS, data_tier, is_effectively_unlimited, diagnose_empty, filter_candidates, find_plans_by_name
-from ..mcda import CRITERIA, COMPARE_MONTHS, _effective_monthly_fee, evaluate_mcda, rank_smaa2
+from ..mcda import CRITERIA, COMPARE_MONTHS, _switching_monthly_fee, evaluate_mcda, rank_smaa2
 from ..schemas import ScoredPlan, UserProfile
 from ..state import PipelineState
 
@@ -99,7 +99,7 @@ def _apply_comparison(
 
     result = candidates
     if "cheaper" in goals and reference.get("discounted_fee") is not None:
-        result = [p for p in result if _effective_monthly_fee(p) < _effective_monthly_fee(reference)]
+        result = [p for p in result if _switching_monthly_fee(p) < _switching_monthly_fee(reference)]
     if "more_data" in goals:
         if reference.get("data_unlimited"):
             # 무제한보다 수치상 더 많은 데이터는 존재하지 않는다. 사용자의 의도는
@@ -123,7 +123,7 @@ def _is_pareto_better(candidate: dict, reference: dict) -> bool:
         return False
     comparisons: list[tuple[float, float, bool]] = []
     if reference.get("discounted_fee") is not None:
-        comparisons.append((_effective_monthly_fee(candidate), _effective_monthly_fee(reference), False))
+        comparisons.append((_switching_monthly_fee(candidate), _switching_monthly_fee(reference), False))
     if "data" in _known_reference_axes(reference):
         comparisons.append((_data_value(candidate), _data_value(reference), True))
     if reference.get("qos_mbps") is not None:
@@ -217,7 +217,7 @@ def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict |
                 "missing": [], "confirm": confirm}
     better = sum(1 for plan in comparable if _is_pareto_better(plan, reference))
     cheaper = sum(1 for plan in comparable
-                  if _effective_monthly_fee(plan) < _effective_monthly_fee(reference))
+                  if _switching_monthly_fee(plan) < _switching_monthly_fee(reference))
     unknown = len(candidates) - len(comparable)
     scope = f"확인된 요금·제공량과 {COMPARE_MONTHS}개월 평균요금 기준으로 "
     if unknown:

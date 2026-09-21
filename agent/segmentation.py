@@ -20,8 +20,10 @@ from sklearn.preprocessing import StandardScaler
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# 합성 가입 이력은 make_synthetic_customers.py 가 현행 카탈로그로 만든다. 요금제는 그
+# 카탈로그를 그대로 보므로, 세 방법(세그먼트·코사인·MCDA)이 같은 후보군 위에서 비교된다.
 CUSTOMERS_CSV = ROOT / "data" / "synthetic_original" / "customers_mvno.csv"
-PLANS_CSV = ROOT / "data" / "synthetic_original" / "plan_catalog_2026-08-12.csv"
+PLANS_CSV = ROOT / "data" / "통신요금제_통합데이터_최종.csv"
 
 # 성별은 추천 근거로 쓰지 않는다. 사용량·예산·필요 조건만 쓴다.
 FEATURE_COLUMNS = (

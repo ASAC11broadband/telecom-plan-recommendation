@@ -36,11 +36,20 @@ _MAX_BOOSTED_SHARE = 0.60
 
 _WEIGHT_DATA_PATH = Path(__file__).resolve().parent / "weight_bootstrap.json"
 
-# 비용 비교 기간. 추천의 가격 효용, 화면의 총비용, 혜택 월 환산이 모두 이 값을 쓴다.
+# 비용 비교 기간. 화면의 총비용과 혜택 월 환산이 이 값을 쓴다.
 # 예전에는 랭킹만 12개월이고 화면은 6개월이라 같은 상품의 "총비용"이 화면마다 달랐다.
 # 기준을 하나로 두지 않으면 어느 쪽이 맞는지 사용자가 판단할 수 없다.
 COMPARE_MONTHS = 12
-_PRICE_HORIZON_MONTHS = COMPARE_MONTHS
+
+# 순위의 가격 축은 "지금 내는 월 요금"(discounted_fee) 하나다. 1 을 넣으면
+# _effective_monthly_fee 가 할인가를 그대로 돌려준다.
+#
+# 12개월 평균을 쓰던 것을 되돌린 것이다. 질의 7종으로 확인해보니 다기준(6축) 순위에서는
+# 두 기준의 Top-5 가 전부 같았다 - 가격은 축 하나일 뿐이라 기준을 바꿔도 순위가 안 바뀐다.
+# 그러면 사용자가 카드에서 보는 금액과 순위가 쓰는 금액을 굳이 다르게 둘 이유가 없다.
+# 할인 종료 후 정가는 순위에서 빼는 대신 근거·유의사항에서 금액과 시점으로 밝힌다
+# (priceRisesAfter / priceRisesLater / monthly_fee_schedule).
+_PRICE_HORIZON_MONTHS = 1
 _DATA_OVERSUPPLY_FLOOR = 0.8
 
 # '무제한' 요청에 대한 등급별 충족도. agent.data.data_tier 와 짝이다.
@@ -107,7 +116,11 @@ def _profile_value(profile: object | dict | None, field: str):
 
 
 def _effective_monthly_fee(plan: dict, months: int = _PRICE_HORIZON_MONTHS) -> float:
-    """프로모션 종료 후 정상가까지 포함한 비교기간 평균 월 납부액."""
+    """순위가 쓰는 월 납부액. 기본값(months=1)이면 지금 내는 할인가 그대로다.
+
+    months 를 늘리면 할인이 끝난 뒤의 정가까지 섞은 그 기간 평균이 된다. 총비용
+    계산(backend.plans.total_cost)은 그쪽을 COMPARE_MONTHS 로 따로 쓴다.
+    """
     discounted_raw = plan.get("discounted_fee")
     regular_raw = plan.get("monthly_fee")
     discounted = float(regular_raw or 0) if discounted_raw is None else float(discounted_raw)
@@ -117,6 +130,16 @@ def _effective_monthly_fee(plan: dict, months: int = _PRICE_HORIZON_MONTHS) -> f
         return discounted
     promo_months = max(0, min(int(period), months))
     return (discounted * promo_months + regular * (months - promo_months)) / months
+
+
+def _switching_monthly_fee(plan: dict) -> float:
+    """지금 쓰는 요금제와 "갈아탈 가치가 있나"를 비교할 때 쓰는 월 납부액.
+
+    순위(_effective_monthly_fee, 할인가)와 일부러 다르다. 갈아타기는 되돌리기 어려운
+    결정이라 초기 할인가로 판단하면 안 된다 - 1개월 1,000원 뒤 50,000원이 되는 상품이
+    20,000원 쓰는 사람에게 "더 싸다"로 나온다. 여기서는 정가 복귀까지 합산한다.
+    """
+    return _effective_monthly_fee(plan, COMPARE_MONTHS)
 
 
 def _minimum_fit(value: float, target: float | None) -> float:

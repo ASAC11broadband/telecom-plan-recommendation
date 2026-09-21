@@ -32,7 +32,6 @@ export function RecommendationTrace({ result, plan }: { result: RecommendRespons
   const axes = decidingAxes(result.plans);
   const conditions = describeProfile(trace.rankingProfile ?? result.profile);
   const estimated = result.plans.some((p) => p.costIsEstimate);
-  const months = result.plans[0]?.rankingMonths ?? 12;
   const compareMonths = result.plans[0]?.compareMonths ?? 12;
 
   return (
@@ -121,7 +120,7 @@ export function RecommendationTrace({ result, plan }: { result: RecommendRespons
                   );
                 })}
                 <tr>
-                  <td>{months}개월 평균 월요금</td>
+                  <td>순위에 쓴 월 요금</td>
                   {result.plans.map((plan) => (
                     <td className="num" key={plan.id}>
                       {plan.rankingAverageFee === null ? '확인 필요' : `${plan.rankingAverageFee.toLocaleString()}원`}{plan.costIsEstimate && '*'}
@@ -177,10 +176,9 @@ export function RecommendationTrace({ result, plan }: { result: RecommendRespons
       <div className="trace-sec">
         <div className="section-label">5. 비용 비교 기준</div>
         <p className="trace-note">
-          순위의 가격 평가도 카드의 총비용도 <b>{compareMonths}개월</b> 기준입니다. 할인이 끝난 뒤의
-          정가까지 합산하므로, 지금 당장 싼 단기 프로모션 상품이 아래 순위일 수 있습니다.
-          {months !== compareMonths &&
-            ` (순위 평가는 ${months}개월 평균 월요금 기준입니다.)`}
+          순위의 가격 평가는 <b>지금 내는 월 요금(할인가)</b> 기준입니다. 카드의 총비용은
+          할인이 끝난 뒤의 정가까지 합산한 <b>{compareMonths}개월</b> 기준이라 두 숫자가 다를 수 있습니다.
+          할인이 끝나면 요금이 오르는 상품은 각 카드에 인상 시점과 인상 후 금액을 함께 표시합니다.
           {estimated && ' *표시는 할인 기간이 공개되지 않아 현재 요금이 유지된다고 가정한 경우입니다.'}
         </p>
       </div>
