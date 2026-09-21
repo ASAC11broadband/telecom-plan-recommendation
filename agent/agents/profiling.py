@@ -74,6 +74,12 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 [통신사·상품군]
 - 통신 3사만/알뜰폰 제외 → carrier_type=MNO, 알뜰폰만 → MVNO
 - 알뜰폰 포함·알뜰폰도 괜찮음은 유형 제한이 아니므로 carrier_type=null
+- 기본 추천 대상은 알뜰폰이다. '통신 3사도 포함', '통신사 상관없이 전체에서', '추천 범위(알뜰폰) 조건은 빼고'처럼
+  통신 3사 상품까지 넓혀 달라고 명시한 경우에만 include_mno=true, 그 외에는 null.
+  현재 쓰는 요금제가 통신 3사라는 말은 넓혀 달라는 뜻이 아니다(reference_plan_name 에만 저장).
+- '지금 SKT ○○ 요금제를 쓰고 있다'처럼 **현재 쓰는** 통신사·요금제를 말한 것은 찾는 상품의 조건이 아니다.
+  이때 carrier_type 과 host_mno 는 null 로 두고 reference_plan_name 에만 저장한다.
+  'SKT 안에서', 'SKT 요금제 중에서', '같은 망으로'처럼 찾는 범위를 말했을 때만 carrier_type/host_mno 를 채운다.
 - 일반 SKT/KT/LGU+ 요청 → carrier_type=MNO와 host_mno
 - 특정 망 알뜰폰 요청 → carrier_type=MVNO와 host_mno
 - LG유플러스/LG U+는 LGU+로 정규화한다.
@@ -607,6 +613,22 @@ def _repair_general_comparison(profile: UserProfile, query: str) -> UserProfile:
     return profile
 
 
+# "지금 SKT ○○ 쓰는데"의 SKT 는 **출발지**이지 찾는 범위가 아니다. 프롬프트로만 막으면 carrier_type=MNO 가
+# 계속 들어와 통신 3사 -> 알뜰폰으로 옮기려는 사용자에게 통신 3사 상품만 보여 주게 된다.
+_CURRENT_CARRIER_RE = re.compile(
+    r"(지금|현재|요즘).{0,12}(SK ?T|SK텔레콤|KT|LG ?U\+?|유플러스|엘지|통신 ?3사).{0,25}(쓰|사용|이용|가입)")
+_CARRIER_SCOPE_RE = re.compile(r"안에서|중에서|내에서|망으로|망에서|같은 망|통신 ?3사(만|에서|로)|요금제만|(으)?로만")
+
+
+def _drop_current_carrier_scope(profile: UserProfile, query: str) -> UserProfile:
+    if not (profile.carrier_type or profile.host_mno) or profile.mvno_brand:
+        return profile
+    text = query or ""
+    if not _CURRENT_CARRIER_RE.search(text) or _CARRIER_SCOPE_RE.search(text):
+        return profile
+    return profile.model_copy(update={"carrier_type": None, "host_mno": None})
+
+
 def _repair_reference_plan_name(profile: UserProfile, query: str) -> UserProfile:
     """스펙 설명을 상품명으로 오인한 값을 버리고 문장 속 실제 DB명을 복구한다."""
     name = (profile.reference_plan_name or "").strip()
@@ -896,6 +918,7 @@ _REPAIRS = (
     _apply_smartchoice_usage_rule,
     _repair_general_comparison,
     _repair_reference_plan_name,
+    _drop_current_carrier_scope,
 )
 
 

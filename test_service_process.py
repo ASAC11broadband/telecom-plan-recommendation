@@ -232,11 +232,47 @@ class ServiceProcessTests(unittest.TestCase):
                 plan['data_unlimited']
                 or (plan['data_gb'] >= UNLIMITED_MIN_GB and plan['qos_mbps'] >= UNLIMITED_QOS_MBPS),
                 plan['plan_name'])
-        # '완전 무제한' 요청은 기본량 무제한만 남긴다.
-        strict = filter_candidates({'data_unlimited': True, 'require_full_unlimited': True})
+        # '완전 무제한' 요청은 기본량 무제한만 남긴다. 알뜰폰에는 그런 상품이 없어 기본 범위에서는 0건이고,
+        # 통신 3사까지 넓혀야 나온다(추천 대상은 알뜰폰 - test_recommendation_scope_is_mvno).
+        self.assertEqual(filter_candidates({'data_unlimited': True, 'require_full_unlimited': True}), [])
+        strict = filter_candidates({'data_unlimited': True, 'require_full_unlimited': True, 'include_mno': True})
         self.assertTrue(strict)
         self.assertTrue(all(plan['data_unlimited'] for plan in strict))
-        self.assertLess(len(strict), len(loose))
+
+    def test_current_carrier_is_not_a_search_scope(self):
+        """'지금 SKT 쓰는데'의 SKT 는 출발지다. 찾는 범위로 읽으면 알뜰폰으로 옮기려는 사람에게 통신 3사만 보여 준다."""
+        from agent.agents.profiling import _drop_current_carrier_scope
+        misread = UserProfile(carrier_type='MNO', host_mno='SKT', reference_fee_won=69000)
+        fixed = _drop_current_carrier_scope(misread, '지금 SKT 5GX 레귤러 쓰고 있는데 더 싼 요금제로 바꾸고 싶어')
+        self.assertEqual((fixed.carrier_type, fixed.host_mno), (None, None))
+        # 범위를 직접 말했으면 그대로 둔다.
+        kept = _drop_current_carrier_scope(misread, '지금 SKT 쓰는데 SKT 안에서 더 싼 요금제 추천해줘')
+        self.assertEqual((kept.carrier_type, kept.host_mno), ('MNO', 'SKT'))
+        # 현재 통신사 얘기가 아니면 건드리지 않는다.
+        asked = _drop_current_carrier_scope(misread, 'SKT 요금제 추천해줘')
+        self.assertEqual(asked.carrier_type, 'MNO')
+
+    def test_recommendation_scope_is_mvno(self):
+        """추천 대상은 알뜰폰이다. 통신 3사는 사용자가 직접 찾을 때만 후보가 된다.
+
+        가중치를 알뜰폰 시장 데이터로만 배웠고, 통신 3사 안에서의 변경은 결합할인·약정이 좌우하는데
+        그 정보가 없다. 통신 3사 요금제는 '현재 요금제' 비교와 탐색에는 그대로 쓰인다.
+        """
+        from agent.data import BIG3_DIRECT_BRANDS, diagnose_empty, find_plans_by_name
+        default = filter_candidates({'budget_max_won': 80000})
+        self.assertTrue(default)
+        for plan in default:
+            self.assertEqual(plan['carrier_type'], 'MVNO', plan['plan_name'])
+            self.assertNotIn(plan['mvno_brand'], BIG3_DIRECT_BRANDS, plan['plan_name'])
+        # 직접 찾으면 나온다: 통신 3사 포함 / 통신 3사만 / 브랜드 지정
+        widened = filter_candidates({'budget_max_won': 80000, 'include_mno': True})
+        self.assertTrue(any(plan['carrier_type'] == 'MNO' for plan in widened))
+        self.assertTrue(all(plan['carrier_type'] == 'MNO' for plan in filter_candidates({'carrier_type': 'MNO'})))
+        # 알뜰폰에 없는 상품이면 0건으로 끝내지 않고 넓히는 길을 알려 준다.
+        blockers = diagnose_empty({'data_unlimited': True, 'require_full_unlimited': True})
+        self.assertTrue(any(b['field'] == 'include_mno' and b['candidates'] > 0 for b in blockers))
+        # 현재 요금제로는 통신 3사 상품도 찾을 수 있어야 한다(통신 3사 -> 알뜰폰 비교).
+        self.assertTrue(any(plan['carrier_type'] == 'MNO' for plan in find_plans_by_name('베이직')))
 
     def test_latest_unlimited_scope_wins(self):
         """'완전 무제한만' ↔ 'QoS형도 괜찮다'도 마지막에 말한 쪽이 이긴다."""

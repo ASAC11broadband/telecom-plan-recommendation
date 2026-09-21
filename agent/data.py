@@ -640,10 +640,25 @@ def age_eligible(age_condition: object, user_age: int | None) -> bool:
     return user_age > limit
 
 
+# 모요에 올라온 통신 3사 직판(너겟·요고·다이렉트 등). carrier_type 은 MVNO 로 수집되지만 알뜰폰이 아니다.
+BIG3_DIRECT_BRANDS = ("SKT", "KT", "LG U+", "LGU+", "air by SK telecom")
+
+
+def wants_big3(profile: dict) -> bool:
+    """사용자가 통신 3사 상품을 직접 찾았는가. 아니면 추천 대상은 알뜰폰이다."""
+    return bool(profile.get("include_mno") or profile.get("carrier_type") == "MNO" or profile.get("mvno_brand"))
+
+
 def filter_candidates(profile: dict) -> list[dict]:
     """명시 조건을 그대로 적용하고 조건을 만족한 후보 전체를 반환한다."""
     load()
     df = _plans
+
+    # 추천 대상은 알뜰폰이다. 가중치를 알뜰폰 시장의 선택 데이터로만 배웠고(통신 3사는 가입자 수가 없다),
+    # 통신 3사 안에서의 요금제 변경은 결합할인·약정이 좌우하는데 그 정보가 우리 데이터에 없다.
+    # 통신 3사 요금제는 탐색·비교함과 '현재 요금제' 비교에는 그대로 쓰인다(find_plans_by_name).
+    if not wants_big3(profile):
+        df = df[df["carrier_type"].eq("MVNO") & ~df["mvno_brand"].isin(BIG3_DIRECT_BRANDS)]
 
     # 청구액이 확인되지 않은 페이백 표시가는 예산·순위 판단의 기준이 될 수 없다.
     # 정정표로 청구액이 확인된 상품은 여기서 다시 후보가 된다(_apply_verified_billing).
@@ -815,6 +830,11 @@ def diagnose_empty(profile: dict) -> list[dict]:
             # 이 조건만 걸림돌이면 얼마부터 가능한지가 유일하게 쓸모 있는 답이다.
             entry["minimum_fee"] = min(row["discounted_fee"] for row in survivors)
         blockers.append(entry)
+    if not wants_big3(profile):
+        widened = filter_candidates({**profile, "include_mno": True})
+        if widened:
+            # 화면의 '이 조건 풀기' 버튼이 "추천 범위(알뜰폰) 조건은 빼고…" 문장을 보낸다(프로파일링 규칙과 짝).
+            blockers.append({"field": "include_mno", "label": "추천 범위(알뜰폰)", "value": False, "candidates": len(widened)})
     return sorted(blockers, key=lambda item: -item["candidates"])
 
 
@@ -1036,15 +1056,17 @@ if __name__ == "__main__":
     assert has_benefit("유튜브 프리미엄 | 지니뮤직", "유튜브 프리미엄 포함")
     assert not has_benefit("지니뮤직", "유튜브 프리미엄")
     assert not has_benefit("유튜브 프리미엄", "")  # 빈 요구는 매칭하지 않는다
-    plain = len(filter_candidates({"wanted_benefits": ["유튜브 프리미엄"]}))
+    # 혜택 매칭 자체를 보는 검사라 추천 범위(알뜰폰)와 무관하게 전체 카탈로그에서 확인한다.
+    whole = lambda profile: filter_candidates({**profile, "include_mno": True})  # noqa: E731
+    plain = len(whole({"wanted_benefits": ["유튜브 프리미엄"]}))
     assert plain > 0
-    assert len(filter_candidates({"wanted_benefits": ["유튜브 프리미엄 포함"]})) == plain
+    assert len(whole({"wanted_benefits": ["유튜브 프리미엄 포함"]})) == plain
 
     # 포괄적 유형은 카테고리로, 고유 서비스명은 기존 문자열 검색으로 구분한다.
-    music = filter_candidates({"wanted_benefit_categories": ["음악"]})
+    music = whole({"wanted_benefit_categories": ["음악"]})
     assert music and all("음악/오디오" in row["benefit_categories"] for row in music)
-    assert len(music) > len(filter_candidates({"wanted_benefits": ["음악"]}))
-    genie = filter_candidates({"wanted_benefits": ["지니뮤직"]})
+    assert len(music) > len(whole({"wanted_benefits": ["음악"]}))
+    genie = whole({"wanted_benefits": ["지니뮤직"]})
     assert genie and len(genie) < len(music)
     assert normalize_benefit_category("스마트워치 혜택") == "스마트기기"
     assert normalize_benefit_category("AI 구독") == "교육/AI서비스"
@@ -1063,21 +1085,21 @@ if __name__ == "__main__":
     assert mixed_plan_ids <= {row["plan_id"] for row in music}
     assert mixed_plan_ids <= {
         row["plan_id"]
-        for row in filter_candidates(
+        for row in whole(
             {"wanted_benefit_categories": ["도서/콘텐츠"]}
         )
     }
 
-    disney = filter_candidates({"wanted_benefits": ["디즈니플러스"]})
-    books = filter_candidates({"wanted_benefit_categories": ["도서/콘텐츠"]})
-    either = filter_candidates(
+    disney = whole({"wanted_benefits": ["디즈니플러스"]})
+    books = whole({"wanted_benefit_categories": ["도서/콘텐츠"]})
+    either = whole(
         {
             "wanted_benefits": ["디즈니플러스"],
             "wanted_benefit_categories": ["도서/콘텐츠"],
             "benefit_match_mode": "any",
         }
     )
-    both = filter_candidates(
+    both = whole(
         {
             "wanted_benefits": ["디즈니플러스"],
             "wanted_benefit_categories": ["도서/콘텐츠"],
@@ -1087,6 +1109,16 @@ if __name__ == "__main__":
     ids = lambda rows: {row["plan_id"] for row in rows}
     assert ids(either) == ids(disney) | ids(books)
     assert ids(both) == ids(disney) & ids(books)
+    # 추천 대상은 알뜰폰이다. 통신 3사(모요의 3사 직판 포함)는 사용자가 직접 찾을 때만 후보가 된다.
+    default = filter_candidates({"budget_max_won": 80000})
+    assert default and all(r["carrier_type"] == "MVNO" and r["mvno_brand"] not in BIG3_DIRECT_BRANDS for r in default)
+    assert any(r["carrier_type"] == "MNO" for r in filter_candidates({"budget_max_won": 80000, "include_mno": True}))
+    assert all(r["carrier_type"] == "MNO" for r in filter_candidates({"carrier_type": "MNO"}))
+    # 알뜰폰에 없는 상품을 찾으면 0건 대신 "통신 3사까지 넓히면 N건"을 알려 준다.
+    assert not filter_candidates({"data_unlimited": True, "require_full_unlimited": True})
+    widen = [b for b in diagnose_empty({"data_unlimited": True, "require_full_unlimited": True}) if b["field"] == "include_mno"]
+    assert widen and widen[0]["candidates"] > 0
+
     assert normalize_benefit_category("도서.콘텐츠") == "도서/콘텐츠"
 
     # 등급: 소진 후 무엇을 할 수 있는가로 나눈다
@@ -1121,13 +1153,15 @@ if __name__ == "__main__":
     assert not age_eligible("현역병사", 22)  # 나이로 판정 불가 -> 자동 추천에서 제외
     anyone = filter_candidates({"budget_max_won": 30000})
     assert all(not row["age_condition"] for row in anyone)
-    youth = filter_candidates({"budget_max_won": 30000, "user_age": 28})
+    # 나이 전용 상품은 대부분 통신 3사에 있다. 자격 판정만 보는 검사라 범위를 넓혀서 확인한다.
+    youth = filter_candidates({"budget_max_won": 30000, "user_age": 28, "include_mno": True})
     assert any(row["age_condition"] == "만 34세 이하" for row in youth)
     assert not any(row["age_condition"] == "만 12세 이하" for row in youth)
 
     # 혜택 가치: 택1은 그룹당 하나, 일시금은 월 환산, 값 없는 혜택은 0 원 취급하지 않는다
     # 0건일 때 어느 조건이 막았는지 짚어 준다 (넷플릭스 혜택 요금제는 최저 59,000원이다)
-    impossible = {"budget_max_won": 30000, "wanted_benefits": ["넷플릭스"], "user_age": 28}
+    # 넷플릭스 혜택은 통신 3사 상품에만 있다. 병목 진단 자체를 보는 검사라 범위를 넓혀 둔다.
+    impossible = {"budget_max_won": 30000, "wanted_benefits": ["넷플릭스"], "user_age": 28, "include_mno": True}
     assert filter_candidates(impossible) == []
     blockers = diagnose_empty(impossible)
     fields = {item["field"] for item in blockers}

@@ -61,6 +61,10 @@ class UserProfile(BaseModel):
         None,
         description="통신 3사만 원하면 MNO, 알뜰폰만 원하면 MVNO. 유형을 지정하지 않으면 null",
     )
+    include_mno: Optional[bool] = Field(
+        None,
+        description="통신 3사 상품도 추천 후보에 넣어 달라고 명시했을 때만 true. 기본 추천 대상은 알뜰폰이다",
+    )
     host_mno: Optional[Literal["SKT", "KT", "LGU+"]] = Field(
         None,
         description="선호 통신사 또는 사용 망: SKT/KT/LGU+. 언급 없으면 null",
