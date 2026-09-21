@@ -7,7 +7,7 @@
 |---|---|---|
 | `run_metric_table` | 추천 방법 5종을 정답지 없는 지표로 비교 → `outputs/지표표_방법별비교.json` | 안 씀 |
 | `run_presentation_evidence` | 위 표를 80건·같은 필터·95% 구간으로 재측정, 선호 반응·k 선택·무제한 등급·합성 누수 → `outputs/발표/그림/fig_*`, `근거보강_수치.json` (약 10분) | 안 씀 |
-| `make_figures` | 슬라이드용 그림 8장(비교표·무제한 전후·스키마·코사인 / EDA 4장)과 `eda_수치.json` → `outputs/발표/그림/` (1분) | 안 씀 |
+| `make_figures` | 슬라이드용 그림 10장(비교표·무제한 전후·스키마·코사인 / EDA 6장)과 `eda_수치.json` → `outputs/발표/그림/` (1분) | 안 씀 |
 | `weight_scale_check` | 노트북의 Ridge 가중치를 고정 분석본에서 재현하고, 학습 눈금과 서비스 눈금·고정 범위를 점검 | 안 씀 |
 | `run_segment_test` / `run_cosine_test` | 합성 가입이력 100명 홀드아웃 (세그먼트·KNN / 코사인 v1·v2) | 안 씀 |
 | `make_synthetic_customers` | 합성 가입이력을 현행 카탈로그로 재생성 | 안 씀 |

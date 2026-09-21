@@ -14,7 +14,7 @@ crawler/      통신 3사·모요 수집·일일 갱신 (결과는 crawler/data/
 data/         서비스가 읽는 CSV(고정) · baseline/(기준 유도용 고정본) · eval/(평가용 입력·결과) · synthetic_original/(합성 가입이력)
 experiments/  실험·평가 스크립트. 서비스는 import 하지 않는다 → experiments/README.md
 notebooks/    가중치 학습·EDA 노트북
-outputs/      발표/ (발표_가이드.md · 질의응답_근거점검.md · 캔바_추가장.pptx · 그림/ · 화면/) · 분석노트/ · 데이터수집/ · 지표표_방법별비교.json
+outputs/      발표/ (발표_가이드.md · 질의응답_근거점검.md · 최종발표.pptx · build_slides.py · 그림/ · 화면/) · 분석노트/ · 데이터수집/ · 지표표_방법별비교.json
 ```
 
 ### 지금 적용 중인 정책값 — 바꿀 곳은 각각 한 줄이다
@@ -37,8 +37,8 @@ python -m unittest test_service_process            # 고정본 건수(현재 403
 python -m experiments.run_metric_table              # outputs/지표표_방법별비교.json
 python -m experiments.weight_scale_check            # 가중치 재현 + 고정 눈금이 카탈로그를 덮는지
 python -m experiments.run_presentation_evidence     # 약 10분. outputs/발표/그림/fig_* · 근거보강_수치.json
-python -m experiments.make_figures                  # 그림 01~08 · eda_수치.json
-python outputs/발표/build_slides.py                  # 캔바_추가장.pptx
+python -m experiments.make_figures                  # 그림 01~10 · eda_수치.json
+python outputs/발표/build_slides.py                  # 최종발표.pptx (표지~부록 38장, 발표자 노트에 스크립트)
 ```
 
 ### 미해결
