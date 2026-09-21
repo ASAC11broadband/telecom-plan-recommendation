@@ -8,6 +8,7 @@
 | `run_metric_table` | 추천 방법 5종을 정답지 없는 지표로 비교 → `outputs/지표표_방법별비교.json` | 안 씀 |
 | `run_presentation_evidence` | 위 표를 80건·같은 필터·95% 구간으로 재측정 + 발표 그림 → `outputs/발표/` (약 10분) | 안 씀 |
 | `run_segment_test` / `run_cosine_test` | 합성 가입이력 100명 홀드아웃 (세그먼트·KNN / 코사인 v1·v2) | 안 씀 |
+| `weight_scale_check` | 노트북의 Ridge 가중치를 고정 분석본에서 재현하고, 학습 눈금(z-score)과 서비스 눈금(0~1)의 영향력 비율·고정 범위를 점검 | 안 씀 |
 | `make_synthetic_customers` | 합성 가입이력을 현행 카탈로그로 재생성 | 안 씀 |
 | `run_testset` → `Calc_precision_recall` | 정답지 100문항을 파이프라인에 태워 P/R 계산 | 씀 |
 | `run_weight_arms` (+`mcda_original`) | 가중치 방식별 P/R 비교. **현재 코드로는 실행 불가(보관용)** — 파일 머리말 참고 | 씀 |

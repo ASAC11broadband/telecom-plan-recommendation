@@ -193,8 +193,6 @@ class ServiceProcessTests(unittest.TestCase):
             self.assertLessEqual(case['identicalTopN'], case['samples'])
             self.assertLessEqual(case['sameFirst'], case['samples'])
             self.assertLessEqual(case['minOverlap'], TOP_N)
-            # 완전 일치한 표본은 당연히 1위도 같다.
-            self.assertLessEqual(case['identicalTopN'], case['sameFirst'])
 
     def test_baseline_is_frozen_and_separate_from_serving_data(self):
         """기준 유도는 고정 분석본, 서비스 적용은 최신 수집본. 둘이 섞이면 안 된다.

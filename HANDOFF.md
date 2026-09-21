@@ -24,6 +24,7 @@ outputs/      발표/ (PPT·스크립트·그림) · 분석노트/ · 데이터�
 | '무제한' | 기본량 무제한 OR (제공량 ≥ 100GB AND 소진 후 ≥ **10Mbps**) — 잠정("일단") | `agent/data.py` `UNLIMITED_MIN_GB` / `UNLIMITED_QOS_MBPS` |
 | 비용 비교 기간 | **12개월** (화면 총비용·혜택 월 환산). 6개월 의견이 있어 팀 확정 대기 | `agent/mcda.py` `COMPARE_MONTHS` |
 | 순위의 가격 축 | 지금 내는 월 요금(할인가). "갈아탈 가치" 비교만 12개월 평균 | `agent/mcda.py` `_PRICE_HORIZON_MONTHS`, `_switching_monthly_fee` |
+| 효용 눈금 | 요구를 말한 축은 요구 기준(예산 대비·요구량 대비), 나머지는 **카탈로그 고정 범위**(속도 0~10Mbps · 데이터 log 0~300GB · 요금 √0~10만원 · 테더링 0~200GB). 후보 집합 min-max 는 쓰지 않는다 | `agent/mcda.py` `_*_RANGE_*` (점검: `experiments.weight_scale_check`) |
 | 추천 노출 개수 | 5 | `agent/agents/recommend.py` `TOP_N` |
 | 페이백 상품 | 청구액이 확인된 81건만 추천·총비용에 포함, 미확인 3건 제외 | `data/페이백_청구액_검증.csv` → `agent/data.py` `_apply_verified_billing` |
 | 서비스 입력 CSV | 루트 `data/` 는 **일부러 고정**. 크롤러 결과를 복사하지 않는다 | — |
@@ -33,6 +34,7 @@ outputs/      발표/ (PPT·스크립트·그림) · 분석노트/ · 데이터�
 ```bash
 python -m unittest test_service_process            # 고정본 건수(현재 403) 단언이 같이 바뀐다
 python -m experiments.run_metric_table              # outputs/지표표_방법별비교.json
+python -m experiments.weight_scale_check            # 가중치 재현 + 고정 눈금이 카탈로그를 덮는지
 python -m experiments.run_presentation_evidence     # 약 10분. outputs/발표/ 그림·수치
 python outputs/발표/build_deck.py                    # 발표_초안.pptx + 발표초안.md
 ```

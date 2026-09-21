@@ -85,16 +85,25 @@ class MCDAResult:
     top3_acceptability: float = 0.0
 
 
-def _minmax(values: list[float], *, cost: bool = False) -> list[float]:
-    low, high = min(values), max(values)
-    if math.isclose(low, high):
-        return [0.5] * len(values)
-    normalized = [(value - low) / (high - low) for value in values]
-    return [1.0 - value for value in normalized] if cost else normalized
+# 사용자 요구가 기준이 되지 않는 축의 눈금. **카탈로그 전체 범위로 고정**한다(후보 집합의 min-max 가 아니다).
+# 가중치는 카탈로그 전체 눈금에서 학습됐다(변환 -> z-score -> Ridge). 후보 집합으로 min-max 하면
+# 예산이 낮아 후보의 최고 속도가 3Mbps 뿐인 질의에서 속도 축이 3.3배로 늘어나, 같은 가중치의 실제
+# 영향력이 질의마다 달라진다. 후보가 하나 추가됐다고 기존 두 상품의 순위가 뒤집히는 일도 생긴다.
+# 고정 범위에서 학습된 영향력 비율이 유지되는 것은 experiments.weight_scale_check 로 확인한다.
+_QOS_RANGE_MBPS = 10.0
+_TETHERING_RANGE_GB = 200.0
+_DATA_RANGE_GB = 300.0      # 학습 때도 300GB 에서 잘랐고 무제한을 300 으로 적었다
+_FEE_RANGE_WON = 100_000.0
 
 
-def _finite_data(plan: dict, finite_max: float) -> float:
-    return finite_max * 1.25 if plan.get("data_unlimited") else float(plan.get("data_gb") or 0)
+def _fixed_scale(value: float, top: float) -> float:
+    return max(0.0, min(1.0, value / top))
+
+
+def _data_amount_utility(plan: dict) -> float:
+    """요구량을 모를 때의 데이터 효용. 학습 때와 같은 log1p 눈금이고 무제한은 상한으로 친다."""
+    gb = _DATA_RANGE_GB if plan.get("data_unlimited") else float(plan.get("data_gb") or 0)
+    return _fixed_scale(math.log1p(min(gb, _DATA_RANGE_GB)), math.log1p(_DATA_RANGE_GB))
 
 
 def _profile_value(profile: object | dict | None, field: str):
@@ -186,8 +195,6 @@ def _benefit_fit(plan: dict, profile: object | dict | None) -> float:
 def _utility_rows(
     candidates: list[dict], profile: object | dict | None = None
 ) -> list[list[float]]:
-    data_max = max((float(p.get("data_gb") or 0) for p in candidates), default=1.0) or 1.0
-
     fees = [_effective_monthly_fee(p) for p in candidates]
     budget_max = _profile_value(profile, "budget_max_won")
     if budget_max is not None and float(budget_max) > 0:
@@ -197,7 +204,7 @@ def _utility_rows(
         ]
     else:
         # 예산이 없을 때도 단기 프로모션에 끌리지 않도록 12개월 평균요금을 사용한다.
-        price_utility = _minmax([math.sqrt(max(0.0, fee)) for fee in fees], cost=True)
+        price_utility = [1.0 - _fixed_scale(math.sqrt(max(0.0, fee)), math.sqrt(_FEE_RANGE_WON)) for fee in fees]
 
     explicit_min_data = _profile_value(profile, "min_data_gb")
     target_data = _profile_value(profile, "target_data_gb")
@@ -229,7 +236,7 @@ def _utility_rows(
         if "data" in (_profile_value(profile, "priorities") or []) and (
             max(data_utility) - min(data_utility) <= 1e-9
         ):
-            data_utility = _minmax([math.log1p(_finite_data(p, data_max)) for p in candidates])
+            data_utility = [_data_amount_utility(p) for p in candidates]
     elif target_data is not None and float(target_data) > 0:
         data_utility = [
             _DATA_OVERSUPPLY_FLOOR
@@ -238,7 +245,7 @@ def _utility_rows(
             for p in candidates
         ]
     else:
-        data_utility = _minmax([math.log1p(_finite_data(p, data_max)) for p in candidates])
+        data_utility = [_data_amount_utility(p) for p in candidates]
 
     if _profile_value(profile, "voice_unlimited") is True:
         voice_utility = [1.0 if p.get("voice_unlimited") else 0.0 for p in candidates]
@@ -269,10 +276,10 @@ def _utility_rows(
     columns = {
         "price": price_utility,
         "data": data_utility,
-        "qos": _minmax([float(p.get("qos_mbps") or 0) for p in candidates]),
+        "qos": [_fixed_scale(float(p.get("qos_mbps") or 0), _QOS_RANGE_MBPS) for p in candidates],
         "benefit": benefit_utility,
         "voice": voice_utility,
-        "tethering": _minmax([float(p.get("tethering_gb") or 0) for p in candidates]),
+        "tethering": [_fixed_scale(float(p.get("tethering_gb") or 0), _TETHERING_RANGE_GB) for p in candidates],
     }
     return [[columns[name][i] for name in CRITERIA] for i in range(len(candidates))]
 
