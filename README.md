@@ -1,13 +1,16 @@
 # telecom-plan-recommendation
 
 요금제 추천 시스템. 조건을 자연어로 받아 CSV 요금제 데이터에서 후보를 추리고,
-6개월 총비용 기준으로 순위와 리포트를 만든다.
+다기준(SMAA-2) 순위와 근거 리포트를 만든다. 총비용 비교는 12개월 기준이다.
 
 ```
 agent/      LLM 파이프라인 (profiling → recommend → report → evaluation)
-backend/    FastAPI. 화면이 부르는 엔드포인트 4개
+backend/    FastAPI
 frontend/   React + Vite 화면
-data/       요금제 CSV 3종
+crawler/    통신 3사·모요 수집·일일 갱신
+data/       서비스가 읽는 요금제 CSV(고정) · baseline/ · eval/(평가용) · synthetic_original/
+experiments/ 실험·평가 스크립트 (서비스는 import 하지 않는다)
+outputs/    발표 자료·분석 노트
 ```
 
 ## 실행
@@ -42,6 +45,16 @@ cd frontend && npm install && npm run dev       # 프론트 (5173)
 python -m agent.data              # 하드 필터
 python -m agent.agents.report     # ranked ↔ candidates 결합 (plan_id 기준)
 python -m agent.agents.evaluation # 환각·Hard Constraint·순위 검증
-python -m backend.plans           # 6개월 비용 계산, PlanItem 변환
+python -m backend.plans           # 12개월 비용 계산, PlanItem 변환
 cd frontend && npm run lint       # 타입 체크
 ```
+
+## 실험·평가
+
+서비스 밖의 실험 스크립트는 `experiments/` 에 있다(→ `experiments/README.md`). 저장소 루트에서 모듈로 실행한다.
+
+```bash
+python -m experiments.run_metric_table      # 추천 방법 5종을 정답지 없는 지표로 비교
+```
+
+현재 적용 중인 정책값과 미해결 항목은 `HANDOFF.md` 맨 위 "현재 상태"에 있다.

@@ -3,11 +3,11 @@ import { ScreenType } from '../types';
 export function GNB({
   currentScreen,
   onNavigate,
-  hasReport,
+  compareCount,
 }: {
   currentScreen: ScreenType;
   onNavigate: (s: ScreenType) => void;
-  hasReport: boolean;
+  compareCount: number;
 }) {
   return (
     <nav className="gnb">
@@ -34,7 +34,7 @@ export function GNB({
         <ul className="gnb-menu">
           <li>
             <button
-              className={currentScreen === 's-input' ? 'active' : ''}
+              className={(currentScreen === 's-input' || currentScreen === 's-result' || currentScreen === 's-report') ? 'active' : ''}
               onClick={() => onNavigate('s-input')}
             >
               AI 추천
@@ -50,18 +50,18 @@ export function GNB({
           </li>
           <li>
             <button
-              className={currentScreen === 's-report' ? 'active' : ''}
-              disabled={!hasReport}
-              onClick={() => onNavigate('s-report')}
+              className={currentScreen === 's-compare' ? 'active' : ''}
+              onClick={() => onNavigate('s-compare')}
             >
-              내 리포트
+              내 비교함 ({compareCount})
             </button>
           </li>
         </ul>
       </div>
       <div className="gnb-right">
-        <span>문서</span>
-        <div className="gnb-avatar">K</div>
+        <a href="https://github.com/ASAC11broadband" target="_blank" rel="noreferrer">
+          프로젝트 정보
+        </a>
       </div>
     </nav>
   );

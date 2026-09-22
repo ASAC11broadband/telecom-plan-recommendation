@@ -10,9 +10,10 @@ Next.js SSR이라 requests로 받은 HTML에 데이터가 그대로 들어있다
    있어서 생략하면 MVNO 쪽 혜택이 통째로 빈다.
    - 브랜드명은 <title>의 "[핀다이렉트] …"에만 있다.
    - 사은품·페이백은 <a href="/gift-group/...">의 aria-label에 이름이 있고 본문에
-     "대상:"/"시기:" 조건이 따라온다. "매달 N원 페이백 (M개월)"처럼 1회분 금액만
-     적힌 라벨은 총액으로 환산한다(_recurring_payback_won). "페이백"이라는 말이
-     없는 변형("Npay 5천원 (7만)")은 아직 못 잡는다 - docs/수정이력.md 34번.
+     "대상:"/"시기:" 조건이 따라온다. "매달 N원 페이백 (M개월)"은 한 달치 금액과
+     개월 수를 따로 싣는다(_recurring_payback). 총액으로 접으면 기간이 사라져서
+     소비하는 쪽이 개월 수를 추측하게 된다. "페이백"이라는 말이 없는 변형
+     ("Npay 5천원 (7만)")은 아직 못 잡는다 - docs/수정이력.md 34번.
    - 목록 카드의 "페이백 포함 월 X원"이 실제 청구액과 다를 수 있다(모요가 체감가를
      보여줌). "N개월 이후 Y원"의 Y로 대체하려다 되돌렸다 - parse_card_only 참고.
 """
@@ -84,12 +85,26 @@ def _get(url: str) -> str:
 
 _SUBSCRIBER_RE = re.compile(r"([\d,]+)\+?\s*명이\s*선택")
 
-_KRW_RE = re.compile(r"([\d,.]+)\s*(만|천)?\s*원")
-_KRW_UNIT = {None: 1, "천": 1_000, "만": 10_000}
+# "3만4천원"처럼 만·천이 이어 붙는 표기가 있다. 조각을 따로 읽으면 "4천원"만 잡혀
+# 34,000원이 4,000원이 된다(모요가 표기를 바꾸면서 실제로 그랬다). 한 덩어리로 읽는다.
+# 만·천·원 자리를 한 번에 읽는다. 세 자리 모두 선택이라 숫자가 없는 "원"에도
+# 걸리므로, 값을 만들기 전에 숫자가 하나라도 잡혔는지 확인한다.
+_KRW_RE = re.compile(r"(?:([\d,.]+)\s*만)?(?:\s*([\d,.]+)\s*천)?(?:\s*([\d,.]+))?\s*원")
+
+
+def _to_float(text):
+    if not text:
+        return 0.0
+    try:
+        return float(text.replace(",", "").rstrip("."))
+    except ValueError:
+        return 0.0
 
 
 def _parse_krw(text: str):
-    """사은품 이름에서 금액을 뽑는다. '19.2만원' -> 192000, '5천원' -> 5000.
+    """사은품 이름에서 금액을 뽑는다.
+
+    '19.2만원' -> 192000, '5천원' -> 5000, '3만4천원' -> 34000.
 
     사은품명은 대체로 "총액(월별 분할)" 형태라("네이버페이 19.2만원(매월 3.2만원씩)")
     **금액이 여러 개면 가장 큰 값**을 쓴다. 등장 순서로 고르면 사이트가 "매월
@@ -97,28 +112,39 @@ def _parse_krw(text: str):
     """
     amounts = []
     for m in _KRW_RE.finditer(text or ""):
-        try:
-            value = float(m.group(1).replace(",", "").rstrip("."))
-        except ValueError:
-            continue
-        amounts.append(int(value * _KRW_UNIT[m.group(2)]))
+        if not any(m.groups()):
+            continue  # 숫자 없이 "원"만 걸린 경우
+        value = (
+            _to_float(m.group(1)) * 10_000
+            + _to_float(m.group(2)) * 1_000
+            + _to_float(m.group(3))
+        )
+        if value > 0:
+            amounts.append(int(value))
     return max(amounts) if amounts else None
 
 
 # "네이버페이 매달 2만원 페이백 (6개월)"처럼 한 달치 금액만 적힌 링크가 있다.
-# 그대로 _parse_krw에 넘기면 실제 가치의 6분의 1로 저평가되므로 총액으로 바로잡는다.
-# "평생"처럼 개월 수가 없으면 총액을 낼 수 없어 한 달치만 남긴다.
-_RECURRING_PAYBACK_RE = re.compile(r"매달\s*([\d,.]+\s*(?:만|천)?\s*원)\s*(?:씩)?\s*페이백.*?(\d+)\s*개월")
+#
+# 예전에는 이걸 총액(2만 x 6)으로 접어서 benefit_value_won 에 넣었다. 그러면 기간이
+# 사라지고, 같은 컬럼에 "평생 5천원"(월액)과 "6개월 12만원"(총액)이 섞인다. 실제로
+# 소비하는 쪽이 전부 6으로 나누다가 12개월 페이백을 정확히 두 배로 계산했다.
+# 이제는 접지 않는다 - 한 달치 금액과 개월 수를 따로 넘긴다.
+# 금액 부분은 "3만4천원"처럼 여러 자리가 이어질 수 있어 원까지 통째로 잡는다.
+_RECURRING_PAYBACK_RE = re.compile(
+    r"매(?:달|월)\s*([\d,.만천\s]*원)\s*(?:씩)?\s*페이백(?:.*?(\d+)\s*개월)?"
+)
 
 
-def _recurring_payback_won(label: str):
+def _recurring_payback(label: str):
+    """(한 달치 금액, 개월 수). 반복 페이백이 아니면 (None, "")."""
     m = _RECURRING_PAYBACK_RE.search(label or "")
     if not m:
-        return None
+        return None, ""
     per_month = _parse_krw(m.group(1))
     if per_month is None:
-        return None
-    return per_month * int(m.group(2))
+        return None, ""
+    return per_month, int(m.group(2)) if m.group(2) else ""
 
 
 def fetch_list_pages() -> list[str]:
@@ -428,11 +454,73 @@ def parse_signup_notice(soup) -> str:
     return " | ".join(dict.fromkeys(texts))
 
 
+def _labeled_fee(soup, label: str):
+    """상세 헤더의 "<라벨> 월 N원" 블록에서 N을 뽑는다. 없으면 None."""
+    node = next((s for s in soup.find_all("span") if s.get_text(strip=True) == label), None)
+    if node is None or node.parent is None:
+        return None
+    text = re.sub(r"\s+", " ", node.parent.get_text(" ", strip=True))
+    m = re.search(r"월\s*([\d,]+)\s*원", text[text.find(label) + len(label):])
+    return to_won(m.group(1)) if m else None
+
+
+def parse_billing_prices(soup) -> dict:
+    """상세페이지가 나눠서 보여주는 두 금액.
+
+    - "월 납부액"       = 통신사가 실제로 청구하는 금액.
+    - "페이백 포함하면"  = 페이백을 뺀 체감가. 청구액이 아니다.
+
+    목록 카드에는 체감가만 나오는 경우가 있어(plan 36334: 카드 7,000원 / 청구
+    49,000원) 이 둘을 반드시 따로 싣는다. 페이백 지급 기간은 요금 할인 기간과
+    달라서 한 값으로 접으면 복구할 수 없다.
+    """
+    return {
+        "billing_monthly_fee": _labeled_fee(soup, "월 납부액"),
+        "payback_included_fee": _labeled_fee(soup, "페이백 포함하면"),
+    }
+
+
+def apply_billing_prices(card: dict, prices: dict) -> dict:
+    """청구액이 확인되면 카드의 가격 칸을 청구액 기준으로 바로잡는다.
+
+    카드의 "페이백 포함 월 X원 / N개월 이후 Y원"은 X가 체감가일 때 Y도 신뢰할 수
+    없다. 청구액(B)과 카드 정가(Y)를 비교해 세 갈래로 나눈다.
+
+      B < Y : 진짜 요금 할인이 걸려 있다. 할인가만 청구액으로 바꾸고 기간은 둔다.
+      B == Y: 할인은 없고 페이백만 있다. 카드가 적어둔 기간은 요금 할인 기간이
+              아니라 페이백 지급 기간이므로 지운다(6804: 카드 0원/6개월, 청구 1,700원).
+      B > Y : 카드의 "정가"까지 체감가였다. 둘 다 청구액으로 맞추고 기간을 지운다
+              (36334: 카드 7,000원, 청구 49,000원).
+
+    표시가에 페이백을 더하거나 정가로 치환하지 않는다. 쓰는 값은 원문의 청구액뿐이다.
+    """
+    billing = prices.get("billing_monthly_fee")
+    payback_included = prices.get("payback_included_fee")
+    out = {**card, "payback_included_fee": payback_included if payback_included is not None else ""}
+    if billing is None:
+        out["billing_price_verified"] = False
+        return out
+
+    regular = card.get("monthly_fee")
+    out["billing_price_verified"] = True
+    out["discounted_fee"] = billing
+    if regular is None or billing >= regular:
+        out["monthly_fee"] = billing
+        out["discount_period_months"] = ""
+    has_discount = out["monthly_fee"] > billing
+    has_payback = payback_included is not None and payback_included < billing
+    out["discount_type"] = " ".join(
+        part for part in ("모요 프로모션 할인" if has_discount else "", "페이백" if has_payback else "")
+        if part
+    )
+    return out
+
+
 def parse_detail(plan_id: str, plan_name: str):
-    """returns (mvno_brand, benefit_rows, support, signup_notice)"""
+    """returns (mvno_brand, benefit_rows, support, signup_notice, billing_prices)"""
     path = os.path.join(CACHE_DIR, f"detail_{plan_id}.html")
     if not os.path.exists(path):
-        return "", [], {}, ""
+        return "", [], {}, "", {}
     with open(path, encoding="utf-8") as f:
         html = f.read()
     soup = BeautifulSoup(html, "html.parser")
@@ -453,9 +541,14 @@ def parse_detail(plan_id: str, plan_name: str):
     # 멤버십까지 전부 같은 링크라, 링크 종류로 카테고리를 정하면 MVNO 혜택이
     # 통째로 사은품으로 몰린다. 이름 기반 규칙을 쓰고 단서가 없을 때만 사은품이다.
     def add_gift(label: str, detail: str, condition: str):
+        per_month, months = _recurring_payback(label)
+        # 반복 페이백이면 한 달치 금액을, 아니면 일시금을 그대로 싣는다.
+        # 총액으로 접지 않으므로 기간(benefit_months)이 살아남는다.
         benefits.append(make_benefit_row(
             plan_id, "", plan_name, classify_benefit_name(label, "사은품/페이백"), label,
-            value_won=_recurring_payback_won(label) or _parse_krw(label) or "",
+            value_won=per_month if per_month is not None else (_parse_krw(label) or ""),
+            value_basis="monthly" if per_month is not None else "",
+            months=months,
             condition=condition, detail=detail, source_url=url,
         ))
 
@@ -485,7 +578,7 @@ def parse_detail(plan_id: str, plan_name: str):
 
     support = parse_support_services(soup)
     support["voice_extra_minutes"] = parse_addon_voice(soup)
-    return brand, benefits, support, signup_notice
+    return brand, benefits, support, signup_notice, parse_billing_prices(soup)
 
 
 def parse_card_only(a_tag) -> dict | None:
@@ -636,7 +729,8 @@ def parse_card(a_tag, now: str):
     if card is None:
         return None, []
 
-    brand, benefits, support, signup_notice = parse_detail(card["plan_id"], card["plan_name"])
+    brand, benefits, support, signup_notice, prices = parse_detail(card["plan_id"], card["plan_name"])
+    card = apply_billing_prices(card, prices)
     for b in benefits:
         b["host_mno"] = card["host_mno"]
 

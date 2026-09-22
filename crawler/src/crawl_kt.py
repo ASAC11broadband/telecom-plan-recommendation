@@ -358,9 +358,12 @@ def parse_benefit_rows(row: dict, plan_id: str, plan_name: str, source_url: str)
                 name = f"{header_clean} {value}"
             else:
                 name = value
+            # 옵션이 여러 개일 때와 같은 규칙으로 분류한다. 헤더 category 를 그대로 쓰면
+            # "초이스 OTT 1개 또는 디바이스 할인"이 영상/OTT 로 남아 재분류와 어긋난다.
+            final_name = name if len(name) <= 60 else header_clean
             rows.append(make_benefit_row(
-                plan_id, "KT", plan_name, category,
-                name if len(name) <= 60 else header_clean,
+                plan_id, "KT", plan_name,
+                classify_benefit_name(final_name, category), final_name,
                 detail=f"{header_clean}: {value}", source_url=source_url,
             ))
     return rows
@@ -441,7 +444,6 @@ def table_row_to_unified(
     overflow_text = _find_col(row, "초과")
     is_unlimited = "무제한" in data_text
     data_gb = None if is_unlimited else to_gb(data_text)
-    roaming_text = _find_col(row, "로밍")
     tethering_gb = to_gb(_find_col(row, "공유데이터", must_not_contain="덤"))
 
     voice_text = _voice_sms_col(row, "음성")
@@ -483,8 +485,8 @@ def table_row_to_unified(
         "extra_data_gb": "",
         "data_gb": data_gb,
         "data_unlimited": is_unlimited,
-        "data_throttle_speed": (extract_speed(data_text) or extract_speed(overflow_text)
-                                or extract_speed(roaming_text)),
+        # 로밍 속도는 국내 데이터 소진 후 속도가 아니다.
+        "data_throttle_speed": extract_speed(data_text) or extract_speed(overflow_text),
         "daily_data_gb": "",
         "base_tethering_gb": tethering_gb,
         "extra_tethering_gb": "",
