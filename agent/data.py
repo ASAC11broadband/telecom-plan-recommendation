@@ -188,7 +188,6 @@ QOS_LITE_MBPS = 0.46
 #  - 속도 10Mbps: 통신 3사는 100GB대 + 5Mbps 상품을 무제한이라 부르지 않는다. 알뜰폰에는 기본량
 #    무제한이 없어, 소진 후 10Mbps 군집이 알뜰폰의 '무제한'에 해당하는 최상위 등급이다.
 #  - 제공량 100GB: 속도만 보면 '4.5GB + 1Mbps' 같은 소량 상품이 무제한으로 들어온다.
-# 등급별 건수와 정의별 후보 수는 experiments.run_presentation_evidence.fig_unlimited 로 재현된다.
 UNLIMITED_MIN_GB = 100.0
 UNLIMITED_QOS_MBPS = 10.0
 
