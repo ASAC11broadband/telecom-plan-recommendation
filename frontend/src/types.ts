@@ -1,4 +1,4 @@
-export type ScreenType = 's-home' | 's-input' | 's-result' | 's-report' | 's-browse' | 's-compare';
+export type ScreenType = 's-home' | 's-input' | 's-result' | 's-report' | 's-browse' | 's-compare' | 's-detail';
 
 /** backend/plans.py 의 to_plan_item 산출물과 1:1. 바꾸려면 양쪽 같이 바꾼다. */
 export interface PlanItem {

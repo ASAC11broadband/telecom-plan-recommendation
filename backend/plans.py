@@ -357,6 +357,11 @@ def _in_data_bucket(row: dict, bucket: str) -> bool:
         return 10 <= gb < 20
     if bucket == "gte20":
         return gb >= 20
+    # 카드형 탐색 화면(fron)이 쓰는 구간. 위 구간과 함께 둔다.
+    ranges = {"lt10": (0, 10), "10to30": (10, 30), "30to50": (30, 50), "50to100": (50, 100), "gte100": (100, float("inf"))}
+    if bucket in ranges:
+        lo, hi = ranges[bucket]
+        return lo <= gb < hi
     return False
 
 
@@ -392,6 +397,8 @@ _PRICE_BANDS = {
     "20to30k": (20_000, 29_999),
     "30to50k": (30_000, 49_999),
     "gte50k": (50_000, 10**9),
+    "50to70k": (50_000, 69_999),
+    "gte70k": (70_000, 10**9),
 }
 
 
@@ -412,7 +419,7 @@ def _in_gen(row: dict, key: str) -> bool:
 # 그룹 안에서는 OR, 그룹 사이에서는 AND. 시안의 체크박스 동작 그대로.
 FILTER_GROUPS = {
     "networks": (["SKT", "KT", "LGU+", "MNO"], _in_network),
-    "data": (["lt3", "3to10", "10to20", "gte20", "unlimited"], _in_data_bucket),
+    "data": (["lt3", "3to10", "10to20", "gte20", "lt10", "10to30", "30to50", "50to100", "gte100", "unlimited"], _in_data_bucket),
     "tier": (["unlimited_full", "qos_hd", "qos_sd", "qos_lite", "qos_text", "capped"], _in_tier),
     "price": (list(_PRICE_BANDS), _in_price),
     "gen": (["5G", "LTE"], _in_gen),

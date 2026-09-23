@@ -1,19 +1,13 @@
-import { useEffect, useState } from 'react';
+import { BrandLogo } from './BrandLogo';
+import { categories, categoryFilters } from '../categories';
+import { PlanTile } from './PlanTile';
+import { useEffect, useState, ReactNode } from 'react';
 import { BrowseFilters, EMPTY_FILTERS, Facets, PlanItem, PlanPage, Stats } from '../types';
 import { fetchStats, listPlans } from '../api';
 
+const PRICE_OPTIONS: [string, string][] = [['lt10k','1만원 미만'],['10to20k','1~2만원'],['20to30k','2~3만원'],['30to50k','3~5만원'],['50to70k','5~7만원'],['gte70k','7만원 이상']];
 const GROUPS: { group: keyof BrowseFilters; label: string; options: [string, string][] }[] = [
-  {
-    group: 'price',
-    label: '월 요금',
-    options: [
-      ['lt10k', '1만원 미만'],
-      ['10to20k', '1~2만원'],
-      ['20to30k', '2~3만원'],
-      ['30to50k', '3~5만원'],
-      ['gte50k', '5만원 이상'],
-    ],
-  },
+  { group: 'price', label: '월 예산', options: PRICE_OPTIONS },
   {
     group: 'networks',
     label: '통신망',
@@ -36,10 +30,11 @@ const GROUPS: { group: keyof BrowseFilters; label: string; options: [string, str
     group: 'data',
     label: '기본 데이터',
     options: [
-      ['lt3', '3GB 미만'],
-      ['3to10', '3~10GB 미만'],
-      ['10to20', '10~20GB 미만'],
-      ['gte20', '20GB 이상'],
+      ['lt10', '0~10GB 미만'],
+      ['10to30', '10~30GB 미만'],
+      ['30to50', '30~50GB 미만'],
+      ['50to100', '50~100GB 미만'],
+      ['gte100', '100GB 이상'],
       // 아래 '다 쓴 뒤에는' 그룹과 같은 말을 쓴다. 그냥 '무제한'이라고 두면 AI 추천이 말하는
       // '무제한'(기본량 무제한 + 대용량·속도 유지 상품)과 같은 단어인데 건수가 달라 보인다.
       ['unlimited', '기본량 무제한'],
@@ -96,17 +91,25 @@ const labelOf = (group: keyof BrowseFilters, key: string) =>
   GROUPS.find((g) => g.group === group)?.options.find(([k]) => k === key)?.[1] ?? key;
 
 export function BrowseScreen({
+  chat,
+  initialCategory = 'all',
   compare,
   onToggleCompare,
   onOpenCompare,
+  onAskPlan,
 }: {
+  chat: ReactNode;
+  initialCategory?: string;
   compare: PlanItem[];
   onToggleCompare: (plan: PlanItem) => void;
   onOpenCompare: () => void;
+  onAskPlan: (plan: PlanItem) => void;
 }) {
+  const [category, setCategory] = useState(initialCategory);
+  const [view, setView] = useState<'cards' | 'table'>('cards');
   const [stats, setStats] = useState<Stats | null>(null);
   const facets: Facets = stats?.facets ?? {};
-  const [filters, setFilters] = useState<BrowseFilters>(EMPTY);
+  const [filters, setFilters] = useState<BrowseFilters>(() => categoryFilters(initialCategory));
   const [sort, setSort] = useState('fee_asc');
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
@@ -134,6 +137,7 @@ export function BrowseScreen({
 
   const toggle = (group: keyof BrowseFilters, key: string) => {
     setPage(1);
+    if (group !== 'price') setCategory('custom');
     setFilters((prev) => ({
       ...prev,
       [group]: prev[group].includes(key)
@@ -151,35 +155,15 @@ export function BrowseScreen({
   const to = Math.min(page * PAGE_SIZE, total);
 
   return (
-    <div className="body">
-      <div className="section-heading"><h1>전체 요금제 둘러보기</h1><p>가격과 제공량을 살펴보고, 관심 있는 요금제를 비교함에 담아보세요.</p></div>
-      {stats && <section className="card catalog-overview">
-        <div className="row-between"><h2>요금제 현황</h2><span className="comparison-note">수집 기준 {stats.dataAsOf}</span></div>
-        <p>전체 <strong>{stats.total.toLocaleString()}개</strong> · 통신 3사 {stats.mno.toLocaleString()}개 · 알뜰폰 {stats.mvno.toLocaleString()}개 · 알뜰폰 브랜드 {stats.brands}개</p>
-        <div className="distribution-grid">{(['price', 'data', 'networks'] as const).map(group => {
-          const definition = GROUPS.find(item => item.group === group)!;
-          const options = definition.options.filter(([key]) => key !== 'MNO');
-          const counted = options.reduce((sum, [key]) => sum + (facets[group]?.[key] ?? 0), 0);
-          return <div key={group}><h3>{definition.label} 분포</h3>
-            {options.map(([key, label]) => {
-              const count = facets[group]?.[key] ?? 0;
-              return <button className="distribution-row" key={key} aria-pressed={filters[group].includes(key)} onClick={() => toggle(group, key)}>
-                <span>{label}</span><span className="distribution-track"><span style={{ width: `${stats.total ? count / stats.total * 100 : 0}%` }} /></span><span>{count.toLocaleString()}개</span>
-              </button>;
-            })}
-            {counted < stats.total && <small>정보 미확인 {(stats.total - counted).toLocaleString()}개</small>}
-          </div>;
-        })}</div>
-        <p className="comparison-note">필터 적용 전 수집 상품 기준이며 가입 조건·옵션별 상품을 포함합니다. 요금 분포에는 페이백 반영 표시가도 포함됩니다. 청구액 미확인 상품은 AI 추천과 총비용 계산에서 제외합니다. 이용자 수나 시장점유율이 아닙니다. 막대를 누르면 목록에 필터가 적용됩니다.</p>
-      </section>}
-      <div className="split catalog-layout">
-      <div className="card filter-panel">
+    <div className="body browse-workspace">
+      <details className="card filter-panel" open><summary>세부 필터 · 월 예산 / 데이터</summary>
         <div className="panel-head">
           <strong style={{ fontSize: 'var(--fs-13)' }}>필터</strong>
-          <button
-            className="linklike accent"
+          <button className="text-btn"
+            style={{ fontSize: 'var(--fs-11)', color: 'var(--accent)', cursor: 'pointer' }}
             onClick={() => {
               setFilters(EMPTY);
+              setCategory('all');
               setQ('');
               setPage(1);
             }}
@@ -201,7 +185,7 @@ export function BrowseScreen({
         </div>
         {GROUPS.map((g, i) => (
           <div className="f-sec" key={g.group} style={i === GROUPS.length - 1 ? { borderBottom: 'none' } : undefined}>
-            <span className="lbl">{g.label}</span>
+            <span className="lbl">{g.label}</span>{g.group === 'price' && <p className="filter-hint">할인 적용 월 요금 · 시작 금액 이상 / 끝 금액 미만</p>}
             {g.options.map(([key, label]) => (
               <label className="f-row" key={key}>
                 <input
@@ -215,9 +199,14 @@ export function BrowseScreen({
             ))}
           </div>
         ))}
-      </div>
+      </details>
 
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <h1 className="browse-title">내 생활에 맞는 요금제 찾기</h1>
+        <div className="browse-categories">{categories.map(c => <button className={'btn '+(category === c.id ? 'selected' : '')} aria-pressed={category === c.id} key={c.id} onClick={() => { setCategory(c.id); setFilters(prev => ({...categoryFilters(c.id), price: prev.price})); setPage(1); }}>{c.icon} {c.title}</button>)}</div>
+        <p className="muted">{categories.find(c => c.id === category)?.description ?? '직접 선택한 조건'} · 카테고리 간 요금제가 중복될 수 있습니다.</p>
+
+        <div className="view-switch"><button className="btn" aria-pressed={view === 'cards'} onClick={() => setView('cards')}>카드 보기</button><button className="btn" aria-pressed={view === 'table'} onClick={() => setView('table')}>표 보기</button></div>
         <div className="row-between" style={{ marginBottom: 12 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
             <strong style={{ fontSize: 18 }} className="num">
@@ -240,7 +229,6 @@ export function BrowseScreen({
                 </option>
               ))}
             </select>
-
           </div>
         </div>
 
@@ -261,7 +249,8 @@ export function BrowseScreen({
         )}
 
         <div className="card">
-          <div style={{ overflowX: 'auto' }}>
+          {view === 'cards' && <div className="browse-plan-grid">{loading ? <p role="status">불러오는 중…</p> : error ? <p role="alert">{error}</p> : data?.plans.length === 0 ? <p>조건에 맞는 요금제가 없습니다. 필터를 줄여 보세요.</p> : data?.plans.map(plan => <PlanTile key={plan.id} plan={plan} selected={compare.some(p => p.id === plan.id)} onCompare={() => onToggleCompare(plan)} onAsk={() => onAskPlan(plan)} />)}</div>}
+          <div style={{ overflowX: 'auto', display: view === 'table' ? 'block' : 'none' }}>
             <table>
               <thead>
                 <tr>
@@ -313,8 +302,8 @@ export function BrowseScreen({
                           </span>
                         )}
                       </td>
-                      <td>{plan.carrier}</td>
-                      <td className="num">
+                      <td><BrandLogo carrier={plan.carrier}/></td>
+                                            <td className="num">
                         {plan.price}원
                         {!plan.billingPriceKnown && <span className="promo-flag">페이백 반영 · 청구액 미확인</span>}
                         {plan.isPromo && <span className="promo-flag">프로모션</span>}
@@ -380,7 +369,7 @@ export function BrowseScreen({
           </div>
         </div>
       </div>
-      </div>
+      {chat}
     </div>
   );
 }

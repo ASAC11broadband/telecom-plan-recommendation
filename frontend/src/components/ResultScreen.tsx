@@ -1,5 +1,6 @@
+import { BrandLogo } from './BrandLogo';
+import { ReactNode } from 'react';
 import { Blocker, ChatMessage, HistoryRow, PlanItem, Profile, RecommendResponse, ScreenType } from '../types';
-import { Conversation } from './Conversation';
 import { ConditionKind, dataCondition } from '../profileText';
 
 /** 직전 결과 대비 변동. 백엔드는 매 호출을 독립으로 처리하므로 여기서 계산한다. */
@@ -80,6 +81,15 @@ function stabilityTier(top3: number | null): { label: string; tone: string } {
   if (top3 >= 0.66) return { label: '높음', tone: 'tag-green' };
   if (top3 >= 0.33) return { label: '보통', tone: 'tag-muted' };
   return { label: '조건에 따라 변동 가능', tone: 'tag-amber' };
+}
+
+function reasonSentences(reason: string) {
+  return reason
+    .replace(/\r/g, '')
+    .replace(/\s*#(?:온라인전용|요금제한정)\b/g, '')
+    .split(/\n+|(?<=[.!?。])\s+/)
+    .map((line) => line.replace(/^\s*(?:[-*•]+|\d+[.)、])\s*/, '').replace(/^#+\s*/, '').trim())
+    .filter((line) => line.length > 12 && !/^추천\s*근거\s*$/i.test(line));
 }
 
 /** 카드 상단의 추천 근거 요약. 적합도는 종합 지표, 안정성은 가중치를 달리해도 상위권을
@@ -350,6 +360,7 @@ function NetworkPreferenceSwitch({ profile, loading, onFollowup }: {
 }
 
 export function ResultScreen({
+  chat,
   result,
   prevPlans,
   messages,
@@ -362,6 +373,7 @@ export function ResultScreen({
   onToggleCompare,
   onNavigate,
 }: {
+  chat: ReactNode;
   compare: PlanItem[];
   onToggleCompare: (plan: PlanItem) => void;
   result: RecommendResponse | null;
@@ -374,33 +386,37 @@ export function ResultScreen({
   onReport: (planId: string) => void;
   onNavigate: (s: ScreenType) => void;
 }) {
-  if (!result) return <main className="body">
+  const shell = (content: ReactNode) => <div className="body recommendation-layout"><section className="recommendation-results" aria-label="추천 결과" aria-busy={loading}>{content}</section>{chat}</div>;
+
+  if (!result) return shell(
     <section className="card empty-state"><h2>{loading ? '조건을 확인하고 있어요' : '추천을 시작해보세요'}</h2>
+      {error && <p role="alert">{error}</p>}
       <p>예산이나 데이터 사용량 하나만 알려주면 맞는 요금제를 찾아드릴게요.</p>
       {!loading && <button className="btn btn-primary" onClick={() => onNavigate('s-input')}>조건 입력하기</button>}
     </section>
-  </main>;
+  );
 
-  if (result.needsMoreInput) return <main className="body">
+  if (result.needsMoreInput) return shell(
     <section className="card empty-state">
       <span className="tag tag-amber">추가 정보 필요</span>
       <h2>추천 전에 한 가지만 더 알려주세요.</h2>
       <p>{result.followupQuestion || '월 데이터 사용량이나 희망 예산을 알려주세요.'}</p>
       <button className="btn btn-primary" onClick={() => onNavigate('s-input')}>입력으로 돌아가기</button>
     </section>
-  </main>;
+  );
 
   const isUpdate = prevPlans.length > 0 && !result.needsMoreInput;
   const latest = history[0];
   const fitKeys = varyingCriteria(result.plans);
   const cheapest = result.plans.filter(p => p.totalNum !== null).reduce<PlanItem | null>((best, plan) => !best || plan.totalNum! < best.totalNum! ? plan : best, null);
+  const winner = result.plans.find((plan) => plan.best) ?? result.plans[0];
 
-  return (
-    <main className="body result-page">
+  return shell(
+    <div className="result-page">
         <div className="row-between result-header">
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <h2 style={{ fontSize: 'var(--fs-20)', fontWeight: 700 }}>추천 결과</h2>
+              <h2 style={{ fontSize: 'var(--fs-20)', fontWeight: 700 }}>추천 결과</h2><span className="recommendation-complete" role="status">✓ 추천 완료</span>
               {isUpdate && <span className="tag tag-amber">갱신됨</span>}
             </div>
             <p style={{ fontSize: 'var(--fs-12)', color: 'var(--t2)' }}>
@@ -418,7 +434,6 @@ export function ResultScreen({
           </div>
         </div>
 
-        <div className="split result-split">
         <div className="result-main">
         {(loading || error) && <div className="notice" role="status">{loading ? '새 조건으로 다시 추천 중입니다.' : '새 조건의 추천을 완료하지 못했습니다.'} 아래는 이전 조건의 결과입니다.</div>}
         {result.plans.length > 0 && result.evaluation && !result.evaluation.passed && (
@@ -467,18 +482,10 @@ export function ResultScreen({
         {result.plans.length === 0 ? (
           !result.needsMoreInput && <fieldset disabled={loading} className="plain-fieldset"><EmptyResult blockers={result.blockers} onFollowup={onFollowup} /></fieldset>
         ) : (
-          <div className="plan-grid">
-            {result.plans.map((plan) => (
-              <PlanCard
-                key={plan.id}
-                plan={plan}
-                delta={deltaOf(plan, prevPlans)}
-                fitKeys={fitKeys}
-                onReport={() => onReport(plan.id)}
-                saved={compare.some(item => item.id === plan.id)}
-                onSave={() => onToggleCompare(plan)}
-              />
-            ))}
+          <div className="recommendation-showcase">
+            <div className="recommendation-intro"><span>모모플랜 추천 1순위</span><strong>조건에 맞는 요금제를 찾았어요</strong><p>{winner.name}의 핵심 정보와 추천 이유를 먼저 확인해 보세요.</p></div>
+            <PlanCard key={winner.id} plan={winner} delta={deltaOf(winner, prevPlans)} fitKeys={fitKeys} onReport={() => onReport(winner.id)} saved={compare.some(item => item.id === winner.id)} onSave={() => onToggleCompare(winner)} featured />
+            {result.plans.length > 1 && <details className="other-recommendations"><summary>다른 추천 요금제 {result.plans.length - 1}개 함께 보기</summary><div className="plan-grid">{result.plans.filter((plan) => plan.id !== winner.id).map((plan) => <PlanCard key={plan.id} plan={plan} delta={deltaOf(plan, prevPlans)} fitKeys={fitKeys} onReport={() => onReport(plan.id)} saved={compare.some(item => item.id === plan.id)} onSave={() => onToggleCompare(plan)} />)}</div></details>}
           </div>
         )}
 
@@ -562,9 +569,7 @@ export function ResultScreen({
           </div>
         )}
         </div>
-        <Conversation messages={messages} loading={loading} error={error} onSubmit={onFollowup} />
-        </div>
-    </main>
+    </div>
   );
 }
 
@@ -575,6 +580,7 @@ function PlanCard({
   saved,
   onSave,
   onReport,
+  featured = false,
 }: {
   plan: PlanItem;
   delta: { text: string; changed: boolean } | null;
@@ -582,9 +588,10 @@ function PlanCard({
   saved: boolean;
   onSave: () => void;
   onReport: () => void;
+  featured?: boolean;
 }) {
   return (
-    <div className={`card${plan.best ? ' accent' : ''}`}>
+    <div className={`card recommendation-plan-card${featured ? ' featured-plan' : ''}${plan.best ? ' accent' : ''}`}>
       <div className="plan-head">
         <div style={{ display: 'flex', gap: 5, alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', gap: 5 }}>
@@ -597,7 +604,7 @@ function PlanCard({
         </div>
         {delta && <div className={`delta ${delta.changed ? 'up' : 'flat'}`}>{delta.text}</div>}
         <div className="plan-name">{plan.name}</div>
-        <div className="plan-carrier">{plan.carrier}</div>
+        <div className="plan-carrier"><BrandLogo carrier={plan.carrier}/></div>
       </div>
 
       <FitSummary plan={plan} />
@@ -648,7 +655,11 @@ function PlanCard({
           ))}
         </div>
       )}
-      <div className="benefit">{plan.reason || plan.benefit}</div>
+      <div className="result-benefits">
+        <div className="result-benefit-item"><span>통신망 · 가입</span><strong>{plan.carrierType === 'MVNO' ? '알뜰폰' : '통신 3사'} · {plan.networkGen || plan.network || 'LTE/5G'}{plan.isOnlineOnly ? ' · 온라인 전용' : ''}</strong></div>
+        <div className="result-benefit-item"><span>요금제 혜택</span><strong>{plan.benefit || '별도 혜택 정보 없음'}</strong></div>
+      </div>
+      <div className="recommendation-reason"><div className="reason-heading"><span>WHY THIS PLAN</span><strong>이 요금제를 추천한 이유</strong></div><div className="reason-list">{reasonSentences(plan.reason).slice(0, 3).map((line, index) => <div className="reason-list-item" key={`${index}-${line}`}><span>{String(index + 1).padStart(2, '0')}</span><p>{line}</p></div>)}</div></div>
       {plan.dataWarnings.map(warning => <div className="promo-note" key={warning}>{warning}</div>)}
       {plan.costIsEstimate && <div className="promo-note">할인 기간 미확인 · 아래 비용은 현재가 유지 가정</div>}
       <div className="total-row">

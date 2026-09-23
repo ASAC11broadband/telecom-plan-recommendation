@@ -3,6 +3,14 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { PlanItem, Profile, RecommendResponse, ReferenceDelta, ScreenType } from '../types';
 
+function reasonPoints(reason: string) {
+  return reason
+    .replace(/\r/g, '')
+    .split(/\n+|(?<=[.!?。])\s+/)
+    .map((line) => line.replace(/^\s*(?:[-*•]+|\d+[.)、])\s*/, '').replace(/^#+\s*/, '').trim())
+    .filter((line) => line && !/^추천\s*근거\s*$/i.test(line));
+}
+
 /** 비용 표는 LLM 서술이 아니라 요금제 숫자로 직접 계산한다. 돈 얘기는 틀리면 안 된다. */
 function costRows(plan: PlanItem) {
   const months = plan.compareMonths;
@@ -227,6 +235,7 @@ export function ReportScreen({
   const plan = result.plans.find((item) => item.id === selectedPlanId) ?? result.plans[0];
   const alternatives = result.plans.filter((item) => item.id !== plan.id);
   const cost = costRows(plan);
+  const reasons = reasonPoints(plan.reason || '');
   // 섹션 번호는 렌더링되는 순서대로 매긴다. 조건부 섹션을 건너뛰면 01·02·03·04·06 이 된다.
   let sectionNo = 0;
   const nextNo = () => String(++sectionNo).padStart(2, '0');
@@ -362,10 +371,15 @@ export function ReportScreen({
           <h4>
             <span className="no">{nextNo()}</span>추천 요금제 선정 이유
           </h4>
-          <div className="md">
-            <Markdown remarkPlugins={[remarkGfm]}>
-              {plan.reason || '선정 사유가 제공되지 않았습니다.'}
-            </Markdown>
+          <div className="reason-summary-grid">
+            <article><span>월 납부액</span><strong>{plan.price.toLocaleString()}원</strong><small>{plan.priceNote}</small></article>
+            <article><span>데이터</span><strong>{plan.data}</strong><small>소진 후 {plan.qos === '-' ? '속도 정보 없음' : plan.qos}</small></article>
+            <article><span>통화 · 문자</span><strong>{plan.call} · {plan.sms}</strong><small>{plan.isOnlineOnly ? '온라인 전용' : plan.network ? `${plan.network}망` : '가입 조건 확인'}</small></article>
+          </div>
+          {plan.benefit && plan.benefit !== '부가 혜택 없음' && <div className="reason-benefits"><strong>요금제 혜택</strong><div>{benefitItems(plan).map((item) => <span className="hash" key={item}>{item}</span>)}</div></div>}
+          <div className="reason-points">
+            <strong>이 요금제를 추천한 이유</strong>
+            {reasons.length ? reasons.map((point, index) => <div className="reason-point" key={`${index}-${point}`}><span>{String(index + 1).padStart(2, '0')}</span><p>{point}</p></div>) : <p>입력한 조건과 요금제 제공량, 월 요금, 가입 조건을 바탕으로 추천했습니다.</p>}
           </div>
           {result.report && (
             <details className="report-full">

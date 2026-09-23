@@ -12,7 +12,7 @@ export function GNB({
   return (
     <nav className="gnb">
       <div className="gnb-left">
-        <span
+        <button
           className="gnb-logo"
           style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 7 }}
           onClick={() => onNavigate('s-home')}
@@ -30,7 +30,7 @@ export function GNB({
           <span style={{ fontSize: 'var(--fs-11)', fontWeight: 400, color: 'var(--t3)' }}>
             MoMo Plan
           </span>
-        </span>
+        </button>
         <ul className="gnb-menu">
           <li>
             <button
@@ -53,7 +53,8 @@ export function GNB({
               className={currentScreen === 's-compare' ? 'active' : ''}
               onClick={() => onNavigate('s-compare')}
             >
-              내 비교함 ({compareCount})
+              비교함
+              {compareCount > 0 && <span className="gnb-badge num">{compareCount}</span>}
             </button>
           </li>
         </ul>

@@ -210,6 +210,12 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Local LangGraph Studio runtime
+.langgraph-venv/
+.langgraph_api/
+.pip-cache/
+.pip-temp/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

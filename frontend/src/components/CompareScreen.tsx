@@ -1,58 +1,50 @@
-import { PlanItem, ScreenType } from '../types';
-import { CompareTable } from './ResultScreen';
-
-export function CompareScreen({ plans, recommendedIds, onRemove, onNavigate }: {
-  plans: PlanItem[];
-  recommendedIds: string[];
-  onRemove: (plan: PlanItem) => void;
-  onNavigate: (screen: ScreenType) => void;
-}) {
-  const totals = plans.filter((plan) => plan.totalNum !== null);
-  const lowestTotal = totals.reduce<PlanItem | null>(
-    (best, plan) => !best || plan.totalNum! < best.totalNum! ? plan : best,
-    null,
-  );
-  const fiveG = plans.filter((plan) => plan.networkGen === '5G');
-  const promoRise = plans.filter((plan) => plan.priceRisesAfter !== null);
-
-  return <main className="body">
-    <div className="row-between section-heading">
-      <div><h1>내 비교함 <span className="tag tag-accent">{plans.length}개</span></h1>
-        <p>직접 찾은 요금제와 AI 추천 요금제를 함께 비교하세요.</p></div>
-      <button className="btn" onClick={() => onNavigate('s-browse')}>요금제 더 찾기</button>
-    </div>
-    {plans.length === 0 ? <div className="card empty-state">
-      <h2>아직 담은 요금제가 없습니다</h2><p>전체 요금제나 AI 추천 결과에서 ‘비교함에 담기’를 눌러보세요.</p>
-      <button className="btn btn-primary" onClick={() => onNavigate('s-browse')}>전체 요금제 둘러보기</button>
-    </div> : <>
-      <section className="card compare-summary" aria-label="비교 요약">
-        <div>
-          <span className="k">가장 낮은 {plans[0].compareMonths}개월 총비용</span>
-          <strong>{lowestTotal ? `${lowestTotal.name} · ${lowestTotal.total}` : '청구액 확인 필요'}</strong>
-        </div>
-        <div>
-          <span className="k">5G 선택지</span>
-          <strong>{fiveG.length ? `${fiveG.length}개 포함` : '담긴 상품에 없음'}</strong>
-        </div>
-        <div>
-          <span className="k">프로모션 종료 주의</span>
-          <strong>{promoRise.length ? `${promoRise.length}개 · 종료 뒤 요금 상승` : '비교 기간 내 상승 없음'}</strong>
-        </div>
-      </section>
-      <div className="saved-plans">{plans.map(plan => <div className="card saved-plan" key={plan.id}>
-        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-          <span className="tag tag-muted">{plan.carrier}</span>
-          <span className={`tag ${recommendedIds.includes(plan.id) ? 'tag-accent' : 'tag-green'}`}>
-            {recommendedIds.includes(plan.id) ? 'AI 추천' : '직접 탐색'}
-          </span>
-        </div>
-        <strong>{plan.name}</strong>
-        <p>{plan.billingPriceKnown ? '월' : '페이백 반영 표시가'} {plan.price}원 · {plan.data}</p>
-        <button className="btn btn-sm" onClick={() => onRemove(plan)} aria-label={`${plan.name} 비교함에서 삭제`}>삭제</button>
-      </div>)}</div>
-      {plans.length === 1 && <p className="notice">요금제를 하나 더 담으면 나란히 비교할 수 있습니다.</p>}
-      <CompareTable plans={plans} />
-      <p className="comparison-note">수집 당시 요금과 제공량 기준입니다. 혜택 차감 참고값은 개인의 실제 절약액이 아니며, 가입 조건과 할인 적용 여부를 확인해야 합니다. 비교함은 이 탭에서 새로고침해도 유지됩니다.</p>
-    </>}
-  </main>;
+import { useState } from 'react';
+import { PlanItem } from '../types';
+import { BrandLogo } from './BrandLogo';
+const money = (n: number) => n.toLocaleString() + '원';
+type ComparisonRow = { label: string; value: (p: PlanItem) => string; cost?: (p: PlanItem) => number | null };
+const rows: ComparisonRow[] = [
+ {label:'월 납부 요금',value:p=>money(p.priceNum),cost:p=>p.priceNum},
+ {label:'비교 기간 총비용',value:p=>p.totalNum===null?'청구액 확인 필요':`${money(p.totalNum)} (${p.compareMonths}개월)`,cost:p=>p.totalNum},
+ {label:'기본 월 요금 (할인 전)',value:p=>money(p.originalPrice)},
+ {label:'할인 조건',value:p=>p.priceNote},
+ {label:'기본 데이터',value:p=>p.data},
+ {label:'데이터 소진 후 속도',value:p=>p.qos === '-' ? '제공 정보 없음' : p.qos},
+ {label:'음성통화',value:p=>p.call},
+ {label:'문자',value:p=>p.sms},
+ {label:'테더링',value:p=>p.tetheringGb == null ? '제공 정보 없음' : p.tetheringGb+'GB'},
+ {label:'통신망',value:p=>p.network || '제공 정보 없음'},
+ {label:'통신 방식',value:p=>p.networkGen || '제공 정보 없음'},
+ {label:'사업자 유형',value:p=>p.carrierType === 'MVNO' ? '알뜰폰' : '통신 3사'},
+ {label:'부가 혜택',value:p=>p.benefit || '제공 정보 없음'},
+ {label:'가입 조건',value:p=>p.ageCondition || '별도 조건 정보 없음'},
+ {label:'온라인 전용',value:p=>p.isOnlineOnly ? '온라인 전용' : '온라인 전용 아님'},
+];
+function differenceSummary(plan: PlanItem, baseline: PlanItem) {
+ const cost = plan.totalNum === null || baseline.totalNum === null ? null : plan.totalNum - baseline.totalNum;
+ const fee = cost === null ? '청구액 미확인이라 총비용을 비교할 수 없어요' : cost === 0 ? `${plan.compareMonths}개월 총비용이 같아요` : `${plan.compareMonths}개월간 ${money(Math.abs(cost))} ${cost < 0 ? '저렴해요' : '더 들어요'}`;
+ let data = '데이터 제공량은 상세 조건을 확인해 주세요';
+ if(plan.dataUnlimited && baseline.dataUnlimited) data='둘 다 데이터 무제한';
+ else if(plan.dataUnlimited) data='이 요금제는 데이터 무제한';
+ else if(baseline.dataUnlimited) data=`기준 요금제는 무제한 · 이 요금제는 ${plan.data}`;
+ else if(plan.dataNum !== null && baseline.dataNum !== null) {const diff = Math.round((plan.dataNum-baseline.dataNum)*1000)/1000;data=diff===0?'기본 데이터 제공량이 같아요':`월 기본 데이터 ${Math.abs(diff).toLocaleString()}GB ${diff>0?'더 제공':'적게 제공'}`;}
+ return {fee,data};
+}
+export function CompareScreen({plans,onRemove,onBrowse,onClear}:{plans:PlanItem[];onRemove:(p:PlanItem)=>void;onBrowse:()=>void;onClear:()=>void}) {
+ const [onlyDiff,setOnlyDiff]=useState(false);
+ const differs=(row:ComparisonRow)=>new Set(plans.map(row.value)).size>1;
+ const visible=onlyDiff && plans.length > 1?rows.filter(differs):rows;
+ const minMonthly=Math.min(...plans.map(p=>p.priceNum));
+ const totals=plans.flatMap(p=>p.totalNum===null?[]:[p.totalNum]);
+ const minTotal=Math.min(...totals);
+ const gapMonthly=Math.max(...plans.map(p=>p.priceNum))-minMonthly;
+ const gapTotal=totals.length>1?Math.max(...totals)-minTotal:0;
+ return <main className="body compare-page"><div className="compare-heading"><div><div className="eyebrow">MY PLAN COMPARISON</div><h1>비교함 <span>{plans.length}</span></h1><p>담아둔 요금제, 어떤 점이 다른지 나란히 비교해 보세요.</p></div><button className="btn btn-primary" onClick={onBrowse}>+ 요금제 더 담기</button></div>
+ {plans.length === 0 ? <section className="compare-empty"><div className="empty-symbol">⇄</div><h2>비교할 요금제를 담아보세요</h2><p>요금제 카드의 ‘비교 담기’를 누르면 이곳에서 함께 볼 수 있어요.</p><button className="btn btn-primary" onClick={onBrowse}>요금제 둘러보기 →</button></section> : <>
+ {plans.length > 1 ? <section className="comparison-summary"><div><span>월 요금 차이</span><strong>{gapMonthly ? '최대 '+money(gapMonthly) : '월 요금이 같아요'}</strong></div><div><span>{plans[0].compareMonths}개월 총비용 차이</span><strong>{gapTotal ? '최대 '+money(gapTotal) : '총비용이 같아요'}</strong></div><div><span>서로 다른 조건</span><strong>{rows.filter(differs).length}개 항목</strong></div></section> : <div className="compare-notice">요금제를 하나 더 담으면 가격 차이와 서로 다른 조건을 표시해 드려요.</div>}
+ {plans.length>1 && <section className="comparison-insights" aria-label="요금제 차이 요약"><h2>한눈에 보는 차이</h2><p>먼저 담은 ‘{plans[0].name}’ 기준으로 비교했어요.</p><div>{plans.slice(1).map(p=>{const summary=differenceSummary(p,plans[0]);return <article key={p.id}><strong>{p.name}</strong><span>{summary.fee}</span><small>{summary.data}</small></article>;})}</div></section>}
+ <div className="compare-toolbar"><button className="btn" onClick={onClear}>전체 비우기</button><label><input type="checkbox" checked={onlyDiff && plans.length > 1} disabled={plans.length<2} onChange={e=>setOnlyDiff(e.target.checked)}/> 다른 항목만 보기</label><span>보라색은 서로 다른 조건 · 최저 비용은 담은 요금제 기준</span></div>
+ <div className="comparison-scroll" tabIndex={0} role="region" aria-label="담은 요금제 비교표"><table className="comparison-table"><thead><tr><th scope="col">비교 항목</th>{plans.map(p=><th scope="col" key={p.id}><BrandLogo carrier={p.carrier}/><h3>{p.name}</h3><div className="compare-badges">{plans.length>1&&p.totalNum===minTotal&&<span>{p.compareMonths}개월 최저 비용</span>}</div><button className="text-btn" onClick={()=>onRemove(p)} aria-label={p.name+' 비교함에서 빼기'}>삭제 ×</button></th>)}</tr></thead><tbody>{visible.map(row=><tr key={row.label} className={differs(row)?'is-different':''}><th scope="row">{row.label}{differs(row)&&<span className="diff-dot" aria-label="차이 있음"/>}</th>{plans.map(p=>{const cost=row.cost?.(p);const known=row.cost?plans.flatMap(x=>{const c=row.cost!(x);return c===null?[]:[c];}):[];const min=Math.min(...known);return <td key={p.id}><strong>{row.value(p)}</strong>{known.length>1&&cost!==undefined&&cost!==null&&<small className={cost===min?'lowest':'cost-difference'}>{cost===min?'최저 비용':'최저 대비 +'+money(cost-min)}</small>}</td>;})}</tr>)}{!visible.length&&<tr><td colSpan={plans.length+1}>표시할 차이가 없습니다. ‘다른 항목만 보기’를 해제해 전체 조건을 확인하세요.</td></tr>}</tbody></table></div>
+ <p className="data-disclaimer">보유 요금제 데이터 기준입니다. 할인 기간과 가입 조건에 따라 실제 납부액이 달라질 수 있습니다. 제공 정보 없음은 혜택이 없다는 의미가 아닙니다.</p></>}
+ </main>;
 }
