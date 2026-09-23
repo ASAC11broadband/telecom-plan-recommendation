@@ -1,4 +1,4 @@
-export type ScreenType = 's-home' | 's-input' | 's-result' | 's-report' | 's-browse';
+export type ScreenType = 's-home' | 's-input' | 's-result' | 's-report' | 's-browse' | 's-compare' | 's-detail';
 
 /** backend/plans.py 의 to_plan_item 산출물과 1:1. 바꾸려면 양쪽 같이 바꾼다. */
 export interface PlanItem {
@@ -102,6 +102,7 @@ export interface BrowseFilters {
   data: string[];
   voice: string[];
   flags: string[];
+  price: string[];
 }
 
 /** 재추천 때마다 한 줄씩 쌓이는 변경 이력. */

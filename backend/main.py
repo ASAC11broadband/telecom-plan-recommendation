@@ -124,6 +124,7 @@ def list_plans(
     data: str = "",
     voice: str = "",
     flags: str = "",
+    price: str = "",
     sort: str = "fee_asc",
     page: int = 1,
     page_size: int = 20,
@@ -133,7 +134,7 @@ def list_plans(
         raise HTTPException(status_code=400, detail=f"알 수 없는 정렬: {sort}")
     selected = {
         group: [key for key in value.split(",") if key]
-        for group, value in (("networks", networks), ("data", data), ("voice", voice), ("flags", flags))
+        for group, value in (("networks", networks), ("data", data), ("voice", voice), ("flags", flags), ("price", price))
     }
     rows = apply_filters(list(_rows()), selected, q)
 

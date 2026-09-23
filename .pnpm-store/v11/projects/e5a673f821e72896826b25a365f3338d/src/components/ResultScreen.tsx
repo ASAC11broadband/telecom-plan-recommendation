@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { BrandLogo } from './BrandLogo';
+import { useState, ReactNode } from 'react';
 import { ChatMessage, HistoryRow, PlanItem, RecommendResponse, ScreenType } from '../types';
 
 /** 직전 결과 대비 변동. 백엔드는 매 호출을 독립으로 처리하므로 여기서 계산한다. */
@@ -28,6 +29,15 @@ function conditionCells(result: RecommendResponse) {
     ['연령', p.age_condition || '미지정'],
     ['후보군', `${result.candidateCount.toLocaleString()}건`],
   ] as const;
+}
+
+function reasonSentences(reason: string) {
+  return reason
+    .replace(/\r/g, '')
+    .replace(/\s*#(?:온라인전용|요금제한정)\b/g, '')
+    .split(/\n+|(?<=[.!?。])\s+/)
+    .map((line) => line.replace(/^\s*(?:[-*•]+|\d+[.)、])\s*/, '').replace(/^#+\s*/, '').trim())
+    .filter((line) => line.length > 12 && !/^추천\s*근거\s*$/i.test(line));
 }
 
 function FollowupNotice({
@@ -73,6 +83,7 @@ function FollowupNotice({
 }
 
 export function ResultScreen({
+  chat,
   result,
   prevPlans,
   messages,
@@ -83,6 +94,7 @@ export function ResultScreen({
   onReport,
   onNavigate,
 }: {
+  chat: ReactNode;
   result: RecommendResponse | null;
   prevPlans: PlanItem[];
   messages: ChatMessage[];
@@ -93,11 +105,10 @@ export function ResultScreen({
   onReport: (planId: string) => void;
   onNavigate: (s: ScreenType) => void;
 }) {
-  const [text, setText] = useState('');
-  const [expanded, setExpanded] = useState(false);
+  const shell = (content: ReactNode) => <div className="body recommendation-layout"><section className="recommendation-results" aria-label="추천 결과" aria-busy={loading}>{content}</section>{chat}</div>;
 
   if (loading) {
-    return (
+    return shell(
       <div className="body" style={{ display: 'grid', placeItems: 'center', minHeight: 420 }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
           <div className="spinner" />
@@ -111,7 +122,7 @@ export function ResultScreen({
   }
 
   if (error || !result) {
-    return (
+    return shell(
       <div className="body">
         <div className="card" style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 12 }}>
           <strong style={{ fontSize: 'var(--fs-14)' }}>
@@ -130,9 +141,10 @@ export function ResultScreen({
 
   const isUpdate = prevPlans.length > 0 && !result.needsMoreInput;
   const latest = history[0];
+  const winner = result.plans.find((plan) => plan.best) ?? result.plans[0];
 
   if (result.needsMoreInput && result.followupQuestion) {
-    return (
+    return shell(
       <div className="body">
         <div className="row-between" style={{ marginBottom: 14 }}>
           <div>
@@ -151,13 +163,13 @@ export function ResultScreen({
     );
   }
 
-  return (
+  return shell(
     <div className="body split">
       <div style={{ flex: 1 }}>
         <div className="row-between" style={{ marginBottom: 14 }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <h2 style={{ fontSize: 'var(--fs-20)', fontWeight: 700 }}>추천 결과</h2>
+              <h2 style={{ fontSize: 'var(--fs-20)', fontWeight: 700 }}>추천 결과</h2><span className="recommendation-complete" role="status">✓ 추천 완료</span>
               {isUpdate && <span className="tag tag-amber">갱신됨</span>}
             </div>
             <p style={{ fontSize: 'var(--fs-12)', color: 'var(--t2)' }}>
@@ -227,15 +239,10 @@ export function ResultScreen({
             다시 물어봐 주세요.
           </div>
         ) : (
-          <div className="plan-grid">
-            {result.plans.map((plan) => (
-              <PlanCard
-                key={plan.id}
-                plan={plan}
-                delta={deltaOf(plan, prevPlans)}
-                onReport={() => onReport(plan.id)}
-              />
-            ))}
+          <div className="recommendation-showcase">
+            <div className="recommendation-intro"><span>모모플랜 추천 1순위</span><strong>조건에 맞는 요금제를 찾았어요</strong><p>{winner.name}의 핵심 정보와 추천 이유를 먼저 확인해 보세요.</p></div>
+            <PlanCard key={winner.id} plan={winner} delta={deltaOf(winner, prevPlans)} onReport={() => onReport(winner.id)} featured />
+            {result.plans.length > 1 && <details className="other-recommendations"><summary>다른 추천 요금제 {result.plans.length - 1}개 함께 보기</summary><div className="plan-grid">{result.plans.filter((plan) => plan.id !== winner.id).map((plan) => <PlanCard key={plan.id} plan={plan} delta={deltaOf(plan, prevPlans)} onReport={() => onReport(plan.id)} />)}</div></details>}
           </div>
         )}
 
@@ -278,51 +285,7 @@ export function ResultScreen({
         )}
       </div>
 
-      <div className="card chat-panel">
-        <div className="panel-head">
-          <strong style={{ fontSize: 'var(--fs-13)' }}>상담 세션</strong>
-          <span style={{ fontSize: 'var(--fs-11)', color: 'var(--t3)' }}>
-            {result.evaluation?.passed ? '검증 통과' : '검증 미달'}
-          </span>
-        </div>
-        <div className="chat-collapsed-row" onClick={() => setExpanded((v) => !v)} style={{ cursor: 'pointer' }}>
-          <span>이용 패턴 입력 대화 {messages.length}건</span>
-          <span>{expanded ? '접기' : '펼치기'}</span>
-        </div>
-        <div className="chat-msgs">
-          {(expanded ? messages : messages.slice(-2)).map((m, i) => (
-            <div key={i} className={`msg ${m.role === 'user' ? 'user' : ''}`}>
-              <span className="role">{m.role === 'user' ? '사용자' : 'ASSISTANT'}</span>
-              <div className="bubble">{m.content}</div>
-            </div>
-          ))}
-          {result.assumptions.length > 0 && (
-            <div className="msg system">
-              <span className="role">SYSTEM</span>
-              <div className="bubble">적용한 가정: {result.assumptions.join(' · ')}</div>
-            </div>
-          )}
-        </div>
-        <form
-          className="chat-input"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!text.trim()) return;
-            onFollowup(text.trim());
-            setText('');
-          }}
-        >
-          <input
-            type="text"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="추가 질문 입력"
-          />
-          <button className="btn btn-primary" type="submit" disabled={!text.trim()}>
-            전송
-          </button>
-        </form>
-      </div>
+
     </div>
   );
 }
@@ -331,13 +294,15 @@ function PlanCard({
   plan,
   delta,
   onReport,
+  featured = false,
 }: {
   plan: PlanItem;
   delta: { text: string; changed: boolean } | null;
   onReport: () => void;
+  featured?: boolean;
 }) {
   return (
-    <div className={`card${plan.best ? ' accent' : ''}`}>
+    <div className={`card recommendation-plan-card${featured ? ' featured-plan' : ''}${plan.best ? ' accent' : ''}`}>
       <div className="plan-head">
         <div style={{ display: 'flex', gap: 5, alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', gap: 5 }}>
@@ -357,7 +322,7 @@ function PlanCard({
         </div>
         {delta && <div className={`delta ${delta.changed ? 'up' : 'flat'}`}>{delta.text}</div>}
         <div className="plan-name">{plan.name}</div>
-        <div className="plan-carrier">{plan.carrier}</div>
+        <div className="plan-carrier"><BrandLogo carrier={plan.carrier}/></div>
       </div>
 
       <div className="price-block">
@@ -398,7 +363,11 @@ function PlanCard({
           ))}
         </div>
       )}
-      <div className="benefit">{plan.reason || plan.benefit}</div>
+      <div className="result-benefits">
+        <div className="result-benefit-item"><span>통신망 · 가입</span><strong>{plan.carrierType === 'MVNO' ? '알뜰폰' : '통신 3사'} · {plan.networkGen || plan.network || 'LTE/5G'}{plan.isOnlineOnly ? ' · 온라인 전용' : ''}</strong></div>
+        <div className="result-benefit-item"><span>요금제 혜택</span><strong>{plan.benefit || '별도 혜택 정보 없음'}</strong></div>
+      </div>
+      <div className="recommendation-reason"><div className="reason-heading"><span>WHY THIS PLAN</span><strong>이 요금제를 추천한 이유</strong></div><div className="reason-list">{reasonSentences(plan.reason).slice(0, 3).map((line, index) => <div className="reason-list-item" key={`${index}-${line}`}><span>{String(index + 1).padStart(2, '0')}</span><p>{line}</p></div>)}</div></div>
       <div className="total-row">
         <span className="k">{plan.compareMonths}개월 총비용</span>
         <span className="v num">{plan.total}</span>

@@ -174,6 +174,10 @@ def _in_data_bucket(row: dict, bucket: str) -> bool:
     gb = row.get("data_gb")
     if row["data_unlimited"] or gb is None:
         return False
+    ranges = {"lt10": (0, 10), "10to30": (10, 30), "30to50": (30, 50), "50to100": (50, 100), "gte100": (100, float("inf"))}
+    if bucket in ranges:
+        lo, hi = ranges[bucket]
+        return lo <= gb < hi
     if bucket == "lt3":
         return gb < 3
     if bucket == "3to10":
@@ -208,9 +212,18 @@ def _has_flag(row: dict, key: str) -> bool:
 
 
 # 그룹 안에서는 OR, 그룹 사이에서는 AND. 시안의 체크박스 동작 그대로.
+PRICE_RANGES = {"lt10k": (0, 10000), "10to20k": (10000, 20000), "20to30k": (20000, 30000), "30to50k": (30000, 50000), "50to70k": (50000, 70000), "gte70k": (70000, float("inf"))}
+
+
+def _in_price_bucket(row: dict, bucket: str) -> bool:
+    bounds = PRICE_RANGES.get(bucket)
+    return bounds is not None and bounds[0] <= row["discounted_fee"] < bounds[1]
+
+
 FILTER_GROUPS = {
+    "price": (list(PRICE_RANGES), _in_price_bucket),
     "networks": (["SKT", "KT", "LGU+", "MNO"], _in_network),
-    "data": (["lt3", "3to10", "10to20", "gte20", "unlimited"], _in_data_bucket),
+    "data": (["lt10", "10to30", "30to50", "50to100", "gte100", "unlimited"], _in_data_bucket),
     "voice": (["unlimited", "quota", "none"], _in_voice),
     "flags": (["online_only", "addon", "promo"], _has_flag),
 }
