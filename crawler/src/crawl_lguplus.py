@@ -239,6 +239,9 @@ def _benefits_from_api(code: str, plan_name: str, source_url: str) -> list[dict]
         rows.append(make_benefit_row(
             code, "LGU+", plan_name, classify_benefit_name(name), name,
             value_won=base if base is not None else "",
+            # 제휴 구독의 baseAmount 는 월 정가다. 제공 기간은 요금제 유지 동안이라
+            # 개월 수가 따로 없다(빈값 = 무기한).
+            value_basis="monthly" if base is not None else "",
             pay_won=pay if pay is not None else "",
             selectable=True, select_group="프리미엄플러스(택1)",
             detail=(

@@ -1,5 +1,5 @@
-import { BrowseFilters } from './types';
-export const emptyFilters = (): BrowseFilters => ({ networks: [], data: [], voice: [], flags: [], price: [] });
+import { BrowseFilters, EMPTY_FILTERS } from './types';
+export const emptyFilters = (): BrowseFilters => ({ ...EMPTY_FILTERS });
 export const categories = [
   { id: 'all', icon: '✦', title: '전체 요금제', description: '모든 선택지를 한눈에', group: 'data', keys: [] },
   { id: 'video', icon: '▶', title: '영상 시청형', description: '30GB 이상 · 무제한', group: 'data', keys: ['30to50', '50to100', 'gte100', 'unlimited'] },

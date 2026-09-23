@@ -1,13 +1,16 @@
 # telecom-plan-recommendation
 
 요금제 추천 시스템. 조건을 자연어로 받아 CSV 요금제 데이터에서 후보를 추리고,
-6개월 총비용 기준으로 순위와 리포트를 만든다.
+다기준(SMAA-2) 순위와 근거 리포트를 만든다. 총비용 비교는 12개월 기준이다.
 
 ```
 agent/      LLM 파이프라인 (profiling → recommend → report → evaluation)
-backend/    FastAPI. 화면이 부르는 엔드포인트 4개
+backend/    FastAPI
 frontend/   React + Vite 화면
-data/       요금제 CSV 3종
+crawler/    통신 3사·모요 수집·일일 갱신
+data/       서비스가 읽는 요금제 CSV(고정) · baseline/ · eval/(평가용) · synthetic_original/
+experiments/ 실험·평가 스크립트 (서비스는 import 하지 않는다)
+outputs/    발표 자료·분석 노트
 ```
 
 ## 실행
@@ -42,33 +45,24 @@ cd frontend && npm install && npm run dev       # 프론트 (5173)
 python -m agent.data              # 하드 필터
 python -m agent.agents.report     # ranked ↔ candidates 결합 (plan_id 기준)
 python -m agent.agents.evaluation # 환각·Hard Constraint·순위 검증
-python -m backend.plans           # 6개월 비용 계산, PlanItem 변환
+python -m backend.plans           # 12개월 비용 계산, PlanItem 변환
 cd frontend && npm run lint       # 타입 체크
 ```
 
-## UI 개편 (2026-09-22)
+## UI 개편 (2026-09-23)
 
-홈에서 실측 커버리지와 사용 목적별 요금제 카드를 확인할 수 있습니다.
-영상 시청형(20GB 이상 또는 무제한), 일상 사용형(3GB 이상 20GB 미만), 가벼운 사용형(3GB 미만), 통화 중심형(음성 무제한), OTT 혜택형(OTT 옵션 포함)으로 분류합니다. 카테고리는 중복될 수 있으며 적합성을 보장하는 AI 추천과는 별개입니다.
+- 홈: 커버리지 숫자와 사용 목적별 카테고리(영상 시청형·일상 사용형·가벼운 사용형·통화 중심형·OTT 혜택형), 카테고리별 대표 요금제 카드. 카테고리는 서로 겹칠 수 있고 AI 추천과는 별개다.
+- 전체 요금제: 카드/표 보기, 필터(월 요금·데이터 구간 [0,10)·[10,30)·[30,50)·[50,100)·[100,∞)GB·무제한 등), 정렬, 비교 담기, 상세 화면(`#/detail?id=`).
+- 비교함: 하단 비교 바, 다른 항목만 보기, 최저 비용·첫 상품 대비 차이 표시.
+- AI 추천: 입력·결과·탐색 화면 옆에 같은 채팅 패널을 둔다. 탐색 중에 물으면 목록에 머문다.
+- Windows 에서 Vite 설정 로더가 경로 오류를 내 `dev`·`build` 스크립트에 `--configLoader runner` 를 붙였다.
 
-탐색에서는 카드/표 보기, 필터, 정렬, 페이지 이동, 비교 담기와 상세 보기를 지원합니다.
+## 실험·평가
 
-현재 로컬 실행은 백엔드 8000 포트와 빌드 미리보기 5173 포트를 사용합니다.
-Windows에서 Vite 기본 설정 로더가 경로 접근 오류를 내면 `--configLoader runner`를 사용하세요.
-개발 서버의 의존성 사전 번들링도 실패하는 환경에서는 `npm run build` 후 `npm run preview -- --configLoader runner --host 127.0.0.1 --port 5173`으로 확인할 수 있습니다. 이 모드에서는 소스 수정 후 다시 빌드해야 반영됩니다.
+서비스 밖의 실험 스크립트는 `experiments/` 에 있다(→ `experiments/README.md`). 저장소 루트에서 모듈로 실행한다.
 
-## 최신 로컬 UI 실행
+```bash
+python -m experiments.run_metric_table      # 추천 방법 5종을 정답지 없는 지표로 비교
+```
 
-기존 프로세스와 충돌하지 않도록 현재 프론트 미리보기는 http://127.0.0.1:5174, 백엔드는 8001 포트입니다. 프론트의 /api 프록시도 8001을 사용합니다.
-백엔드: `.langgraph-venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8001`
-프론트: `npm run build` 후 `npm run preview -- --configLoader runner --host 127.0.0.1 --port 5174`
-
-데이터 필터는 [0,10), [10,30), [30,50), [50,100), [100,∞)GB 및 무제한으로 중복 없이 구분합니다. 영상 시청형은 30GB 이상 또는 무제한, 일상 사용형은 10GB 이상 30GB 미만, 가벼운 사용형은 10GB 미만입니다.
-비교 바와 비교 페이지에서 개별 삭제/전체 비우기를 지원합니다. CSV 내보내기는 제거했습니다. 추천 결과의 로딩과 상담 채팅은 별도 영역이며, 진행 중에는 다음 조건을 작성할 수 있고 완료 후 전송할 수 있습니다.
-## 가격 필터 및 UI 개선 (2026-09-23)
-
-최신 로컬 주소는 http://127.0.0.1:5175 입니다. 백엔드는 8002 포트이며 backend 변경 시 자동 재시작합니다. 이전 포트의 서버는 종료 권한 제한으로 유지되어 있으므로 최신 주소를 사용하세요.
-
-월 요금 필터: 1만원 미만, 1~2만원, 2~3만원, 3~5만원, 5~7만원, 7만원 이상. 할인 적용 월 요금(discounted_fee)을 기준으로 시작 금액 이상/끝 금액 미만이며, 같은 그룹 안에서는 OR, 데이터·통신망 등 다른 그룹과는 AND로 적용합니다. 카테고리 변경 시 선택한 가격 구간은 유지합니다.
-
-메인 소개 배너를 줄이고, 카드의 데이터·가격을 강조했습니다. 비교함에 첫 상품 대비 비용과 기본 데이터 차이를 추가하고, AI 입력 예시와 추천 완료 표시를 개선했습니다.
+현재 적용 중인 정책값과 미해결 항목은 `HANDOFF.md` 맨 위 "현재 상태"에 있다.

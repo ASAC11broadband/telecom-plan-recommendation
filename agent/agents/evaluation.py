@@ -4,8 +4,9 @@
 두 겹으로 나뉜다:
   (a) 코드 검증 — 환각·Hard Constraint 위반·중복 추천·순위 역전·리포트 누락처럼
                   결정적으로 판정 가능한 것. LLM 판정은 여기서 오탐이 잦아 코드로 못 박는다.
-  (b) LLM 검증  — 리포트 서술이 후보 데이터와 모순되는지(없는 혜택, 틀린 숫자)만.
-                  (a)가 이미 잡은 조건 충족 여부는 판단하지 못하게 막는다.
+  (b) LLM 검증  — 리포트가 후보 데이터에 없는 사실을 지어냈는지(없는 혜택, 근거 없는 약속)만.
+                  숫자 대조는 (a)가 하므로 LLM 에게 맡기지 않는다. 맡겼더니 monthly_fee 와
+                  discounted_fee 를 바꿔 읽어 멀쩡한 리포트를 반복해서 떨어뜨렸다.
 
 미달이면 retry_target 을 정하고, 피드백은 state["feedback"] 에 누적되어
 재실행되는 단계의 프롬프트에 주입된다.
@@ -21,22 +22,42 @@ import math
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from ..data import find_candidate, has_benefit, has_benefit_category, slim
+from ..data import age_eligible, find_candidate, has_benefit, has_benefit_category, slim
 from ..schemas import Evaluation, UserProfile
 from ..state import PipelineState, get_eval_llm
 
 MAX_REVISIONS = 2  # 재시도 최대 횟수 (graph.route_after_evaluation 과 짝)
 
 # 주의: 템플릿에 중괄호를 직접 쓰지 말 것 (.format 이 깨진다).
-PROMPT = """추천 리포트가 후보 데이터와 모순되는 주장(없는 혜택, 틀린 요금·데이터량)을 하는지만 검증해라.
-조건 충족 여부, 중복 추천, 순위 정합성, 할인가 표기는 이미 별도 코드로 검증됐으니 절대 판단하지 마라.
-용어 정의: '무제한'은 소진 후 속도제한형을 포함한다(모순 아님).
-정상가는 monthly_fee, 할인 후 요금은 discounted_fee 다.
-둘 중 어느 것도 아닌 금액을 쓰거나 할인이 영구적이라고 단언할 때만 불합격이다.
-할인 기간이 비어 있다는 이유만으로는 불합격시키지 마라(리포트가 확인을 안내하면 충분하다).
-숫자가 후보 데이터와 일치하면 합격이다.
-불합격이면 retry_target 을 정해라 — 조건 추출 자체가 틀렸으면 profiling,
-고른 요금제가 잘못됐으면 recommend, 요금제는 맞는데 리포트 서술·표기만 문제면 report.
+PROMPT = """추천 리포트가 후보 데이터에 없는 사실을 지어냈는지만 검증해라.
+
+[검증할 것 — 이것만]
+- 후보 데이터에 없는 혜택·부가서비스·제휴 상품을 제공된다고 썼는가.
+- 후보 데이터에 없는 기능(테더링 제공량, 가입 조건, 결합 할인 등)을 단정했는가.
+- 데이터에 근거가 없는 약속(위약금 없음, 언제든 해지 가능, 속도 보장 등)을 했는가.
+
+[판단 기준]
+- 후보 데이터에 값이 들어 있는 항목을 리포트가 그대로 옮겨 적은 것은 환각이 아니다.
+  tethering_gb, sms_unlimited, network_gen, carrier_type, daily_data_gb, plan_category 처럼
+  숫자·불리언으로 들어 있는 항목도 후보 데이터다. 값이 있으면 인용해도 된다.
+- 값이 null 인 항목은 '없음'이 아니라 '수집되지 않음'이다. 리포트가 그 항목을
+  '확인 필요'라고 쓴 것은 정상이며, 그 항목을 아예 언급하지 않은 것도 정상이다.
+  null 인 항목을 리포트가 구체적인 수치로 단정했을 때만 불합격이다.
+
+[판단하지 말 것]
+- 금액·요금·데이터량·기간 같은 숫자는 코드가 이미 후보 데이터와 대조했다. 다시 판정하지 마라.
+  숫자가 틀려 보여도 그것을 이유로 불합격시키지 마라. monthly_fee(정상가)와
+  discounted_fee(할인 후 요금)를 서로 바꿔 읽어 멀쩡한 리포트를 반복해서 떨어뜨린 이력이 있다.
+  "현재 월 13,990원, 6개월 뒤 38,990원"처럼 두 값을 모두 쓴 문장은 정상이다.
+- 조건 충족 여부, 중복 추천, 순위 정합성, 할인가 표기도 코드가 검증했다. 판단하지 마라.
+- 설명이 더 자세하면 좋겠다는 이유, 묻지 않은 항목이 있다는 이유로 불합격시키지 마라.
+- '무제한'은 소진 후 속도제한형을 포함한다. 모순이 아니다.
+- 할인 기간이 비어 있다는 이유만으로 불합격시키지 마라(리포트가 확인을 안내하면 충분하다).
+
+지어낸 사실이 없으면 합격이다. 애매하면 합격으로 둔다.
+불합격이면 리포트의 실제 문구와 그것이 후보 데이터의 무엇과 어긋나는지를 함께 적고,
+retry_target 을 정해라 — 조건 추출이 틀렸으면 profiling, 고른 요금제가 잘못됐으면 recommend,
+요금제는 맞는데 리포트 서술만 문제면 report.
 추천된 요금제 데이터: {candidates}
 리포트: {report}"""
 
@@ -70,8 +91,12 @@ CONSTRAINT_CHECKS = {
     "max_data_gb": lambda plan, v: not plan["data_unlimited"] and (
         plan.get("data_gb") if plan.get("data_gb") is not None else math.inf
     ) <= v,
-    "data_unlimited": lambda plan, v: plan["data_unlimited"] or not v,  # v=False 는 "필수 아님"
+    # '무제한' 요청은 완전 무제한과 쓸 만한 QoS형을 함께 받는다(agent.data 참고).
+    # require_full_unlimited 가 붙은 경우만 완전 무제한으로 좁힌다.
+    "data_unlimited": lambda plan, v: plan.get("effective_unlimited", plan["data_unlimited"]) or not v,
+    "require_full_unlimited": lambda plan, v: plan["data_unlimited"] or not v,
     "min_qos_mbps": lambda plan, v: (plan.get("qos_mbps") or 0) >= v,
+    "requires_qos": lambda plan, v: (plan.get("qos_mbps") or 0) > 0 or not v,
     "min_tethering_gb": lambda plan, v: (plan.get("tethering_gb") or 0) >= v,
     "min_voice_minutes": lambda plan, v: plan["voice_unlimited"] or (plan.get("voice_minutes") or 0) >= v,
     "voice_unlimited": lambda plan, v: plan["voice_unlimited"] or not v,  # v=False 는 "필수 아님"
@@ -93,6 +118,14 @@ def _constraint_errors(profile: UserProfile | None, plan: dict) -> list[str]:
         return []
 
     errors: list[str] = []
+    # 가입 자격은 hard_constraints 에 없어도 항상 본다. 자격 없는 상품을 추천하면
+    # 사용자는 가입 단계에서 튕긴다(키즈 요금제가 성인에게 1순위로 나온 적이 있다).
+    if not age_eligible(plan.get("age_condition"), profile.user_age):
+        errors.append(
+            f"'{plan['plan_name']}'은 가입 대상이 '{plan.get('age_condition')}'인데 "
+            f"사용자 나이({profile.user_age or '미상'})로 자격을 확인할 수 없음"
+        )
+
     benefit_fields = {"wanted_benefits", "wanted_benefit_categories"}
     if benefit_fields.intersection(profile.hard_constraints):
         if not _matches_requested_benefits(profile, plan):
@@ -112,16 +145,6 @@ def _constraint_errors(profile: UserProfile | None, plan: dict) -> list[str]:
     return errors
 
 
-# 우선순위 축별 정렬값. 클수록 좋은 값으로 통일한다.
-PRIORITY_VALUES = {
-    "price": lambda plan: -plan["discounted_fee"],
-    "data": lambda plan: math.inf if plan["data_unlimited"] else float(plan.get("data_gb") or 0),
-    "qos": lambda plan: float(plan.get("qos_mbps") or 0),
-    "voice": lambda plan: math.inf if plan["voice_unlimited"] else float(plan.get("voice_minutes") or 0),
-    "benefit": lambda plan: float(len(plan.get("included_benefits") or [])),
-}
-
-
 def _ranking_errors(profile: UserProfile | None, ranked: list, rows: list[dict]) -> list[str]:
     """점수 역전, 중복 추천, 명백한 우선순위 위반을 잡는다."""
     errors: list[str] = []
@@ -135,14 +158,11 @@ def _ranking_errors(profile: UserProfile | None, ranked: list, rows: list[dict])
     if duplicated:
         errors.append(f"같은 요금제가 여러 순위를 차지함: {', '.join(duplicated)}")
 
-    # ponytail: 1위가 추천 목록 안에서 해당 축 '최하위'일 때만 위반으로 본다.
-    # 축별 가중치까지 판정하면 오탐이 재시도 예산을 태우므로 하지 않는다.
-    priorities = (profile.priorities if profile else None) or []
-    axis = next((p for p in priorities if p in PRIORITY_VALUES), None)
-    if axis and len(rows) > 1:
-        values = [PRIORITY_VALUES[axis](row) for row in rows]
-        if values[0] < min(values[1:]):
-            errors.append(f"우선순위 1순위가 {axis} 인데 1위 요금제가 추천 목록 중 최하위")
+    # 다기준 순위는 한 축의 최솟값/최댓값과 다를 수 있다. SMAA-2 결과를
+    # 단일 가격/데이터 축으로 다시 판정하면 정상 결과도 무한 재추천하게 된다.
+    ranks = [plan.expected_rank for plan in ranked]
+    if all(value is not None for value in ranks) and any(a > b for a, b in zip(ranks, ranks[1:])):
+        errors.append("SMAA-2 기대순위와 출력 순서가 어긋남")
     return errors
 
 
@@ -205,7 +225,9 @@ def evaluation_node(state: PipelineState, config: RunnableConfig) -> dict:
 
     errors, rows = _code_checks(state)
     if errors:
-        ev = Evaluation(passed=False, feedback="; ".join(errors), retry_target="recommend")
+        report_errors = _report_errors(state.get("report", ""), state.get("ranked", []), rows)
+        target = "report" if all(error in report_errors for error in errors) else "recommend"
+        ev = Evaluation(passed=False, feedback="; ".join(errors), retry_target=target)
     else:
         prompt = PROMPT.format(
             candidates=json.dumps(slim(rows), ensure_ascii=False),
@@ -340,7 +362,7 @@ if __name__ == "__main__":
     # 우선순위 위반: price 1순위인데 1위가 더 비쌈
     price_profile = UserProfile(priorities=["price"])
     errors, _ = _code_checks(_state([_plan("1", "A", fee=39000), b], ranked, report, price_profile))
-    assert any("최하위" in e for e in errors), errors
+    assert not any("최하위" in e for e in errors), errors
 
     # 리포트 누락
     errors, _ = _code_checks(
@@ -361,6 +383,28 @@ if __name__ == "__main__":
     with_discounted = regular_only.replace("25,520원", "2,200원 (정가 25,520원)")
     errors, _ = _code_checks(_state([a, promo], promo_ranked, with_discounted, UserProfile()))
     assert errors == [], errors
+
+    # 가입 자격: hard_constraints 에 없어도 항상 검증한다
+    kids = _plan("1", "A", age_condition="만 12세 이하")
+    errors, _ = _code_checks(_state([kids], ranked[:1], "| 1 | A | 30,000원 |", UserProfile()))
+    assert any("가입 대상" in e for e in errors), errors
+    errors, _ = _code_checks(
+        _state([kids], ranked[:1], "| 1 | A | 30,000원 |", UserProfile(user_age=10))
+    )
+    assert errors == [], errors
+
+    # '무제한' 요청은 QoS형도 충족으로 본다. 완전 무제한만 원하면 따로 지정한다.
+    loose = UserProfile(data_unlimited=True, hard_constraints=["data_unlimited"])
+    qos_plan = _plan("1", "A", data_unlimited=False, effective_unlimited=True, qos_mbps=10.0)
+    errors, _ = _code_checks(_state([qos_plan], ranked[:1], "| 1 | A | 30,000원 |", loose))
+    assert errors == [], errors
+    strict = UserProfile(
+        data_unlimited=True,
+        require_full_unlimited=True,
+        hard_constraints=["data_unlimited", "require_full_unlimited"],
+    )
+    errors, _ = _code_checks(_state([qos_plan], ranked[:1], "| 1 | A | 30,000원 |", strict))
+    assert any("require_full_unlimited" in e for e in errors), errors
 
     # slim: 필터용 파생 필드는 안 넘어간다
     assert "data_gb" not in slim([a])[0] and slim([a])[0]["plan_name"] == "A"

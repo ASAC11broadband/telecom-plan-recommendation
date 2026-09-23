@@ -29,6 +29,9 @@ class PipelineState(TypedDict, total=False):
     profile: Optional[UserProfile]      # 1단계가 write
     candidates: list[dict]              # 2단계(a) 하드 필터가 통과시킨 후보 원본
     reference: Optional[dict]           # 2단계가 DB 에서 확정한 비교 기준 요금제
+    reference_verdict: Optional[dict]   # 현재 요금제 유지/전환/판단불가 (코드 판정)
+    blockers: list[dict]                # 후보 0건일 때 어느 조건이 막았는지
+    recommendation_trace: dict         # 실제 후보 수·평가 기준. 발표 및 결과 설명용
     clarification_question: Optional[str]  # 진행 전 사용자에게 확인할 질문
     ranked: list[ScoredPlan]            # 2단계(b) LLM 랭킹 결과
     report: str                         # 3단계가 write
@@ -61,14 +64,14 @@ MODEL = os.getenv("MODEL", "gpt-4o-mini")
 EVAL_MODEL = os.getenv("EVAL_MODEL", "gpt-4o")
 TEMPERATURE = 0.0
 # max_retries: 배치 실행 시 TPM 초과(429)가 잦아 SDK 지수 백오프에 맡긴다
-MAX_RETRIES = 8
+MAX_RETRIES = 2
 
 
 def get_llm(config: RunnableConfig | None = None) -> BaseChatModel:
     """OPENAI_API_KEY 환경변수 필요."""
-    return ChatOpenAI(model=MODEL, temperature=TEMPERATURE, max_retries=MAX_RETRIES)
+    return ChatOpenAI(model=MODEL, temperature=TEMPERATURE, max_retries=MAX_RETRIES, timeout=40)
 
 
 def get_eval_llm(config: RunnableConfig | None = None) -> BaseChatModel:
     """평가 전용. 규칙 준수가 중요해서 상위 모델 (mini 는 판정 지시를 무시하는 경향)."""
-    return ChatOpenAI(model=EVAL_MODEL, temperature=TEMPERATURE, max_retries=MAX_RETRIES)
+    return ChatOpenAI(model=EVAL_MODEL, temperature=TEMPERATURE, max_retries=MAX_RETRIES, timeout=40)

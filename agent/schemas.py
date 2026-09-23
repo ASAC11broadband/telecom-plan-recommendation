@@ -41,7 +41,18 @@ class UserProfile(BaseModel):
         None, description="최대 데이터량(GB). 무제한은 상한 조건에서 제외"
     )
     data_unlimited: Optional[bool] = Field(None, description="데이터 무제한 필수 여부. 언급 없으면 null")
+    require_full_unlimited: Optional[bool] = Field(
+        None,
+        description=(
+            "'기본 제공량 자체가 무제한'인 상품만 원하면 true. "
+            "'완전 무제한', '속도 제한 없는 무제한'처럼 QoS형을 명시적으로 배제할 때만 사용한다"
+        ),
+    )
     min_qos_mbps: Optional[float] = Field(None, description="데이터 소진 후 최소 요구 속도(Mbps). 언급 없으면 null")
+    requires_qos: Optional[bool] = Field(
+        None,
+        description="속도 수치와 관계없이 데이터 소진 후 QoS 제공이 필수이면 true. 언급 없으면 null",
+    )
     min_tethering_gb: Optional[float] = Field(None, description="최소 테더링 제공량(GB). 언급 없으면 null")
     min_voice_minutes: Optional[int] = Field(None, description="최소 통화 시간(분). 언급 없으면 null")
     voice_unlimited: Optional[bool] = Field(None, description="통화 무제한 필수 여부")
@@ -49,6 +60,10 @@ class UserProfile(BaseModel):
     carrier_type: Optional[Literal["MNO", "MVNO"]] = Field(
         None,
         description="통신 3사만 원하면 MNO, 알뜰폰만 원하면 MVNO. 유형을 지정하지 않으면 null",
+    )
+    include_mno: Optional[bool] = Field(
+        None,
+        description="통신 3사 상품도 추천 후보에 넣어 달라고 명시했을 때만 true. 기본 추천 대상은 알뜰폰이다",
     )
     host_mno: Optional[Literal["SKT", "KT", "LGU+"]] = Field(
         None,
@@ -59,9 +74,20 @@ class UserProfile(BaseModel):
         description="특정 알뜰폰 브랜드명(예: KT엠모바일). 언급 없으면 null",
     )
     network_gen: Optional[Literal["LTE", "5G"]] = Field(None, description="LTE 또는 5G. 언급 없으면 null")
+    network_preference: Optional[Literal["LTE", "5G"]] = Field(
+        None,
+        description="LTE 또는 5G를 순위에서 우선한다. 다른 세대 후보는 제외하지 않는다.",
+    )
     age_condition: Optional[str] = Field(
         None,
         description="가입 대상 조건의 DB 표준값(예: 만 34세 이하, 만 65세 이상, 현역병사). 언급 없으면 null",
+    )
+    user_age: Optional[int] = Field(
+        None,
+        description=(
+            "사용자가 밝힌 본인 나이(만 나이). 연령 전용 요금제의 가입 자격 판정에만 쓴다. "
+            "'20대'처럼 범위만 말하면 만 나이를 확정하지 말고 null로 둔다. 언급 없으면 null"
+        ),
     )
     wanted_benefits: Optional[list[str]] = Field(
         None,
@@ -126,7 +152,9 @@ class UserProfile(BaseModel):
     comparison_goals: Optional[
         list[Literal["cheaper", "more_data", "faster_qos", "similar", "better"]]
     ] = Field(None, description="기준 요금제 대비 사용자가 원하는 개선·비교 방향")
-    priorities: Optional[list[Literal["price", "data", "qos", "benefit", "voice", "sms", "tethering", "carrier"]]] = Field(
+    priorities: Optional[
+        list[Literal["price", "data", "qos", "benefit", "voice", "tethering"]]
+    ] = Field(
         None,
         description="사용자가 직접 말한 추천 우선순위를 중요도 순으로 저장. 언급 없으면 null",
     )
@@ -162,12 +190,18 @@ class ScoredPlan(BaseModel):
         default_factory=list,
         description="사용자가 요청한 혜택 조건과 직접 일치하는 실제 혜택명",
     )
-
-
-class RankingResult(BaseModel):
-    """2단계 LLM 구조화 출력 컨테이너."""
-
-    plans: list[ScoredPlan] = Field(default_factory=list, description="상위 5개, 적합도 순")
+    criteria_fit: dict[str, float] = Field(
+        default_factory=dict,
+        description="축별 충족도(0~1). 총점 하나로는 후보 2천 건에서 상위권이 전부 100 으로 포화한다",
+    )
+    expected_rank: Optional[float] = None
+    first_rank_acceptability: Optional[float] = None
+    recommendation_fit: Optional[float] = Field(
+        None, description="현재 조건에 대한 다기준 적합도(0~100). 만족 확률이 아니다"
+    )
+    top3_acceptability: Optional[float] = Field(
+        None, description="가중치 300세트 중 상위 3위 안에 든 비율(0~1)"
+    )
 
 
 class Evaluation(BaseModel):
