@@ -2,7 +2,7 @@
 """파이프라인 전역 상태 + LLM 팩토리.
 
 - PipelineState: 각 단계가 무엇을 읽고 쓰는지의 계약. 새로 합류하면 여기부터 읽는다.
-- get_llm / get_eval_llm: 모델을 바꾸려면 이 파일만 고치면 된다.
+- get_profile_llm / get_report_llm / get_eval_llm: 역할별 모델 설정.
 """
 
 from __future__ import annotations
@@ -25,6 +25,9 @@ from .schemas import Evaluation, ScoredPlan, UserProfile
 
 class PipelineState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
+    # 0건 화면에서 사용자가 직접 누른 "조건 풀기" 필드. 자연어 재해석에 맡기지 않고
+    # profiling 결과에서 정확히 제거한다.
+    relaxed_fields: list[str]
 
     profile: Optional[UserProfile]      # 1단계가 write
     candidates: list[dict]              # 2단계(a) 하드 필터가 통과시킨 후보 원본
@@ -60,16 +63,36 @@ def feedback_block(state: PipelineState) -> str:
 
 load_dotenv()
 
-MODEL = os.getenv("MODEL", "gpt-4o-mini")
+# 과거 MODEL 환경변수는 호환성을 위해 역할별 모델의 공통 override 로 남긴다.
+# 새 설정에서는 PROFILE_MODEL / REPORT_MODEL 을 각각 지정하는 것을 권장한다.
+LEGACY_MODEL = os.getenv("MODEL")
+PROFILE_MODEL = os.getenv("PROFILE_MODEL", LEGACY_MODEL or "gpt-4o")
+REPORT_MODEL = os.getenv("REPORT_MODEL", LEGACY_MODEL or "gpt-5.6-terra")
 EVAL_MODEL = os.getenv("EVAL_MODEL", "gpt-4o")
 TEMPERATURE = 0.0
 # max_retries: 배치 실행 시 TPM 초과(429)가 잦아 SDK 지수 백오프에 맡긴다
 MAX_RETRIES = 2
 
 
+def get_profile_llm(config: RunnableConfig | None = None) -> BaseChatModel:
+    """사용자 요구사항 추출 전용. OPENAI_API_KEY 환경변수가 필요하다."""
+    return ChatOpenAI(
+        model=PROFILE_MODEL,
+        temperature=TEMPERATURE,
+        max_retries=MAX_RETRIES,
+        timeout=40,
+    )
+
+
+def get_report_llm(config: RunnableConfig | None = None) -> BaseChatModel:
+    """추천 이유·최종 리포트·현재 요금제 비교 설명 전용."""
+    # GPT-5.6 계열은 모델 기본 reasoning 설정을 사용하도록 temperature를 강제하지 않는다.
+    return ChatOpenAI(model=REPORT_MODEL, max_retries=MAX_RETRIES, timeout=40)
+
+
 def get_llm(config: RunnableConfig | None = None) -> BaseChatModel:
-    """OPENAI_API_KEY 환경변수 필요."""
-    return ChatOpenAI(model=MODEL, temperature=TEMPERATURE, max_retries=MAX_RETRIES, timeout=40)
+    """기존 단발 설명 API용 호환 별칭. 새 코드에서는 역할별 팩토리를 사용한다."""
+    return get_report_llm(config)
 
 
 def get_eval_llm(config: RunnableConfig | None = None) -> BaseChatModel:

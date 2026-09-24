@@ -34,15 +34,7 @@ export function GNB({
         <ul className="gnb-menu">
           <li>
             <button
-              className={(currentScreen === 's-input' || currentScreen === 's-result' || currentScreen === 's-report') ? 'active' : ''}
-              onClick={() => onNavigate('s-input')}
-            >
-              AI 추천
-            </button>
-          </li>
-          <li>
-            <button
-              className={currentScreen === 's-browse' ? 'active' : ''}
+              className={['s-browse', 's-result', 's-report'].includes(currentScreen) ? 'active' : ''}
               onClick={() => onNavigate('s-browse')}
             >
               전체 요금제
@@ -58,11 +50,6 @@ export function GNB({
             </button>
           </li>
         </ul>
-      </div>
-      <div className="gnb-right">
-        <a href="https://github.com/ASAC11broadband" target="_blank" rel="noreferrer">
-          프로젝트 정보
-        </a>
       </div>
     </nav>
   );

@@ -13,7 +13,7 @@ from ..data import (
     normalize_benefit_category,
 )
 from ..schemas import UserProfile
-from ..state import PipelineState, feedback_block, get_llm, user_query
+from ..state import PipelineState, feedback_block, get_profile_llm, user_query
 from ..usage import estimate_monthly_data_gb
 
 
@@ -121,6 +121,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - 특정 혜택명이나 유형 없이 '혜택 좋은/더 괜찮은/우선/많은 순/다양한 순'이라고만 하면
   혜택의 좋고 나쁨이나 개수를 임의로 평가하지 않는다. needs_user_input=true로 두고
   원하는 혜택 유형을 질문한다.
+- 반대로 '괜찮은 요금제/좋은 상품/나은 플랜'은 혜택 요청이 아니라 일반적인 비교 표현이다.
+  이 표현만으로 혜택 유형을 묻지 말고, 현재 요금제·데이터·가격 정보가 충분하면 추천을 진행한다.
 - 'OTT 혜택이 좋은 요금제'처럼 유형을 함께 말하면 해당 유형을 필수 혜택으로 저장하고
   comparison_goals의 better로 해석하지 않는다.
 
@@ -165,6 +167,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   예: '현재 KT 초이스90보다 싼 것' → reference_plan_name='초이스90', comparison_goals=['cheaper']
 - 사용자가 현재 가격·데이터·통화·QoS를 직접 말하면 reference_* 필드에 저장한다.
   '지금 월 3만원 내고 있다'는 reference_fee_won=30000이다. budget_max_won이 아니다.
+  같은 현재 요금제명에 가격 조건이 여러 개라 후속으로 '월 7,700원짜리'처럼 답하면
+  그 금액은 추천 예산이 아니라 현재 요금제의 reference_fee_won이다.
   현재 납부액을 예산 상한으로 옮기면 지금보다 싼 상품만 후보가 되어, 바꾸는 게 나은지를
   물은 사용자에게 유지가 낫다는 답을 아예 못 주게 된다.
 - 비교 목적은 cheaper/more_data/faster_qos/similar/better 중 해당 값을 comparison_goals에 저장한다.
@@ -194,6 +198,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
       '혜택은 상관없어' → 혜택 필드를 모두 비우고 notes에만 적는다.
 - '가능하면 데이터가 넉넉했으면 좋겠어'처럼 수치 없는 여유 희망은 min_data_gb를 만들지 말고
   priorities에 data를 넣어 가중치로만 반영한다.
+- 후속 발화에서 '소진 후 최소 속도 조건은 빼고', 'QoS 조건을 제외해줘'처럼 기존 조건을
+  명시적으로 풀면 이전 발화의 min_qos_mbps를 유지하지 말고 null로 둔다. 최신 지시가 우선이다.
 - 필수 조건이라는 이유로 같은 축을 priorities에도 넣지 않는다. 두 곳은 서로 다른 뜻이다
   (필터 대 정렬 가중치).
 - 가장 싼 것·데이터 많은 순 같은 정렬 표현은 조건 필드가 아니라 priorities에만 저장한다.
@@ -413,6 +419,12 @@ _EXPLICIT_QOS_MIN_RE = re.compile(
     r"(\d+(?:\.\d+)?)\s*mbps\s*(?:이상|최소)",
     re.IGNORECASE,
 )
+_QOS_MIN_RELAX_RE = re.compile(
+    r"(?:qos|소진\s*후(?:\s*최소)?\s*속도)"
+    r".{0,18}?(?:조건)?\s*(?:은|는|을|를)?\s*"
+    r"(?:빼|제외|삭제|해제|없애|풀)",
+    re.IGNORECASE,
+)
 
 
 def _smartchoice_usage_pattern(query: str) -> str | None:
@@ -481,11 +493,18 @@ def _apply_explicit_data_max(profile: UserProfile, query: str) -> UserProfile:
 
 
 def _apply_explicit_qos_min(profile: UserProfile, query: str) -> UserProfile:
-    """명시한 QoS 최솟값을 구조화 출력과 관계없이 확정적으로 보존한다."""
-    matches = list(_EXPLICIT_QOS_MIN_RE.finditer(query or ""))
-    if not matches:
-        return profile
-    return profile.model_copy(update={"min_qos_mbps": float(matches[-1].group(1))})
+    """가장 최근의 QoS 최솟값 설정 또는 해제를 구조화 출력에 확정적으로 반영한다.
+
+    전체 대화를 매번 다시 읽으므로 예전 수치만 검색하면 사용자가 후속 발화에서 조건을
+    풀어도 그 값이 되살아난다. 발화를 역순으로 보고 처음 만나는 설정/해제를 적용한다.
+    """
+    for utterance in reversed((query or "").splitlines()):
+        if _QOS_MIN_RELAX_RE.search(utterance):
+            return profile.model_copy(update={"min_qos_mbps": None})
+        match = _EXPLICIT_QOS_MIN_RE.search(utterance)
+        if match:
+            return profile.model_copy(update={"min_qos_mbps": float(match.group(1))})
+    return profile
 
 
 _QOS_REQUIRED_RE = re.compile(
@@ -515,7 +534,7 @@ def _apply_explicit_qos_requirement(profile: UserProfile, query: str) -> UserPro
 
 BENEFIT_PREFERENCE_QUESTION = (
     "어떤 혜택을 찾으시나요? OTT·영상, 음악·오디오, 도서·콘텐츠, 멤버십, "
-    "스마트기기, 추가 데이터, 페이백 중에서 말씀해 주세요."
+    "스마트기기, 추가 데이터, 사은품/페이백 중에서 말씀해 주세요."
 )
 _VAGUE_BENEFIT_PREFERENCE_RE = re.compile(
     r"(?:부가\s*)?혜택\s*(?:이|은|을|도)?\s*(?:현재보다\s*)?(?:더\s*)?"
@@ -550,7 +569,9 @@ def _apply_benefit_preference_question(profile: UserProfile, query: str) -> User
             "comparison_goals": goals or None,
             "ambiguous": ambiguous,
         }
-        if profile.followup_question == BENEFIT_PREFERENCE_QUESTION:
+        # 이전 문구('페이백')가 대화 기록에 남아 있어도 구체적 혜택을 고르면
+        # 같은 질문을 다시 띄우지 않는다.
+        if (profile.followup_question or "").startswith("어떤 혜택을 찾으시나요?"):
             updates.update({"needs_user_input": False, "followup_question": None})
         return profile.model_copy(update=updates)
 
@@ -590,6 +611,20 @@ _EXPLICIT_TRADEOFF_RE = re.compile(
     r"더\s*(?:싼|저렴)|싼\s*(?:거|것|걸)|저렴한\s*(?:거|것|걸)"
     r"|데이터\s*(?:가|를)?\s*더\s*많|더\s*많은\s*데이터|더\s*빠른"
 )
+_MORE_DATA_COMPARISON_RE = re.compile(
+    r"(?:현재|기존|지금|이것|이거).{0,45}보다.{0,18}(?:데이터|용량).{0,10}(?:더\s*)?많"
+    r"|(?:데이터|용량).{0,10}더\s*많|더\s*많은\s*(?:데이터|용량)",
+    re.IGNORECASE,
+)
+_CHEAPER_COMPARISON_RE = re.compile(
+    r"(?:현재|기존|지금|이것|이거).{0,45}보다.{0,18}(?:더\s*)?(?:싼|저렴)"
+    r"|더\s*(?:싼|저렴한)|(?:싼|저렴한)\s*(?:거|것|걸|요금제)",
+    re.IGNORECASE,
+)
+_FASTER_QOS_COMPARISON_RE = re.compile(
+    r"(?:현재|기존|지금|이것|이거).{0,45}보다.{0,18}(?:소진\s*후|qos)?.{0,8}(?:더\s*)?빠른",
+    re.IGNORECASE,
+)
 
 
 def _repair_general_comparison(profile: UserProfile, query: str) -> UserProfile:
@@ -603,9 +638,20 @@ def _repair_general_comparison(profile: UserProfile, query: str) -> UserProfile:
     """
     if not any(getattr(profile, field) is not None for field in _REFERENCE_SPEC_FIELDS):
         return profile
-    if _EXPLICIT_TRADEOFF_RE.search(query or ""):
+    text = query or ""
+    explicit_goals: list[str] = []
+    if _CHEAPER_COMPARISON_RE.search(text):
+        explicit_goals.append("cheaper")
+    if _MORE_DATA_COMPARISON_RE.search(text):
+        explicit_goals.append("more_data")
+    if _FASTER_QOS_COMPARISON_RE.search(text):
+        explicit_goals.append("faster_qos")
+    if explicit_goals:
+        # 짧은 가격 답변 뒤에도 전체 대화에 남아 있는 최초 비교 목표를 복원한다.
+        return profile.model_copy(update={"comparison_goals": explicit_goals})
+    if _EXPLICIT_TRADEOFF_RE.search(text):
         return profile
-    if _GENERAL_BETTER_RE.search(query or ""):
+    if _GENERAL_BETTER_RE.search(text):
         return profile.model_copy(update={"comparison_goals": ["better"]})
     if profile.comparison_goals:
         # 비교를 말한 문장이 하나도 없다. 선호 표현에서 끌려 나온 목표이므로 버린다.
@@ -647,6 +693,98 @@ def _repair_reference_plan_name(profile: UserProfile, query: str) -> UserProfile
     if mentioned and (not direct or len(direct) > 1):
         return profile.model_copy(update={"reference_plan_name": mentioned[0]["plan_name"]})
     return profile
+
+
+_DATA_AMOUNT_IN_TEXT_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:GB|G|기가)\b", re.IGNORECASE)
+
+
+def _drop_reference_name_data_constraint(profile: UserProfile, query: str) -> UserProfile:
+    """현재 상품명 속 용량을 신규 요금제의 데이터 조건으로 쓰지 않는다."""
+    name = (profile.reference_plan_name or "").strip()
+    if not name:
+        return profile
+    matched = find_plans_by_name(name)
+    if not matched:
+        return profile
+    # 상품명 바깥에 사용자가 별도 수치를 말했다면 그 조건은 보존한다.
+    residual = re.sub(re.escape(name), " ", query or "", flags=re.IGNORECASE)
+    if _DATA_AMOUNT_IN_TEXT_RE.search(residual):
+        return profile
+    base_values = {
+        float(plan["base_data_gb"])
+        for plan in matched
+        if plan.get("base_data_gb") is not None
+    }
+    updates: dict[str, object] = {}
+    for field in ("min_data_gb", "target_data_gb", "max_data_gb"):
+        value = getattr(profile, field)
+        if value is not None and any(abs(float(value) - base) < 1e-9 for base in base_values):
+            updates[field] = None
+    return profile.model_copy(update=updates) if updates else profile
+
+
+_REFERENCE_PRICE_REPLY_RE = re.compile(
+    r"^\s*(?:월\s*)?([\d,]+(?:\.\d+)?)\s*(만원|천원|원)"
+    r"\s*(?:짜리|내고\s*있어|내요|입니다|이야|이에요|예요|맞아)?[.!?]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _apply_ambiguous_reference_fee_reply(profile: UserProfile, query: str) -> UserProfile:
+    """중복 상품 확인 질문에 가격만 답한 경우 현재 납부액으로 확정한다."""
+    if not profile.reference_plan_name:
+        return profile
+    matched = find_plans_by_name(profile.reference_plan_name)
+    if len(matched) < 2:
+        return profile
+    utterances = [line.strip() for line in (query or "").splitlines() if line.strip()]
+    if len(utterances) < 2:
+        return profile
+    latest = utterances[-1]
+    if re.search(r"예산|이하|미만|이상|까지|추천", latest):
+        return profile
+    price = _REFERENCE_PRICE_REPLY_RE.fullmatch(latest)
+    if not price:
+        return profile
+    fee = int(float(price.group(1).replace(",", "")) * _BUDGET_UNIT[price.group(2)])
+    return profile.model_copy(
+        update={
+            "reference_fee_won": fee,
+            "budget_min_won": None,
+            "budget_max_won": None,
+        }
+    )
+
+
+_BENEFIT_FOLLOWUP_RE = re.compile(
+    r"(?:어떤|무슨).{0,12}혜택|혜택.{0,16}(?:포함|좋(?:을|은)|원하|찾)",
+    re.IGNORECASE,
+)
+
+
+def _drop_unrequested_benefit_followup(profile: UserProfile, query: str) -> UserProfile:
+    """LLM이 일반적인 '괜찮은 요금제'를 혜택 질문으로 과해석한 경우를 되돌린다.
+
+    혜택을 실제로 언급하지 않은 비교 요청은 이미 데이터·가격 조건만으로 추천할 수 있다.
+    이 질문을 남기면 결과 3개와 '어떤 혜택?'이 동시에 떠 사용자가 추가 입력이 필수라고
+    오해한다. 명시적인 모호 혜택 요청은 바로 앞 보정이 BENEFIT_PREFERENCE_QUESTION으로
+    확정하므로 그대로 남긴다.
+    """
+    question = profile.followup_question or ""
+    if not _BENEFIT_FOLLOWUP_RE.search(question):
+        return profile
+    if _VAGUE_BENEFIT_PREFERENCE_RE.search(query or ""):
+        return profile
+    return profile.model_copy(
+        update={
+            "needs_user_input": False,
+            "followup_question": None,
+            "ambiguous": [
+                item for item in profile.ambiguous
+                if item != _BENEFIT_PREFERENCE_MARKER
+            ],
+        }
+    )
 
 
 def _normalize_benefit_requests(profile: UserProfile) -> UserProfile:
@@ -705,7 +843,7 @@ def _normalize_profile(profile: UserProfile) -> UserProfile:
     )
 
 
-# 데이터와 요금 둘 다 못 잡으면 후보를 좁힐 수 없다. 전체에서 5건을 뽑는 추천은 의미가 없으므로
+# 데이터와 요금 둘 다 못 잡으면 후보를 좁힐 수 없다. 전체에서 3건을 뽑는 추천은 의미가 없으므로
 # 이 경우에만 추천 전에 되묻는다. (그 외에는 부족해도 일단 추천하고 질문을 함께 낸다)
 CORE_MISSING_QUESTION = (
     "추천 범위를 좁히려면 두 가지 중 하나는 필요합니다. "
@@ -913,11 +1051,15 @@ _REPAIRS = (
     _apply_user_age,
     _apply_explicit_qos_requirement,
     _apply_benefit_preference_question,
+    _drop_unrequested_benefit_followup,
     _apply_explicit_qos_min,
     _apply_explicit_data_max,
     _apply_smartchoice_usage_rule,
     _repair_general_comparison,
     _repair_reference_plan_name,
+    # 정확한 현재 상품명을 복구한 뒤 이름 속 GB와 별도 요구량을 구분한다.
+    _drop_reference_name_data_constraint,
+    _apply_ambiguous_reference_fee_reply,
     _drop_current_carrier_scope,
 )
 
@@ -925,6 +1067,37 @@ _REPAIRS = (
 # _normalize_profile 은 hard_constraints 를 값 유무로 다시 만든다. 그래서 "값은 있지만
 # 필수는 아니다"(선호)라는 판단은 정규화 뒤에 적용해야 한다. 앞에서 빼면 곧바로 되돌아온다.
 _POST_NORMALIZE_REPAIRS = (_apply_benefit_constraint_strength,)
+
+
+def _apply_relaxed_fields(profile: UserProfile, relaxed_fields: list[str] | None) -> UserProfile:
+    """0건 화면에서 사용자가 누른 조건을 구조적으로 해제한다.
+
+    대화 전체를 다시 LLM에 넣으면 과거의 강한 조건이 다시 추출될 수 있다. 버튼은 이미
+    blocker의 정확한 필드명을 알고 있으므로 자연어 문장 해석보다 이 명시적 신호가 우선한다.
+    include_mno는 값 제거가 아니라 기본 알뜰폰 범위를 통신 3사까지 넓히는 특수 조건이다.
+    """
+    allowed = set(CONSTRAINT_FIELDS) | {"include_mno"}
+    requested = list(dict.fromkeys(field for field in (relaxed_fields or []) if field in allowed))
+    if not requested:
+        return profile
+
+    updates: dict[str, object] = {
+        field: (True if field == "include_mno" else None)
+        for field in requested
+    }
+    updates["hard_constraints"] = [
+        field for field in profile.hard_constraints if field not in requested
+    ]
+    if {"wanted_benefits", "wanted_benefit_categories"}.intersection(requested):
+        # 최초의 '부가혜택 중요'가 대화 전체에 남아 있어도 방금 혜택 조건을 푼
+        # 사용자에게 다시 '어떤 혜택?'을 묻지 않는다. 예산·사용량 등은 그대로 쓴다.
+        updates["ambiguous"] = [
+            item for item in profile.ambiguous if item != _BENEFIT_PREFERENCE_MARKER
+        ]
+        if _BENEFIT_FOLLOWUP_RE.search(profile.followup_question or ""):
+            updates["needs_user_input"] = False
+            updates["followup_question"] = None
+    return profile.model_copy(update=updates)
 
 
 def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
@@ -935,7 +1108,7 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     ] or [HumanMessage(content="")]
 
     prompt = PROFILING_PROMPT + "\n\n" + feedback_block(state)
-    llm = get_llm(config).with_structured_output(UserProfile)
+    llm = get_profile_llm(config).with_structured_output(UserProfile)
     query = user_query(state)
 
     profile = llm.invoke([SystemMessage(content=prompt), *messages])
@@ -944,6 +1117,8 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     profile = _normalize_profile(profile)
     for repair in _POST_NORMALIZE_REPAIRS:
         profile = repair(profile, query)
+    # 정규화가 hard_constraints를 다시 만들기 때문에 반드시 모든 정규화·보정 뒤에 적용한다.
+    profile = _apply_relaxed_fields(profile, state.get("relaxed_fields"))
     if core_signal_missing(profile) and not benefit_preference_missing(profile):
         profile = profile.model_copy(
             update={

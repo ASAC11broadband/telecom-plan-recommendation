@@ -2,10 +2,19 @@ import { BrandLogo } from './BrandLogo';
 import { categories, categoryFilters } from '../categories';
 import { PlanTile } from './PlanTile';
 import { useEffect, useState, ReactNode } from 'react';
-import { BrowseFilters, EMPTY_FILTERS, Facets, PlanItem, PlanPage, Stats } from '../types';
+import { BrowseFilters, BrowseState, EMPTY_FILTERS, Facets, PlanItem, PlanPage, Stats } from '../types';
 import { fetchStats, listPlans } from '../api';
 
 const PRICE_OPTIONS: [string, string][] = [['lt10k','1만원 미만'],['10to20k','1~2만원'],['20to30k','2~3만원'],['30to50k','3~5만원'],['50to70k','5~7만원'],['gte70k','7만원 이상']];
+const TIER_OPTIONS: [string, string][] = [
+  ['unlimited_full', '기본량 무제한'],
+  ['qos_hd', '5Mbps'],
+  ['qos_sd', '3Mbps'],
+  ['qos_lite', '1Mbps'],
+  ['qos_text', '400Kbps'],
+  ['capped', 'QoS 없음'],
+];
+const TIER_LABELS = Object.fromEntries(TIER_OPTIONS);
 const GROUPS: { group: keyof BrowseFilters; label: string; options: [string, string][] }[] = [
   { group: 'price', label: '월 예산', options: PRICE_OPTIONS },
   {
@@ -44,14 +53,7 @@ const GROUPS: { group: keyof BrowseFilters; label: string; options: [string, str
     // 기본량보다 이쪽이 체감을 가른다. '무제한'(소진 후 100Kbps)보다 '100GB+5Mbps'가 빠르다.
     group: 'tier',
     label: '다 쓴 뒤에는',
-    options: [
-      ['unlimited_full', '기본량 무제한'],
-      ['qos_hd', 'HD 참고 등급'],
-      ['qos_sd', '480p 참고 등급'],
-      ['qos_lite', '저화질·음악'],
-      ['qos_text', '문자·웹만'],
-      ['capped', '소진 후 정책 미확인'],
-    ],
+    options: TIER_OPTIONS,
   },
   {
     group: 'voice',
@@ -62,26 +64,12 @@ const GROUPS: { group: keyof BrowseFilters; label: string; options: [string, str
       ['none', '제공 없음'],
     ],
   },
-  {
-    group: 'flags',
-    label: '추가 조건',
-    options: [
-      ['no_age_limit', '가입 자격 제한 없음'],
-      ['online_only', '온라인 전용'],
-      ['addon', '결합 부가서비스 있음'],
-      ['promo', '프로모션 적용중'],
-      ['benefit_value', '혜택 금액 확인됨'],
-    ],
-  },
 ];
 
 const SORTS: [string, string][] = [
   ['fee_asc', '월 요금 낮은순'],
-  ['fee_desc', '월 요금 높은순'],
   ['data_desc', '데이터 많은순'],
   ['qos_desc', '소진 후 속도 빠른순'],
-  ['total_asc', '총비용 낮은순'],
-  ['effective_asc', '현금성 혜택 차감 참고값 낮은순'],
 ];
 
 const EMPTY = EMPTY_FILTERS;
@@ -92,27 +80,23 @@ const labelOf = (group: keyof BrowseFilters, key: string) =>
 
 export function BrowseScreen({
   chat,
-  initialCategory = 'all',
+  state,
+  onStateChange,
   compare,
   onToggleCompare,
   onOpenCompare,
-  onAskPlan,
 }: {
   chat: ReactNode;
-  initialCategory?: string;
+  state: BrowseState;
+  onStateChange: (state: BrowseState) => void;
   compare: PlanItem[];
   onToggleCompare: (plan: PlanItem) => void;
   onOpenCompare: () => void;
-  onAskPlan: (plan: PlanItem) => void;
 }) {
-  const [category, setCategory] = useState(initialCategory);
-  const [view, setView] = useState<'cards' | 'table'>('cards');
+  const { category, view, filters, sort, q, page } = state;
+  const updateState = (patch: Partial<BrowseState>) => onStateChange({ ...state, ...patch });
   const [stats, setStats] = useState<Stats | null>(null);
   const facets: Facets = stats?.facets ?? {};
-  const [filters, setFilters] = useState<BrowseFilters>(() => categoryFilters(initialCategory));
-  const [sort, setSort] = useState('fee_asc');
-  const [q, setQ] = useState('');
-  const [page, setPage] = useState(1);
   const [data, setData] = useState<PlanPage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -136,14 +120,16 @@ export function BrowseScreen({
   }, [q, filters, sort, page]);
 
   const toggle = (group: keyof BrowseFilters, key: string) => {
-    setPage(1);
-    if (group !== 'price') setCategory('custom');
-    setFilters((prev) => ({
-      ...prev,
-      [group]: prev[group].includes(key)
-        ? prev[group].filter((k) => k !== key)
-        : [...prev[group], key],
-    }));
+    updateState({
+      page: 1,
+      category: group === 'price' ? category : 'custom',
+      filters: {
+        ...filters,
+        [group]: filters[group].includes(key)
+          ? filters[group].filter((k) => k !== key)
+          : [...filters[group], key],
+      },
+    });
   };
 
   const active = GROUPS.flatMap((g) =>
@@ -162,10 +148,7 @@ export function BrowseScreen({
           <button className="text-btn"
             style={{ fontSize: 'var(--fs-11)', color: 'var(--accent)', cursor: 'pointer' }}
             onClick={() => {
-              setFilters(EMPTY);
-              setCategory('all');
-              setQ('');
-              setPage(1);
+              onStateChange({ category: 'all', view, filters: EMPTY, sort, q: '', page: 1 });
             }}
           >
             초기화
@@ -177,8 +160,7 @@ export function BrowseScreen({
             type="text"
             value={q}
             onChange={(e) => {
-              setPage(1);
-              setQ(e.target.value);
+              updateState({ page: 1, q: e.target.value });
             }}
             placeholder="예: 다이렉트"
           />
@@ -203,10 +185,9 @@ export function BrowseScreen({
 
       <div style={{ flex: 1, minWidth: 0 }}>
         <h1 className="browse-title">내 생활에 맞는 요금제 찾기</h1>
-        <div className="browse-categories">{categories.map(c => <button className={'btn '+(category === c.id ? 'selected' : '')} aria-pressed={category === c.id} key={c.id} onClick={() => { setCategory(c.id); setFilters(prev => ({...categoryFilters(c.id), price: prev.price})); setPage(1); }}>{c.icon} {c.title}</button>)}</div>
-        <p className="muted">{categories.find(c => c.id === category)?.description ?? '직접 선택한 조건'} · 카테고리 간 요금제가 중복될 수 있습니다.</p>
+        <div className="browse-categories">{categories.map(c => <button className={'btn '+(category === c.id ? 'selected' : '')} aria-pressed={category === c.id} key={c.id} onClick={() => updateState({ category: c.id, filters: {...categoryFilters(c.id), price: filters.price}, page: 1 })}>{c.icon} {c.title}</button>)}</div>
 
-        <div className="view-switch"><button className="btn" aria-pressed={view === 'cards'} onClick={() => setView('cards')}>카드 보기</button><button className="btn" aria-pressed={view === 'table'} onClick={() => setView('table')}>표 보기</button></div>
+        <div className="view-switch"><button className="btn" aria-pressed={view === 'cards'} onClick={() => updateState({ view: 'cards' })}>카드 보기</button><button className="btn" aria-pressed={view === 'table'} onClick={() => updateState({ view: 'table' })}>표 보기</button></div>
         <div className="row-between" style={{ marginBottom: 12 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
             <strong style={{ fontSize: 18 }} className="num">
@@ -219,8 +200,7 @@ export function BrowseScreen({
               className="btn btn-sm"
               value={sort}
               onChange={(e) => {
-                setPage(1);
-                setSort(e.target.value);
+                updateState({ page: 1, sort: e.target.value });
               }}
             >
               {SORTS.map(([key, label]) => (
@@ -249,7 +229,7 @@ export function BrowseScreen({
         )}
 
         <div className="card">
-          {view === 'cards' && <div className="browse-plan-grid">{loading ? <p role="status">불러오는 중…</p> : error ? <p role="alert">{error}</p> : data?.plans.length === 0 ? <p>조건에 맞는 요금제가 없습니다. 필터를 줄여 보세요.</p> : data?.plans.map(plan => <PlanTile key={plan.id} plan={plan} selected={compare.some(p => p.id === plan.id)} onCompare={() => onToggleCompare(plan)} onAsk={() => onAskPlan(plan)} />)}</div>}
+          {view === 'cards' && <div className="browse-plan-grid">{loading ? <p role="status">불러오는 중…</p> : error ? <p role="alert">{error}</p> : data?.plans.length === 0 ? <p>조건에 맞는 요금제가 없습니다. 필터를 줄여 보세요.</p> : data?.plans.map(plan => <PlanTile key={plan.id} plan={plan} selected={compare.some(p => p.id === plan.id)} onCompare={() => onToggleCompare(plan)} />)}</div>}
           <div style={{ overflowX: 'auto', display: view === 'table' ? 'block' : 'none' }}>
             <table>
               <thead>
@@ -262,24 +242,23 @@ export function BrowseScreen({
                   <th>다 쓴 뒤</th>
                   <th>음성</th>
                   <th>{data?.plans[0]?.compareMonths ?? 12}개월 총비용</th>
-                  <th>현금성 혜택 차감 참고값</th>
                   <th>요금제 상세</th>
                 </tr>
               </thead>
               <tbody>
                 {error && (
                   <tr>
-                    <td colSpan={10}>{error}</td>
+                    <td colSpan={9}>{error}</td>
                   </tr>
                 )}
                 {!error && loading && (
                   <tr>
-                    <td colSpan={10}>불러오는 중…</td>
+                    <td colSpan={9}>불러오는 중…</td>
                   </tr>
                 )}
                 {!error && !loading && data?.plans.length === 0 && (
                   <tr>
-                    <td colSpan={10}>조건에 맞는 요금제가 없습니다. 필터를 줄여 보세요.</td>
+                    <td colSpan={9}>조건에 맞는 요금제가 없습니다. 필터를 줄여 보세요.</td>
                   </tr>
                 )}
                 {!error &&
@@ -310,17 +289,10 @@ export function BrowseScreen({
                       </td>
                       <td className="num">{plan.data}</td>
                       <td>
-                        <span className={`tier-chip tier-${plan.dataTier}`}>{plan.dataTierLabel}</span>
+                        <span className={`tier-chip tier-${plan.dataTier}`}>{TIER_LABELS[plan.dataTier] ?? plan.dataTierLabel}</span>
                       </td>
                       <td>{plan.call}</td>
                       <td className="num">{plan.total}</td>
-                      <td className="num">
-                        {plan.benefitDeductible > 0
-                          ? plan.benefitExceedsFee
-                            ? '0원*'
-                            : plan.effectiveTotal
-                          : '—'}
-                      </td>
                       <td>
                         {plan.sourceUrl ? (
                           <a className="btn btn-sm" href={plan.sourceUrl} target="_blank" rel="noreferrer">
@@ -352,7 +324,7 @@ export function BrowseScreen({
               <span className="num">
                 {from}–{to} / {total.toLocaleString()}
               </span>
-              <button className="btn btn-sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+              <button className="btn btn-sm" disabled={page <= 1} onClick={() => updateState({ page: page - 1 })}>
                 ‹
               </button>
               <span className="num">
@@ -361,7 +333,7 @@ export function BrowseScreen({
               <button
                 className="btn btn-sm"
                 disabled={page >= lastPage}
-                onClick={() => setPage((p) => p + 1)}
+                onClick={() => updateState({ page: page + 1 })}
               >
                 ›
               </button>

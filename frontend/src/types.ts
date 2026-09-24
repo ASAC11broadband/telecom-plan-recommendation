@@ -1,4 +1,4 @@
-export type ScreenType = 's-home' | 's-input' | 's-result' | 's-report' | 's-browse' | 's-compare' | 's-detail';
+export type ScreenType = 's-home' | 's-result' | 's-report' | 's-browse' | 's-compare' | 's-detail';
 
 /** backend/plans.py 의 to_plan_item 산출물과 1:1. 바꾸려면 양쪽 같이 바꾼다. */
 export interface PlanItem {
@@ -35,6 +35,8 @@ export interface PlanItem {
   tetheringGb: number | null;
   hash: string[];
   benefit: string;
+  /** 카드의 접이식 부가혜택 영역에서 보여줄 전체 혜택 목록. */
+  benefits: string[];
   /** 수집된 혜택의 월 환산 원화 가치. 0 은 '혜택 없음'이 아니라 '금액 미확인'. */
   benefitValue: number;
   /** 납부 총액에서 실제로 빼도 되는 부분(조건 없는 현금성 혜택)만. */
@@ -91,6 +93,8 @@ export interface ReferenceDelta {
   totalDiff: number | null;
   discountEndsAfterMonths: number | null;
   feeAfterDiscount: number | null;
+  currentDiscountEndsAfterMonths: number | null;
+  currentFeeAfterDiscount: number | null;
   currentData: string;
   candidateData: string;
   dataDiffGb: number | null;
@@ -135,6 +139,9 @@ export interface Profile {
   benefit_match_mode?: 'all' | 'any';
   estimated_monthly_data_gb?: number;
   usage_estimate_notes?: string[];
+  reference_plan_name?: string;
+  /** 추천에서 반드시 지키는 조건 필드명. 순위 변경 시 이 목록을 그대로 유지한다. */
+  hard_constraints?: string[];
   smartchoice_usage_pattern?: string;
   app_usages?: { service: string; daily_hours: number; mode?: string | null }[];
   assumptions?: string[];
@@ -161,7 +168,8 @@ export interface ReferenceFacts {
 }
 
 export interface ReferenceVerdict {
-  status: 'keep' | 'switch' | 'undetermined';
+  status: 'keep' | 'switch' | 'tradeoff' | 'undetermined';
+  goal?: 'cheaper' | 'more_data' | 'faster_qos' | 'multiple';
   reason: string;
   /** 판단하지 못한 이유가 된, 모르는 항목들. */
   missing: string[];
@@ -175,6 +183,10 @@ export interface RecommendResponse {
   plans: PlanItem[];
   /** 데이터·요금을 둘 다 못 잡아 추천 전에 멈춘 경우. 결과 대신 질문을 보여준다. */
   needsMoreInput: boolean;
+  /** 추천 결과가 아니라 상담창에만 표시하는 안내 답변. */
+  conversationOnly?: boolean;
+  conversationKind?: 'off_topic' | 'plan_info';
+  assistantMessage?: string | null;
   candidateCount: number;
   totalCount: number;
   report: string;
@@ -235,6 +247,16 @@ export interface BrowseFilters {
   gen: string[];
   voice: string[];
   flags: string[];
+}
+
+/** 전체 요금제 화면을 벗어났다가 돌아와도 유지하는 탐색 상태. */
+export interface BrowseState {
+  category: string;
+  view: 'cards' | 'table';
+  filters: BrowseFilters;
+  sort: string;
+  q: string;
+  page: number;
 }
 
 export const EMPTY_FILTERS: BrowseFilters = {

@@ -17,7 +17,7 @@ from langchain_core.runnables import RunnableConfig
 from ..data import has_benefit, normalize_benefit_category
 from .recommend import TOP_N
 from ..mcda import COMPARE_MONTHS, _switching_monthly_fee
-from ..state import PipelineState, get_llm, user_query
+from ..state import PipelineState, get_report_llm, user_query
 
 
 REPORT_PROMPT = """\
@@ -28,7 +28,13 @@ REPORT_PROMPT = """\
 [사실성 원칙]
 - 추천 요금제에 관한 사실은 ranked_recommendations에 있는 값만 사용한다.
 - 원문과 profile에 사용자가 직접 제공한 현재 요금제 정보는 비교 근거로 사용할 수 있다.
-- 값이 없거나 null이면 추측하지 말고 필요할 때 "정보 없음" 또는 "확인 필요"라고 쓴다.
+- reference_plan이 있으면 현재 요금제의 데이터 비교에는 `current_plan_comparison`만 사용한다.
+  특히 daily_data_gb가 있는 상품의 data_gb는 월 환산 총량이다. 상품명·profile 안의
+  `reference_data_gb` 또는 `base_data_gb`만 보고 현재 제공량을 11GB처럼 축소하지 마라.
+  current_plan_comparison.data_display의 문구와 monthly_equivalent_data_gb가 현재 데이터의
+  유일한 비교 기준이다.
+- 값이 없거나 null이면 추측하지 않는다. 다만 미수집 사실 자체를 상품의 추천 이유로 쓰지 말고,
+  사용자가 반드시 알아야 할 때만 마지막 `가입 전 확인`에 짧게 모아 쓴다.
 - 금액을 쓸 때는 반드시 discounted_fee(할인가, 실제 납부액)를 기준으로 한다.
   사용자의 예산 조건도 discounted_fee 로 판정된 것이라 monthly_fee 를 쓰면 예산 초과처럼 보인다.
 - monthly_fee(정상가)는 할인 종료 후 요금으로만 쓰고, 두 값이 다르면 어느 쪽인지 반드시 밝힌다.
@@ -46,7 +52,7 @@ REPORT_PROMPT = """\
   기준이 된 예상 사용량을 함께 밝힌다.
 - '완벽히 충족', '가장 우수', '최고', '모든 면에서'처럼 단정하는 표현은 후보 데이터로
   그 자리에서 확인되는 경우에만 쓴다. 확인할 수 없으면 비교 대상과 범위를 좁혀
-  '이 추천 5개 중에서는 데이터가 가장 많다'처럼 근거가 보이게 쓴다.
+  '이 추천 3개 중에서는 데이터가 가장 많다'처럼 근거가 보이게 쓴다.
 - 사용자가 혜택을 요청하지 않았으면(wanted_benefits와 wanted_benefit_categories가 모두 비었으면)
   혜택이 적다·없다는 것을 단점으로 쓰지 않는다. 요청하지 않은 항목이라 순위와 무관하다.
 - 순위는 그대로 유지하되 앞 단계의 내부 계산 문구는 인용하지 않고 사용자 관점의 이유로 다시 설명한다.
@@ -72,16 +78,29 @@ REPORT_PROMPT = """\
 3. 반드시 `### 추천 결론` 제목으로 시작하고 전체 결과를 1~2문장으로 요약한다.
 4. ranked_recommendations의 모든 상품을 순위대로 다루며 제목을 반드시
    `### 1순위 — 요금제명`, `### 2순위 — 요금제명` 형식으로 작성한다.
-   각 상품은 1~2문장으로 짧게 쓰고, 다음 두 가지만 담는다.
-   - 차별점: 다른 추천 후보와 견주어 이 상품에만 있는 점 (스펙 나열이 아니라 비교)
-   - 주의사항: 가입 전에 걸릴 수 있는 것 (할인 종료, 가입 조건, 소진 후 속도, 미수집 항목)
-   둘 중 하나가 없으면 그 문장은 빼고 짧게 끝낸다. 분량을 채우려 같은 말을 늘리지 않는다.
+   각 상품은 2~4문장으로 쓰고, 확인 가능한 항목만 다음 순서로 설명한다.
+   - 적합 이유: profile의 핵심 요구 1~2개와 이 상품의 실제 값을 연결해 왜 맞는지 설명
+   - 차별점: 다른 추천 후보와 견주어 이 상품에만 있거나 상대적으로 유리한 점
+     (스펙 나열이 아니라 비교)
+   - 주의사항 또는 맞교환: 실제 선택에 영향을 주는 할인 종료, 명시된 가입 조건,
+     확인된 속도 제한, 더 얻는 대신 더 내거나 포기하는 점
+   근거가 없는 항목은 문장을 만들지 말고 생략한다. 후보 간 확인 가능한 차이가 없으면
+   차이를 만들어내지 말고 `확인된 항목에서는 큰 차이가 없습니다`라고 쓴다.
+   분량을 채우려고 같은 말이나 카드의 스펙을 반복하지 않는다.
    '이 요금제는 ~을 제공합니다'로 시작하지 마라. 그 자리에는 비교나 주의가 와야 한다.
    나쁜 예: "이 요금제는 20GB의 데이터와 500분의 음성을 제공합니다."
             (카드에 그대로 있는 값이라 읽는 사람이 얻는 것이 없다)
-   좋은 예: "같은 20GB 후보 중 유일하게 통화가 무제한입니다. 다만 소진 후 속도는 미수집입니다."
+   좋은 예: "같은 20GB 후보 중 유일하게 통화가 무제한이라 통화량이 많은 사용자에게 유리합니다."
    숫자를 쓰더라도 '다른 후보는 20GB인데 이것만 120GB'처럼 비교의 근거일 때만 쓴다.
    내부 계산 용어인 가중치, 기대순위, 수용도, 점수, 백분율은 절대 쓰지 않는다.
+   `미수집`, `정보 없음`, `확인되지 않음`, `확인 필요`만을 상품별 추천 문장에 넣지 마라.
+   이런 문장은 상품을 선택하는 데 도움이 되지 않고 카드의 추천 포인트로도 노출된다.
+   소진 후 속도(QoS)를 다른 후보와 비교할 때는 반드시 "월 기본 데이터를 모두 쓴 뒤"에만
+   차이가 발생한다는 전제를 먼저 밝힌다. 예를 들어 150GB·5Mbps 후보와 10Mbps 후보를
+   비교한다면 "월 150GB를 모두 쓴 뒤에는 5Mbps로 이용합니다. 1·2순위는 10Mbps라,
+   매달 150GB를 초과해 쓰는 경우에는 1·2순위가 더 쾌적할 수 있습니다. 150GB 안에서
+   사용하면 이 속도 차이는 발생하지 않습니다."처럼 쓴다. "맞교환이 있습니다"처럼
+   무엇을 언제 포기하는지 알 수 없는 표현은 쓰지 마라.
 5. 할인 가격과 정상가가 다르면 해당 상품마다 할인 기간과 종료 후 정상가를 정확히 안내한다.
    예산 조건은 할인 가격을 기준으로 통과했으므로, 할인 종료 후 정상가가 예산보다 높더라도
    현재 추천이 예산을 위반했다고 표현하지 말고 향후 요금 변동에 주의하라고 안내한다.
@@ -89,7 +108,8 @@ REPORT_PROMPT = """\
 7. 후보에 vs_current 가 있으면 현재 요금제와의 금액 비교는 **그 값만** 쓴다. 직접 빼서 계산하지 마라.
    vs_current.결론이 '현재보다 비싸다'인 후보에 '더 저렴하다/절약된다'고 쓰면 안 된다.
    그 후보는 무엇을 더 주는 대신 얼마를 더 내는지로 쓴다.
-8. reference_plan(사용자가 현재 쓰는 요금제)이 있으면 `### 현재 요금제와 비교`에서 별도로 쓴다.
+8. reference_plan(사용자가 현재 쓰는 요금제)이 있으면 `### 현재 요금제와 비교`에서 별도로
+   2~4문장으로 쓴다. 확인된 금액·데이터·혜택 변화와 실제 선택의 맞교환을 먼저 설명한다.
    절감액은 reference_plan의 금액과 추천 요금제의 금액으로만 계산한다. reference_plan이
    null이거나 금액이 없으면 해당 제목과 문장을 아예 쓰지 않는다.
    계산 기준이 정상가인지 할인가인지 명시한다.
@@ -97,13 +117,16 @@ REPORT_PROMPT = """\
    - status='keep': 확인된 항목에서 확실히 우위인 후보를 찾지 못했으며, 현재 수준을 유지하려면 기존 상품도 선택지라고 쓴다. 최적이라고 단정하지 마라. 추천 목록은 맞교환을 감수할 때의
      대안임을 밝힌다.
    - status='switch': 확인된 항목에서 유리한 후보가 있다고 쓴다. 실제 전환 이익을 확정하지 마라. 근거는 reference_verdict.reason이며 결합할인·위약금은 확인이 필요하다.
+   - status='tradeoff': 요청한 개선 조건을 만족하는 후보는 있지만, 모든 항목에서 현재보다
+     우위는 아니라고 쓴다. 현재 요금제 유지 추천으로 바꾸거나, 후보가 더 싸다고 단정하지 마라.
    - status='undetermined': **유리하다/불리하다를 어느 쪽으로도 쓰지 마라.** 무엇을 몰라서
      판단하지 못했는지(reference_verdict.missing)를 밝히고, 그 값을 알려주면 다시 비교하겠다고
      안내하는 것으로 끝낸다. 후보가 0건이라는 사실을 현재 요금제가 유리하다는 근거로 쓰지 마라.
    - reference_verdict.confirm의 항목은 `### 가입 전 확인`에 그대로 반영한다.
      요금제 데이터로는 알 수 없는 것들이라 빼면 안 된다.
-9. 마지막에는 `### 가입 전 확인` 제목으로 할인 기간, 가입 조건, 테더링과 소진 후 속도 등
-   불명확한 항목을 두세 줄로 안내한다.
+9. 실제로 불명확한 항목이나 reference_verdict.confirm 항목이 있을 때만 마지막에
+   `### 가입 전 확인` 제목을 쓰고, 할인 기간, 가입 조건, 테더링과 소진 후 속도 등
+   입력 데이터에서 확인되지 않은 항목을 두세 줄로 안내한다. 확인할 항목이 없으면 이 절을 생략한다.
 10. prior_feedback이 있으면 사실성 원칙을 해치지 않는 범위에서 모두 반영한다.
 11. 입력 데이터 구조, JSON, 에이전트, 프롬프트 같은 내부 용어는 답변에서 언급하지 않는다.
 
@@ -215,6 +238,84 @@ def _vs_current(plan: Mapping, reference: Mapping | None) -> dict | None:
     }
 
 
+def _data_amount(value: Any) -> str:
+    number = float(value)
+    if 0 <= number < 1:
+        return f"{number * 1000:g}MB"
+    return f"{number:g}GB"
+
+
+def _current_plan_comparison(reference: Mapping | None) -> dict | None:
+    """리포트가 사용할 현재 요금제의 단일·정규화된 비교 기준.
+
+    프로필의 reference_data_gb는 사용자가 말한 상품명 속 기본량일 수 있다. 일 제공형의
+    실제 비교량은 카탈로그 data_gb(월 기본량 + 일 제공량×30)라서, 이를 별도 구조로
+    고정해 Report Agent가 11GB를 전체 제공량처럼 다시 쓰지 못하게 한다.
+    """
+    if not reference:
+        return None
+    if reference.get("data_unlimited"):
+        data_display = "기본 데이터 무제한"
+        monthly_equivalent = None
+    elif reference.get("data_gb") is None:
+        data_display = "데이터 제공량 확인 필요"
+        monthly_equivalent = None
+    else:
+        total = float(reference["data_gb"])
+        daily = reference.get("daily_data_gb")
+        if daily is not None and float(daily) > 0:
+            daily = float(daily)
+            base = max(0.0, round(total - daily * 30, 6))
+            data_display = (
+                f"월 기본 {_data_amount(base)} + 매일 {_data_amount(daily)} "
+                f"(30일 기준 월 환산 약 {_data_amount(total)})"
+            )
+        else:
+            data_display = _data_amount(total)
+        monthly_equivalent = total
+    return {
+        "plan_name": reference.get("plan_name"),
+        "monthly_fee": reference.get("discounted_fee"),
+        "data_display": data_display,
+        "monthly_equivalent_data_gb": monthly_equivalent,
+        "qos_mbps": reference.get("qos_mbps"),
+        "voice_unlimited": reference.get("voice_unlimited"),
+    }
+
+
+def _report_profile(profile: Any) -> Any:
+    """현재 요금제 스펙은 reference_plan에만 두어 profile의 원시값과 충돌하지 않게 한다."""
+    result = _plain(profile)
+    if not isinstance(result, dict):
+        return result
+    for field in (
+        "reference_plan_name", "reference_fee_won", "reference_data_gb",
+        "reference_data_unlimited", "reference_voice_minutes",
+        "reference_voice_unlimited", "reference_qos_mbps",
+    ):
+        result.pop(field, None)
+    return result
+
+
+def _repair_daily_reference_claim(report: str, reference: Mapping | None) -> str:
+    """일 제공형 현재 요금제를 기본량만으로 비교한 LLM 문장을 바로잡는다."""
+    context = _current_plan_comparison(reference)
+    if not context or reference.get("daily_data_gb") is None:
+        return report
+    total = context.get("monthly_equivalent_data_gb")
+    base = reference.get("base_data_gb")
+    if total is None or base is None:
+        return report
+    base_label = re.escape(_data_amount(base))
+    total_label = _data_amount(total)
+    # '현재의 기본 11GB보다 많은 100GB'처럼 기본량만을 전체 제공량처럼 쓰는 경우만 교정한다.
+    return re.sub(
+        rf"현재(?:의| 요금제의)?\s*기본\s*{base_label}(?=보다|에서|보다\s*많)",
+        f"현재 요금제의 월 환산 약 {total_label}",
+        report,
+    )
+
+
 def _response_text(content: Any) -> str:
     """일반 문자열 및 content block 형태의 모델 응답을 텍스트로 정규화한다."""
     if isinstance(content, str):
@@ -280,6 +381,27 @@ def _ensure_matched_benefits(reason: str, plan: Mapping[str, Any]) -> str:
         return reason
     quoted = ", ".join(f"‘{value}’" for value in matches)
     return f"요청한 혜택 조건은 {quoted}으로 충족합니다. {reason}".strip()
+
+
+_UNHELPFUL_CARD_REASON = re.compile(
+    r"(?:미수집|정보\s*없음|확인되지\s*않(?:음|았습니다)?|확인(?:이|할)?\s*필요)"
+)
+
+
+def _clean_card_reason(reason: str) -> str:
+    """상품 카드에는 선택에 도움이 되는 추천 문장만 남긴다.
+
+    누락된 원본 값은 전체 리포트의 가입 전 확인에서 다룰 수 있지만, 그 사실만으로는
+    추천 근거가 아니므로 상품별 카드 문장에서 제거한다.
+    """
+    sentences = re.split(r"\n+|(?<=[.!?。])\s+", reason or "")
+    useful = [sentence.strip() for sentence in sentences if sentence.strip() and not _UNHELPFUL_CARD_REASON.search(sentence)]
+    return " ".join(useful)
+
+
+def _card_reason(reason: str, plan: Mapping[str, Any]) -> str:
+    cleaned = _clean_card_reason(_ensure_matched_benefits(reason, plan))
+    return cleaned or _clean_card_reason(_fallback_reason(dict(plan)))
 
 
 _COMMON_SECTION = re.compile(r"^###\s+(?:현재 요금제와 비교|가입 전 확인)\s*$", re.MULTILINE)
@@ -365,10 +487,13 @@ def report_node(state: PipelineState, config: RunnableConfig) -> dict:
     if not recommendations:
         report = _empty_report()
     else:
+        reference = _plain(state.get("reference"))
         payload = {
             "original_user_query": user_query(state),
-            "profile": _plain(state.get("profile")),
-            "reference_plan": _plain(state.get("reference")),
+            # profile에는 후보 조건만 둔다. 현재 요금제 값은 정규화한 comparison만 쓴다.
+            "profile": _report_profile(state.get("profile")),
+            "reference_plan": reference,
+            "current_plan_comparison": _current_plan_comparison(reference),
             "reference_verdict": _plain(state.get("reference_verdict")),
             "ranked_recommendations": recommendations,
             "prior_feedback": _plain(state.get("feedback", [])),
@@ -376,19 +501,20 @@ def report_node(state: PipelineState, config: RunnableConfig) -> dict:
         prompt = REPORT_PROMPT.format(
             report_data=json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         )
-        response = get_llm(config).invoke(
+        response = get_report_llm(config).invoke(
             [SystemMessage(content=prompt)], config=config
         )
         report = _response_text(response.content)
         if not report:
             raise ValueError("Report Agent가 빈 응답을 반환했습니다.")
+        report = _repair_daily_reference_claim(report, reference)
         report = _ensure_all_ranks(report, recommendations)
         report = _ensure_promo_notices(report, recommendations)
 
     ranked = list(state.get("ranked") or [])
     if recommendations and ranked:
         reasons = [
-            _ensure_matched_benefits(reason, plan)
+            _card_reason(reason, plan)
             for reason, plan in zip(
                 _rank_reasons(report, recommendations), recommendations
             )
