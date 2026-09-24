@@ -6,19 +6,257 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from agent.data import all_plans, filter_candidates, PLANS_CSV
+from agent.data import all_plans, filter_candidates, PLANS_CSV, CONSTRAINT_LABELS
 from agent.schemas import UserProfile, ScoredPlan
 from agent.agents.recommend import (recommend_node, _apply_comparison, _reference_verdict,
                                     _dedupe_identical_offers, _diverse_selection, _offer_character,
-                                    _is_pareto_better, TOP_N)
+                                    _is_pareto_better, _resolve_reference,
+                                    _same_or_equivalent_to_reference, TOP_N)
 from agent.agents.evaluation import _ranking_errors, evaluation_node
-from agent.agents.profiling import _apply_user_age
-from backend.main import app, _llm_calls, LLM_CALLS_PER_MINUTE
+from agent.agents.profiling import (BENEFIT_PREFERENCE_QUESTION, benefit_preference_missing,
+                                    _apply_explicit_qos_min, _apply_relaxed_fields,
+                                    _apply_user_age, _drop_reference_name_data_constraint,
+                                    _repair_general_comparison,
+                                    _drop_unrequested_benefit_followup)
+from backend.main import app, Message, _quick_chat_response, _llm_calls, LLM_CALLS_PER_MINUTE
 from backend.plans import (COMPARE_MONTHS, monthly_fee_schedule, reference_delta,
                            to_plan_item, total_cost)
 
 
 class ServiceProcessTests(unittest.TestCase):
+    def test_full_benefit_suffix_wins_when_current_plan_is_mentioned(self):
+        """괄호 속 제휴명까지 말했으면 같은 본체의 다른 혜택 상품으로 바꾸지 않는다."""
+        from agent.data import find_plans_mentioned_in_text
+        from agent.agents.profiling import _repair_reference_plan_name
+
+        query = '현재 요금제가 TOP 11GB 기본 (CU할인) 이건데 이것보다 데이터 많은 걸 추천해줘'
+        mentioned = find_plans_mentioned_in_text(query)
+        self.assertTrue(mentioned)
+        self.assertEqual({plan['plan_name'] for plan in mentioned}, {'TOP 11GB 기본 (CU할인)'})
+
+        repaired = _repair_reference_plan_name(
+            UserProfile(reference_plan_name='TOP 11GB 기본'), query)
+        self.assertEqual(repaired.reference_plan_name, 'TOP 11GB 기본 (CU할인)')
+
+    def test_duplicate_exact_current_plan_asks_for_its_price_not_another_benefit(self):
+        """동일한 CU 상품의 가격만 다르면 CU를 찾았다고 알리고 납부액으로 구분한다."""
+        from agent.agents.recommend import _resolve_reference
+
+        profile = UserProfile(reference_plan_name='TOP 11GB 기본 (CU할인)')
+        reference, question = _resolve_reference(profile)
+        self.assertIsNone(reference)
+        self.assertIn('CU할인', question)
+        self.assertIn('7,700원', question)
+        self.assertIn('16,500원', question)
+        self.assertNotIn('네이버페이', question)
+
+        selected, question = _resolve_reference(profile.model_copy(update={'reference_fee_won': 7700}))
+        self.assertIsNone(question)
+        self.assertEqual(selected['plan_name'], 'TOP 11GB 기본 (CU할인)')
+        self.assertEqual(selected['discounted_fee'], 7700)
+
+    def test_price_only_reply_selects_the_ambiguous_current_plan(self):
+        """가격 확인 질문에 '월 7,700원짜리'라고만 답해도 예산이 아닌 현재 요금이다."""
+        from agent.agents.profiling import _apply_ambiguous_reference_fee_reply
+
+        profile = UserProfile(
+            reference_plan_name='TOP 11GB 기본 (CU할인)',
+            budget_max_won=7700,
+        )
+        fixed = _apply_ambiguous_reference_fee_reply(
+            profile,
+            '현재 요금제가 TOP 11GB 기본 (CU할인)이야\n월 7,700원짜리',
+        )
+        self.assertEqual(fixed.reference_fee_won, 7700)
+        self.assertIsNone(fixed.budget_max_won)
+
+    def test_all_empty_result_blocker_fields_are_relaxed_structurally(self):
+        """조건 풀기 버튼은 LLM 해석과 무관하게 모든 blocker 필드를 실제로 비운다."""
+        values = {
+            'budget_min_won': 10000, 'budget_max_won': 30000,
+            'min_data_gb': 100.0, 'max_data_gb': 10.0,
+            'data_unlimited': True, 'require_full_unlimited': True,
+            'min_qos_mbps': 5.0, 'requires_qos': True,
+            'min_tethering_gb': 50.0, 'min_voice_minutes': 300,
+            'voice_unlimited': True, 'sms_unlimited': True,
+            'carrier_type': 'MVNO', 'host_mno': 'KT', 'mvno_brand': 'KT엠모바일',
+            'network_gen': '5G', 'age_condition': '만 34세 이하',
+            'wanted_benefits': ['넷플릭스'],
+            'wanted_benefit_categories': ['영상/OTT'],
+            'min_discount_period_months': 24,
+        }
+        self.assertEqual(set(values), set(CONSTRAINT_LABELS))
+        profile = UserProfile(**values, hard_constraints=list(values))
+        relaxed = _apply_relaxed_fields(profile, list(values))
+        for field in values:
+            with self.subTest(field=field):
+                self.assertIsNone(getattr(relaxed, field))
+                self.assertNotIn(field, relaxed.hard_constraints)
+
+        widened = _apply_relaxed_fields(UserProfile(), ['include_mno'])
+        self.assertTrue(widened.include_mno)
+
+    def test_relaxed_data_condition_is_not_restored_from_current_plan(self):
+        """현재 요금제 비교의 자동 데이터 기준도 사용자가 풀면 다시 붙지 않아야 한다."""
+        from agent.agents.recommend import _with_reference_baseline
+
+        reference = {'data_unlimited': True, 'effective_unlimited': True}
+        restored = _with_reference_baseline(UserProfile(), reference)
+        self.assertTrue(restored.data_unlimited)
+        relaxed = _with_reference_baseline(UserProfile(), reference, ['data_unlimited'])
+        self.assertIsNone(relaxed.data_unlimited)
+
+    def test_recommend_api_passes_structured_relaxations_to_graph(self):
+        state = {'profile': UserProfile(), 'ranked': [], 'candidates': []}
+        with patch('backend.main.graph.invoke', return_value=state) as invoke:
+            response = self.client.post('/api/recommend', json={
+                'messages': [{'role': 'user', 'content': '요청 혜택 조건은 빼줘'}],
+                'relaxedFields': ['wanted_benefits'],
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(invoke.call_args.args[0]['relaxed_fields'], ['wanted_benefits'])
+
+    def test_typed_benefit_relaxation_clears_pending_question(self):
+        """직접 입력과 버튼 모두 혜택 유형을 빼고 추가 질문 없이 다시 추천한다."""
+        profile = UserProfile(
+            budget_max_won=40000,
+            wanted_benefit_categories=['스마트기기'],
+            hard_constraints=['budget_max_won', 'wanted_benefit_categories'],
+            needs_user_input=True,
+            followup_question=BENEFIT_PREFERENCE_QUESTION,
+            ambiguous=['benefit_preference'],
+        )
+        relaxed = _apply_relaxed_fields(profile, ['wanted_benefit_categories'])
+        self.assertIsNone(relaxed.wanted_benefit_categories)
+        self.assertFalse(relaxed.needs_user_input)
+        self.assertIsNone(relaxed.followup_question)
+        self.assertFalse(benefit_preference_missing(relaxed))
+        self.assertTrue(filter_candidates(relaxed.model_dump(exclude_none=True)))
+
+        state = {'profile': relaxed, 'ranked': [], 'candidates': []}
+        with patch('backend.main.graph.invoke', return_value=state) as invoke:
+            response = self.client.post('/api/recommend', json={
+                'messages': [
+                    {'role': 'user', 'content': '하루에 유튜브 한시간봐. 부가혜택을 중요시해. 월 4만원 이하'},
+                    {'role': 'assistant', 'content': '어떤 혜택을 찾으시나요?'},
+                    {'role': 'user', 'content': '스마트기기'},
+                    {'role': 'assistant', 'content': '조건에 맞는 요금제를 찾지 못했어요.'},
+                    {'role': 'user', 'content': '아니 혜택 유형을 빼고 다시 추천해달라고'},
+                ],
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(invoke.call_args.args[0]['relaxed_fields'], ['wanted_benefit_categories'])
+
+    def test_unrelated_questions_stay_in_chat_without_llm(self):
+        for question in ('손흥민 알아?', '52-4는 뭐야?', '한국의 수도가 어디야?', '나 너 좋아해'):
+            with self.subTest(question=question), patch('backend.main.graph.invoke') as invoke:
+                response = self.client.post('/api/recommend', json={
+                    'messages': [{'role': 'user', 'content': question}],
+                })
+                invoke.assert_not_called()
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()['conversationOnly'])
+            self.assertEqual(response.json()['conversationKind'], 'off_topic')
+            self.assertIn('요금제와 관련되지 않은 질문', response.json()['assistantMessage'])
+
+        with patch('backend.main.graph.invoke') as invoke:
+            response = self.client.post('/api/recommend', json={'messages': [
+                {'role': 'user', 'content': '월 3만원 이하로 추천해줘'},
+                {'role': 'assistant', 'content': '3개의 요금제를 찾았어요.'},
+                {'role': 'user', 'content': '손흥민 알아?'},
+            ]})
+            invoke.assert_not_called()
+        self.assertEqual(response.json()['conversationKind'], 'off_topic')
+
+        personal_chat = _quick_chat_response([
+            Message(role='user', content='월 3만원 이하로 추천해줘'),
+            Message(role='assistant', content='3개의 요금제를 찾았어요.'),
+            Message(role='user', content='나 너 좋아해'),
+        ])
+        self.assertEqual(personal_chat['assistantMessage'],
+                         '모모플랜은 휴대폰 요금제 비교를 도와드려요. 요금제와 관련되지 않은 질문에는 답할 수 없습니다.')
+
+        # 혜택 유형과 나이처럼 짧지만 실제로 추천에 필요한 답변은 계속 분석한다.
+        self.assertIsNone(_quick_chat_response([
+            Message(role='assistant', content=BENEFIT_PREFERENCE_QUESTION),
+            Message(role='user', content='교육'),
+        ]))
+        self.assertIsNone(_quick_chat_response([
+            Message(role='assistant', content='연령을 알려주세요.'),
+            Message(role='user', content='20대'),
+        ]))
+        self.assertIsNone(_quick_chat_response([
+            Message(role='user', content='축구 볼 때 데이터 많이 써. 요금제 추천해줘'),
+        ]))
+        self.assertIsNone(_quick_chat_response([
+            Message(role='user', content='하루 한시간 게임한다'),
+        ]))
+        self.assertEqual(_quick_chat_response([
+            Message(role='user', content='게임 추천해줘'),
+        ])['conversationKind'], 'off_topic')
+
+    def test_plan_information_question_confirms_scope_then_answers(self):
+        with patch('backend.main.graph.invoke') as invoke:
+            first = self.client.post('/api/recommend', json={
+                'messages': [{'role': 'user', 'content': '가장 싼 요금제가 뭐야?'}],
+            })
+            second = self.client.post('/api/recommend', json={
+                'messages': [
+                    {'role': 'user', 'content': '가장 싼 요금제가 뭐야?'},
+                    {'role': 'assistant', 'content': first.json()['assistantMessage']},
+                    {'role': 'user', 'content': '알뜰폰만'},
+                ],
+            })
+            third = self.client.post('/api/recommend', json={
+                'messages': [
+                    {'role': 'user', 'content': '가장 싼 요금제가 뭐야?'},
+                    {'role': 'assistant', 'content': first.json()['assistantMessage']},
+                    {'role': 'user', 'content': '알뜰폰만'},
+                    {'role': 'assistant', 'content': second.json()['assistantMessage']},
+                    {'role': 'user', 'content': '12개월 평균 비용으로'},
+                ],
+            })
+            network = self.client.post('/api/recommend', json={
+                'messages': [
+                    {'role': 'user', 'content': '5G 요금제 뭐 있어?'},
+                    {'role': 'assistant', 'content': first.json()['assistantMessage']},
+                    {'role': 'user', 'content': '알뜰폰만'},
+                ],
+            })
+            invoke.assert_not_called()
+        self.assertEqual(first.json()['conversationKind'], 'plan_info')
+        self.assertIn('범위', first.json()['assistantMessage'])
+        self.assertEqual(second.json()['conversationKind'], 'plan_info')
+        self.assertIn('어떤 기준으로 볼까요', second.json()['assistantMessage'])
+        self.assertIn('12개월 평균 비용 기준으로 가장 싼', third.json()['assistantMessage'])
+        self.assertIn('5G 요금제는', network.json()['assistantMessage'])
+
+    def test_latest_followup_can_remove_minimum_qos_constraint(self):
+        """0건 화면의 '조건 풀기' 문장이 이전 QoS 수치를 실제로 지워야 한다."""
+        conversation = (
+            '월 3만원 이하, 소진 후 속도 5Mbps 이상으로 추천해줘\n'
+            '소진 후 최소 속도 조건은 빼고 다시 추천해줘'
+        )
+        relaxed = _apply_explicit_qos_min(UserProfile(min_qos_mbps=5), conversation)
+        self.assertIsNone(relaxed.min_qos_mbps)
+
+        # 조건을 푼 뒤 사용자가 새 속도를 지정하면 가장 최신 수치가 다시 적용된다.
+        changed = _apply_explicit_qos_min(
+            relaxed,
+            conversation + '\n소진 후 속도 1Mbps 이상으로 다시 찾아줘',
+        )
+        self.assertEqual(changed.min_qos_mbps, 1)
+
+    def test_card_reason_hides_missing_data_notice(self):
+        from agent.agents.report import _clean_card_reason
+
+        reason = ('같은 가격대 후보보다 데이터가 많아 영상 시청에 유리합니다. '
+                  '다만 소진 후 속도는 미수집입니다. 정보 확인이 필요합니다.')
+        cleaned = _clean_card_reason(reason)
+        self.assertIn('영상 시청에 유리', cleaned)
+        self.assertNotIn('미수집', cleaned)
+        self.assertNotIn('확인', cleaned)
+
     def test_current_spec_is_not_a_catalog_product_name(self):
         from agent.data import find_plans_mentioned_in_text
         from agent.agents.profiling import _repair_reference_plan_name, _repair_general_comparison
@@ -45,6 +283,132 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertTrue(result['ranked'])
         self.assertTrue(all(_is_pareto_better(by_id[plan.plan_id], result['reference'])
                             for plan in result['ranked']))
+
+    def test_daily_allowance_plan_name_does_not_shrink_current_data(self):
+        """상품명의 11GB를 추출해도 월 11GB+매일 2GB를 11GB로 덮지 않는다."""
+        reference, question = _resolve_reference(UserProfile(
+            reference_plan_name='TOP 11GB 기본 (밀리의서재)',
+            reference_fee_won=16500,
+            reference_data_gb=11,
+        ))
+        self.assertIsNone(question)
+        self.assertEqual(reference['base_data_gb'], 11)
+        self.assertEqual(reference['data_gb'], 71)
+        delta = reference_delta(reference, reference)
+        self.assertEqual(delta['currentData'], '월 기본 11GB + 매일 2GB')
+        self.assertEqual(delta['candidateData'], '월 기본 11GB + 매일 2GB')
+        self.assertEqual(delta['dataDiffGb'], 0)
+
+    def test_report_uses_monthly_equivalent_for_daily_reference_plan(self):
+        """리포트 입력·문장 모두 일 제공형 현재 요금제를 11GB로 축소하지 않는다."""
+        from agent.agents.report import (
+            _current_plan_comparison, _repair_daily_reference_claim, _report_profile,
+        )
+
+        profile = UserProfile(
+            reference_plan_name='TOP 11GB 기본 (밀리의서재)',
+            reference_fee_won=16500,
+            reference_data_gb=11,
+        )
+        reference, question = _resolve_reference(profile)
+        self.assertIsNone(question)
+        context = _current_plan_comparison(reference)
+        self.assertEqual(context['monthly_equivalent_data_gb'], 71)
+        self.assertEqual(context['data_display'], '월 기본 11GB + 매일 2GB (30일 기준 월 환산 약 71GB)')
+        self.assertNotIn('reference_data_gb', _report_profile(profile))
+        repaired = _repair_daily_reference_claim(
+            '현재의 기본 11GB보다 많은 100GB를 쓰면서 소진 후 속도도 높습니다.', reference,
+        )
+        self.assertIn('현재 요금제의 월 환산 약 71GB보다 많은 100GB', repaired)
+
+    def test_reference_name_gb_is_not_a_new_minimum_and_goal_survives_fee_reply(self):
+        """상품명의 11GB를 후보 하한으로 쓰지 않고 최초의 '더 많은 데이터'를 보존한다."""
+        conversation = (
+            '현재 요금제가 TOP 11GB 기본 (밀리의서재) 이건데 이것보다 데이터 많고 '
+            '좋은 요금제 추천해줘\n월 16,500원이야'
+        )
+        parsed = UserProfile(
+            reference_plan_name='TOP 11GB 기본 (밀리의서재)',
+            reference_fee_won=16500,
+            reference_data_gb=11,
+            min_data_gb=11,
+        )
+        repaired = _repair_general_comparison(parsed, conversation)
+        repaired = _drop_reference_name_data_constraint(repaired, conversation)
+        self.assertEqual(repaired.comparison_goals, ['more_data'])
+        self.assertIsNone(repaired.min_data_gb)
+
+        result = recommend_node({'profile': repaired}, {})
+        self.assertEqual(len(result['candidates']), 401)
+        self.assertTrue(all(plan['data_gb'] > 71 for plan in result['candidates']))
+        self.assertEqual(result['reference_verdict']['status'], 'tradeoff')
+        self.assertEqual(result['reference_verdict']['goal'], 'more_data')
+        self.assertEqual(result['reference_verdict']['cheaperCount'], 0)
+
+    def test_explicit_data_amount_outside_reference_name_is_preserved(self):
+        profile = UserProfile(
+            reference_plan_name='TOP 11GB 기본 (밀리의서재)',
+            min_data_gb=50,
+        )
+        repaired = _drop_reference_name_data_constraint(
+            profile,
+            '현재 TOP 11GB 기본 (밀리의서재)를 쓰고 데이터 50GB 이상으로 추천해줘',
+        )
+        self.assertEqual(repaired.min_data_gb, 50)
+
+    def test_generic_good_plan_does_not_ask_for_benefit_type(self):
+        """'괜찮은 요금제'는 혜택 선호가 아니므로 추천 결과와 질문을 함께 보이지 않는다."""
+        query = (
+            '현재 요금제가 TOP 11GB 기본 (밀리의서재)이거인데 이것보다 데이터 많고 '
+            '괜찮은 요금제 추천해줘 월 가격은 7700원이야'
+        )
+        overasked = UserProfile(
+            reference_plan_name='TOP 11GB 기본 (밀리의서재)',
+            reference_fee_won=7700,
+            needs_user_input=True,
+            followup_question='어떤 혜택이 포함되면 좋겠나요?',
+            ambiguous=['benefit_preference'],
+        )
+        repaired = _drop_unrequested_benefit_followup(overasked, query)
+        self.assertFalse(repaired.needs_user_input)
+        self.assertIsNone(repaired.followup_question)
+        self.assertNotIn('benefit_preference', repaired.ambiguous)
+
+        # 반면 실제로 혜택의 좋고 나쁨을 묻는 요청은 추가 질문을 유지한다.
+        explicit_benefit = _drop_unrequested_benefit_followup(
+            overasked,
+            '현재 요금제보다 혜택이 더 괜찮은 요금제를 추천해줘',
+        )
+        self.assertTrue(explicit_benefit.needs_user_input)
+
+    def test_current_and_equivalent_benefit_variants_are_not_recommended(self):
+        """현재 상품 및 가격·핵심 스펙이 같은 혜택 변형은 추천 자리를 차지하지 않는다."""
+        reference, _ = _resolve_reference(
+            UserProfile(reference_plan_name='TOP 11GB 기본 (밀리의서재)', reference_fee_won=16500)
+        )
+        same = next(row for row in self.rows if row['plan_id'] == reference['plan_id'])
+        cu = next(row for row in self.rows
+                  if row['plan_name'] == 'TOP 11GB 기본 (CU할인)' and row['discounted_fee'] == 16500)
+        cheaper_cu = next(row for row in self.rows
+                          if row['plan_name'] == 'TOP 11GB 기본 (CU할인)' and row['discounted_fee'] == 7700)
+        self.assertTrue(_same_or_equivalent_to_reference(same, reference))
+        self.assertTrue(_same_or_equivalent_to_reference(cu, reference))
+        self.assertFalse(_same_or_equivalent_to_reference(cheaper_cu, reference))
+
+    def test_recommendation_pool_excludes_current_and_equivalent_variants(self):
+        """동일 상품 제거 규칙이 실제 추천 후보 구성에도 적용된다."""
+        result = recommend_node({'profile': UserProfile(
+            reference_plan_name='TOP 11GB 기본 (밀리의서재)',
+            reference_fee_won=16500,
+            user_age=30,
+        )}, {})
+        reference = result['reference']
+        self.assertIsNotNone(reference)
+        self.assertTrue(result['candidates'])
+        self.assertTrue(all(
+            not _same_or_equivalent_to_reference(candidate, reference)
+            for candidate in result['candidates']
+        ))
 
     def test_no_better_plan_means_keep_not_unknown(self):
         """'더 나은 게 있으면'에 우위 후보가 없으면 '비교 못 함'이 아니라 '유지'다.
@@ -115,8 +479,37 @@ class ServiceProcessTests(unittest.TestCase):
         # 할인 종료 시점과 그 이후 가격을 함께 준다. 그래프와 총비용은 같은 목록에서 나온다.
         self.assertEqual(delta['discountEndsAfterMonths'], row['discount_period_months'])
         self.assertEqual(delta['feeAfterDiscount'], row['monthly_fee'])
+        self.assertIsNone(delta['currentDiscountEndsAfterMonths'])
+        self.assertIsNone(delta['currentFeeAfterDiscount'])
         self.assertEqual(sum(point['candidate'] for point in delta['schedule']), delta['candidateTotal'])
         self.assertEqual(len(delta['schedule']), COMPARE_MONTHS)
+
+    def test_catalog_current_promo_schedule_is_used_for_12_month_total(self):
+        """현재 실납부액이 카탈로그 프로모션가와 같으면 종료 후 정상가도 총비용에 반영한다."""
+        from agent.agents.recommend import _with_current_facts
+
+        current_plan = next(
+            plan for plan in self.rows
+            if plan['plan_name'] == 'TOP 11GB 기본 (밀리의서재)'
+            and plan['discounted_fee'] == 7700
+        )
+        candidate = next(
+            plan for plan in self.rows
+            if plan['plan_name'] == 'A 5G 스페셜 슈퍼'
+        )
+        reference = _with_current_facts(
+            current_plan,
+            UserProfile(reference_plan_name=current_plan['plan_name'], reference_fee_won=7700),
+        )
+        self.assertEqual(reference['discount_period_months'], 7)
+        self.assertEqual(reference['monthly_fee'], 38500)
+        delta = reference_delta(reference, candidate)
+        self.assertEqual(delta['currentTotal'], 7700 * 7 + 38500 * 5)
+        self.assertEqual(delta['candidateTotal'], 6500 * 7 + 48420 * 5)
+        self.assertEqual(delta['totalDiff'], 41200)
+        self.assertEqual(delta['currentDiscountEndsAfterMonths'], 7)
+        self.assertEqual(delta['currentFeeAfterDiscount'], 38500)
+        self.assertNotIn('현재 요금제의 할인 종료 시점', delta['unknowns'])
 
     def test_report_gets_the_price_comparison_precomputed(self):
         """더 비싼 후보에 '더 저렴'이라고 쓰지 못하게 비교 결론을 코드가 넘긴다."""
@@ -513,6 +906,7 @@ class ServiceProcessTests(unittest.TestCase):
         # 어느 상태든 데이터로 알 수 없는 항목은 확인 안내로 남는다
         for verdict in (fee_only, empty, better, tradeoff):
             self.assertTrue(any('결합할인' in note for note in verdict['confirm']))
+            self.assertFalse(any('정보가 부족한 후보' in note for note in verdict['confirm']))
         self.assertIsNone(_reference_verdict(None, []))
 
     def test_current_fee_is_not_turned_into_a_budget_cap(self):
@@ -622,8 +1016,9 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(len(picked), TOP_N)
         characters = [_offer_character(by_id[d.plan_id]) for d in picked]
         self.assertEqual(len(set(characters)), TOP_N, characters)
-        # 다양화 없이 상위만 자르면 성격이 겹친다 — 이 테스트가 지키려는 회귀 지점이다
-        self.assertLess(len({_offer_character(by_id[d.plan_id]) for d in ordered[:TOP_N]}), TOP_N)
+        # 노출 개수가 바뀌어 원래 상위권이 이미 다양하더라도, 다양화가 이를 악화시키면 안 된다.
+        raw_characters = {_offer_character(by_id[d.plan_id]) for d in ordered[:TOP_N]}
+        self.assertGreaterEqual(len(set(characters)), len(raw_characters))
         # 순위 정합성과 중복 추천 검증을 그대로 통과해야 한다
         ranks = [d.smaa2_expected_rank for d in picked]
         self.assertEqual(ranks, sorted(ranks))

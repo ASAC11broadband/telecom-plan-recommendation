@@ -34,10 +34,10 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
-export function recommend(messages: ChatMessage[]) {
+export function recommend(messages: ChatMessage[], relaxedFields: string[] = []) {
   return call<RecommendResponse>('/api/recommend', {
     method: 'POST',
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, relaxedFields }),
   });
 }
 

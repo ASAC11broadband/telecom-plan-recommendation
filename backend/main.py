@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import json
 import logging
+import re
 import time
 from collections import deque
 from functools import lru_cache
@@ -22,7 +23,7 @@ from fastapi import FastAPI, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from agent.data import all_plans, get_plan, UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS
+from agent.data import all_plans, get_plan, normalize_benefit_category, UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS
 from agent.graph import graph
 from agent.state import get_llm
 from .plans import (
@@ -30,6 +31,7 @@ from .plans import (
     SORTS,
     apply_filters,
     facet_counts,
+    total_cost,
     to_plan_item,
     to_plan_items,
 )
@@ -51,6 +53,9 @@ class Message(BaseModel):
 class RecommendRequest(BaseModel):
     # 프론트가 대화 전체를 매번 보낸다. 서버는 상태를 갖지 않는다.
     messages: list[Message] = Field(..., min_length=1, max_length=40)
+    # 0건 결과의 "이 조건 풀기"로 사용자가 명시적으로 해제한 필드들.
+    # 서버가 허용 목록으로 다시 검증하므로 임의 필드는 프로필에 영향을 주지 않는다.
+    relaxedFields: list[str] = Field(default_factory=list, max_length=20)
 
 
 class AskRequest(BaseModel):
@@ -88,17 +93,221 @@ def _guard_llm_budget() -> None:
         _llm_calls.append(now)
 
 
+_RECOMMENDATION_ACTION_RE = re.compile(r"추천|골라\s*줘|비교해\s*줘|찾아\s*줘", re.IGNORECASE)
+_PLAN_INFORMATION_RE = re.compile(
+    r"(?:가장|제일)\s*(?:싼|저렴한|비싼)\s*(?:요금제|상품|플랜)"
+    r"|(?:최저가|최고가)\s*(?:요금제|상품|플랜)?"
+    r"|(?:5\s*g|lte)\s*(?:요금제|상품|플랜)\s*(?:뭐|무엇|어떤|있|알려)",
+    re.IGNORECASE,
+)
+_TELECOM_SIGNAL_RE = re.compile(
+    r"요금|통신|알뜰|데이터|기가|\b(?:gb|mb|tb|qos|mbps|lte|5\s*g)\b|"
+    r"소진|통화|문자|테더링|무제한|속도|가입|약정|위약금|유심|가성비|"
+    r"혜택|멤버십|스마트기기|스마트워치|태블릿|사은품|페이백|상품권|캐시백|"
+    r"음악|오디오|영상|스트리밍|도서|전자책|콘텐츠|OTT|"
+    r"프로모션|할인|저렴|싼\s*거|비싼\s*거|인터넷|유튜브|넷플릭스|"
+    r"디즈니|티빙|왓챠|쿠팡플레이|지니뮤직|멜론|청년|청소년|대학생|시니어|"
+    r"\b(?:SKT|KT|LGU\+?)\b|SK텔레콤|유플러스|"
+    r"\d[\d,]*\s*(?:만|천)?\s*원|\d[\d,]*\s*만",
+    re.IGNORECASE,
+)
+_ARITHMETIC_RE = re.compile(
+    r"^\s*[+-]?\d[\d,.]*\s*[+\-*/×xX]\s*[+-]?\d[\d,.]*"
+    r"(?:\s*(?:은|는|이|가))?\s*(?:뭐|무엇|얼마|계산)?"
+    r"(?:야|인가|예요|이야)?\s*\?*\s*$"
+)
+_SHORT_PLAN_REPLY_RE = re.compile(
+    r"^\s*(?:네|예|응|아니|아니요|맞아|좋아|괜찮아|상관없어|없어|모르겠어|"
+    r"그대로|그거|이거|둘\s*다|\d{1,2}\s*(?:대|살|세)|"
+    r"(?:하루|매일)\s*\d+(?:\.\d+)?\s*(?:분|시간))\s*[.!]?\s*$"
+)
+_GAME_USAGE_RE = re.compile(
+    r"(?:게임|포켓몬\s*GO|배틀그라운드|브롤스타즈|클래시\s*로얄|"
+    r"리그\s*오브\s*레전드|포트나이트|콜\s*오브\s*듀티|스타듀\s*밸리)"
+    r".{0,24}(?:하루|매일|\d+\s*(?:시간|분)|한다|해요|즐겨|플레이)"
+    r"|(?:하루|매일|\d+\s*(?:시간|분)).{0,24}"
+    r"(?:게임|포켓몬\s*GO|배틀그라운드|브롤스타즈|클래시\s*로얄|"
+    r"리그\s*오브\s*레전드|포트나이트|콜\s*오브\s*듀티|스타듀\s*밸리)",
+    re.IGNORECASE,
+)
+_BENEFIT_RELAX_RE = re.compile(
+    r"혜택\s*(?:유형|종류|카테고리)?\s*(?:조건)?\s*(?:은|을|는|이)?\s*"
+    r"(?:빼|제외|풀|없애|해제)"
+)
+_PLAN_INFO_SCOPE_QUESTION = (
+    "요금제 정보를 정확히 비교하려면 범위를 알려주세요. "
+    "알뜰폰만·통신 3사만·전체 중 어디를 볼까요? "
+    "최저가·최고가는 초기 월 요금과 12개월 평균 비용 중 어떤 기준으로 볼지도 알려주세요."
+)
+_PLAN_INFO_SCOPE_PREFIX = "요금제 정보를 정확히 비교하려면"
+_OFF_TOPIC_MESSAGE = (
+    "모모플랜은 휴대폰 요금제 비교를 도와드려요. "
+    "요금제와 관련되지 않은 질문에는 답할 수 없습니다."
+)
+
+
+def _conversation_only_response(kind: Literal["off_topic", "plan_info"], message: str) -> dict:
+    """추천 결과가 아니라 상담창에만 보여 줄 짧은 답변."""
+    return {
+        "conversationOnly": True,
+        "conversationKind": kind,
+        "assistantMessage": message,
+        "plans": [],
+        "needsMoreInput": False,
+        "candidateCount": 0,
+        "totalCount": len(_rows()),
+        "blockers": [],
+        "report": "",
+        "referencePlan": None,
+        "referenceFacts": None,
+        "referenceVerdict": None,
+        "trace": {"elapsedSeconds": 0, "evaluationAttempts": 0},
+        "profile": None,
+        "followupQuestion": None,
+        "assumptions": [],
+        "dataAsOf": _data_as_of(),
+        "unlimitedPolicy": {"minGb": UNLIMITED_MIN_GB, "qosMbps": UNLIMITED_QOS_MBPS},
+        "evaluation": None,
+    }
+
+
+def _plan_information_answer(intent: str, scope: str, metric: str) -> str:
+    """표시 가격이 아니라 청구액이 확인된 상품만 정보 답변에 쓴다."""
+    rows = [
+        row for row in _rows()
+        if row.get("billing_price_known")
+        and (scope == "전체" or row.get("carrier_type") == ("MVNO" if scope == "알뜰폰" else "MNO"))
+        and (intent not in ("5g", "lte") or str(row.get("network_gen", "")).upper() == intent.upper())
+    ]
+    if not rows:
+        return f"{scope} 범위에서 청구액이 확인된 요금제를 찾지 못했습니다."
+
+    value = (lambda row: total_cost(row) / COMPARE_MONTHS) if metric == "12개월 평균 비용" else (
+        lambda row: float(row["discounted_fee"])
+    )
+    reverse = intent == "expensive"
+    ordered = sorted(rows, key=lambda row: (value(row), str(row.get("plan_name", ""))), reverse=reverse)
+    if intent in ("5g", "lte"):
+        examples = ordered[:3]
+        names = ", ".join(
+            f"{row['plan_name']} ({value(row):,.0f}원/월)" for row in examples
+        )
+        return (
+            f"{scope}에서 청구액이 확인된 {intent.upper()} 요금제는 {len(rows):,}건입니다. "
+            f"{metric}이 낮은 순으로 보면 {names} 등이 있어요. "
+            "가입 자격과 할인 종료 시점은 상품별로 확인해 주세요."
+        )
+
+    chosen = ordered[0]
+    tie_count = sum(value(row) == value(chosen) for row in rows)
+    direction = "가장 비싼" if reverse else "가장 싼"
+    tie_note = f" 같은 금액인 상품은 {tie_count}건입니다." if tie_count > 1 else ""
+    return (
+        f"{scope} 중 {metric} 기준으로 {direction} 요금제는 "
+        f"{chosen['plan_name']} ({chosen.get('carrier') or chosen.get('mvno_brand')}, "
+        f"월 {value(chosen):,.0f}원)입니다.{tie_note} "
+        "프로모션 종료 후 요금과 가입 자격은 상세 정보에서 확인해 주세요."
+    )
+
+
+def _quick_chat_response(messages: list[Message]) -> dict | None:
+    """명백한 정보·무관 질문에는 추천 LLM을 호출하지 않는다."""
+    users = [message.content.strip() for message in messages if message.role == "user"]
+    if not users:
+        return None
+    latest = users[-1]
+    previous_assistant = next(
+        (message.content for message in reversed(messages[:-1]) if message.role == "assistant"), ""
+    )
+    pending_info = previous_assistant.startswith(_PLAN_INFO_SCOPE_PREFIX)
+    source_index = next(
+        (index for index in range(len(users) - 2, -1, -1)
+         if _PLAN_INFORMATION_RE.search(users[index])), None
+    ) if pending_info else None
+    source = users[source_index] if source_index is not None else ""
+    info_text = latest if _PLAN_INFORMATION_RE.search(latest) else source
+
+    if info_text and not _RECOMMENDATION_ACTION_RE.search(latest):
+        intent = "lte" if re.search(r"lte", info_text, re.IGNORECASE) else (
+            "5g" if re.search(r"5\s*g", info_text, re.IGNORECASE) else
+            "expensive" if re.search(r"비싼|최고가", info_text) else "cheapest"
+        )
+        combined = " ".join(users[source_index:]) if source_index is not None else latest
+        scope = (
+            "전체" if re.search(r"전체|모두|둘\s*다|3사도\s*포함", combined) else
+            "알뜰폰" if re.search(r"알뜰폰", combined) else
+            "통신 3사" if re.search(r"통신\s*3사|3사만", combined) else ""
+        )
+        metric = (
+            "12개월 평균 비용" if re.search(r"12\s*개월|1\s*년|연평균|평균\s*비용|총비용", combined) else
+            "초기 월 요금" if re.search(r"초기|첫\s*달|첫\s*월|월\s*요금", combined) else ""
+        )
+        if not scope:
+            message = _PLAN_INFO_SCOPE_QUESTION if not metric else (
+                f"{_PLAN_INFO_SCOPE_PREFIX} 알뜰폰만·통신 3사만·전체 중 어느 범위로 볼까요?"
+            )
+            return _conversation_only_response("plan_info", message)
+        if intent not in ("5g", "lte") and not metric:
+            return _conversation_only_response(
+                "plan_info",
+                f"{_PLAN_INFO_SCOPE_PREFIX} {scope} 범위에서 초기 월 요금과 "
+                "12개월 평균 비용 중 어떤 기준으로 볼까요?",
+            )
+        return _conversation_only_response(
+            "plan_info", _plan_information_answer(intent, scope, metric or "초기 월 요금")
+        )
+
+    # 요금제 단서가 없는 평서문도 서비스 밖이다. 다만 요금제 추가 질문에 대한
+    # 짧은 확인·나이·이용 시간 답변은 이어 받는다.
+    short_plan_reply = (
+        previous_assistant
+        and previous_assistant != _OFF_TOPIC_MESSAGE
+        and not previous_assistant.startswith(_PLAN_INFO_SCOPE_PREFIX)
+        and (
+            _SHORT_PLAN_REPLY_RE.fullmatch(latest)
+            or (
+                previous_assistant.startswith("어떤 혜택을 찾으시나요?")
+                and normalize_benefit_category(latest) is not None
+            )
+        )
+    )
+    if (
+        _ARITHMETIC_RE.fullmatch(latest)
+        or (not _TELECOM_SIGNAL_RE.search(latest)
+            and not _GAME_USAGE_RE.search(latest)
+            and not short_plan_reply)
+    ):
+        return _conversation_only_response("off_topic", _OFF_TOPIC_MESSAGE)
+    return None
+
+
+def _inferred_relaxed_fields(messages: list[Message]) -> list[str]:
+    """직접 입력한 혜택 조건 해제도 버튼과 같은 구조화된 필드로 전달한다."""
+    latest = next((message.content for message in reversed(messages) if message.role == "user"), "")
+    if not _BENEFIT_RELAX_RE.search(latest):
+        return []
+    if re.search(r"혜택\s*(?:유형|종류|카테고리)", latest):
+        return ["wanted_benefit_categories"]
+    return ["wanted_benefits", "wanted_benefit_categories"]
+
+
 @app.post("/api/recommend")
 def recommend(req: RecommendRequest) -> dict:
     """LLM 4단계 파이프라인. 20~60초 걸린다."""
+    quick_response = _quick_chat_response(req.messages)
+    if quick_response is not None:
+        return quick_response
     _guard_llm_budget()
     started = time.monotonic()
     history = [
         HumanMessage(content=m.content) if m.role == "user" else AIMessage(content=m.content)
         for m in req.messages
     ]
+    # 버튼이 보낸 정확한 필드가 있으면 그 값을 우선한다. 직접 입력한 문장에만
+    # 자연어 해제 판정을 적용해 다른 혜택 필드까지 뜻밖에 지우지 않는다.
+    relaxed_fields = list(dict.fromkeys(req.relaxedFields or _inferred_relaxed_fields(req.messages)))
     try:
-        state = graph.invoke({"messages": history})
+        state = graph.invoke({"messages": history, "relaxed_fields": relaxed_fields})
     except Exception as exc:  # LLM 장애·키 누락은 화면이 이유를 보여줘야 한다
         logging.getLogger(__name__).warning("추천 실패 (%s)", type(exc).__name__)
         raise HTTPException(status_code=502, detail="AI 추천에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.") from exc

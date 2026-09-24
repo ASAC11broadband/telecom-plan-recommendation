@@ -45,8 +45,6 @@ def _carrier_label(row: dict) -> str:
     parts = [row["carrier"]]
     if row["carrier_type"] == "MVNO" and row["host_mno"]:
         parts.append(f"{row['host_mno']}망")
-    if row.get("is_online_only"):
-        parts.append("온라인 전용")
     return " · ".join(str(p) for p in parts if p)
 
 
@@ -60,13 +58,31 @@ def _price_note(row: dict) -> str:
     return f"정가 {row['monthly_fee']:,}원 · {promo}"
 
 
+def _data_amount_label(value: float) -> str:
+    """1GB 미만은 사용자가 익숙한 MB 단위로 표시한다. 계산값은 GB 그대로 유지한다."""
+    amount = float(value)
+    if 0 <= amount < 1:
+        return f"{round(amount * 1000, 3):g}MB"
+    return f"{amount:g}GB"
+
+
 def _data_label(row: dict) -> str:
     """화면용 데이터 표기. row["data"] 는 QoS 를 문장에 섞어 두는데(프롬프트용),
-    화면에는 qos 칸이 따로 있어 그대로 쓰면 소진 후 속도가 두 번 나온다."""
+    화면에는 qos 칸이 따로 있어 그대로 쓰면 소진 후 속도가 두 번 나온다.
+
+    일 제공형의 data_gb 는 추천 계산을 위해 `월 기본량 + 일 제공량 * 30`으로 환산된
+    값이다. 계산값은 유지하되 화면에서는 원래 제공 구조를 다시 풀어 보여준다.
+    """
     if row.get("data_unlimited"):
         return "무제한"
     gb = row.get("data_gb")
-    return f"{gb:g}GB" if gb is not None else str(row.get("data") or "확인 필요")
+    daily_gb = row.get("daily_data_gb")
+    if daily_gb is not None and float(daily_gb) > 0 and gb is not None:
+        daily = float(daily_gb)
+        monthly_base = max(0.0, round(float(gb) - daily * 30, 6))
+        daily_label = f"매일 {_data_amount_label(daily)}"
+        return f"월 기본 {_data_amount_label(monthly_base)} + {daily_label}" if monthly_base > 0 else daily_label
+    return _data_amount_label(gb) if gb is not None else str(row.get("data") or "확인 필요")
 
 
 def _qos_label(row: dict) -> str:
@@ -88,8 +104,6 @@ def _tethering_label(row: dict) -> str:
 
 def _hashtags(row: dict, is_cheapest: bool = False) -> list[str]:
     tags = []
-    if row.get("is_online_only"):
-        tags.append("#온라인전용")
     if row.get("age_condition"):
         tags.append("#청년요금제" if "이하" in str(row["age_condition"]) else "#가입조건")
     if row.get("data_unlimited"):
@@ -108,13 +122,17 @@ def _hashtags(row: dict, is_cheapest: bool = False) -> list[str]:
     return tags
 
 
-def _benefit_text(row: dict, matched_benefits: list[str] | None = None) -> str:
+def _benefit_items(row: dict, matched_benefits: list[str] | None = None) -> list[str]:
     items = [b for b in (row.get("ott_options", "").split(" | ") if row.get("ott_options") else []) if b]
     items += [b for b in row.get("included_benefits", []) if b not in items]
     # 비교표에서는 사용자가 직접 요청한 조건과 일치하는 혜택을 앞에 고정한다.
     # 원본 순서의 앞 3개만 자르면 네 번째 이후의 필수 혜택이 사라질 수 있다.
     prioritized = [b for b in (matched_benefits or []) if b]
-    ordered = prioritized + [b for b in items if b not in prioritized]
+    return prioritized + [b for b in items if b not in prioritized]
+
+
+def _benefit_text(row: dict, matched_benefits: list[str] | None = None) -> str:
+    ordered = _benefit_items(row, matched_benefits)
     return " · ".join(ordered[:3]) if ordered else "부가 혜택 없음"
 
 
@@ -136,8 +154,9 @@ def reference_delta(reference: dict | None, row: dict, months: int = COMPARE_MON
     1. 모르는 값을 0으로 계산하지 않는다. 현재 납부액을 모르면 비용 차이는 None 이다.
     2. 위약금·결합할인 손실은 수집 데이터에 없다. 그래서 여기 나오는 차이는 '확정
        절약액'이 아니라 '요금만 비교한 차이'다 - `unknowns` 로 무엇이 빠졌는지 밝힌다.
-    3. 현재 청구액은 비교 구간 내내 유지된다고 가정한다(사용자의 현재 할인 종료 시점을
-       모른다). 가정은 `assumption` 으로 함께 내려보내 화면이 그대로 쓰게 한다.
+    3. 현재 요금제가 카탈로그의 동일 프로모션 가격으로 확인되면 그 할인 일정도 쓴다.
+       그 외의 사용자가 말한 현재 납부액은 종료 시점을 모르므로 비교 구간 내내 유지된다고
+       가정한다. 가정은 `assumption` 으로 함께 내려보내 화면이 그대로 쓰게 한다.
     """
     if not reference:
         return None
@@ -152,12 +171,20 @@ def reference_delta(reference: dict | None, row: dict, months: int = COMPARE_MON
 
     period = row.get("discount_period_months")
     is_promo = candidate_fee is not None and row.get("monthly_fee") is not None and candidate_fee < row["monthly_fee"]
+    current_period = reference.get("discount_period_months")
+    current_is_promo = (
+        current_fee is not None
+        and reference.get("monthly_fee") is not None
+        and current_fee < reference["monthly_fee"]
+    )
 
     current_gb = None if reference.get("data_unlimited") else reference.get("data_gb")
     candidate_gb = None if row.get("data_unlimited") else row.get("data_gb")
     data_diff = (candidate_gb - current_gb) if (current_gb is not None and candidate_gb is not None) else None
 
-    unknowns = ["해지 위약금", "결합·가족할인 손실", "현재 요금제의 할인 종료 시점"]
+    unknowns = ["해지 위약금", "결합·가족할인 손실"]
+    if not (current_is_promo and current_period is not None):
+        unknowns.append("현재 요금제의 할인 종료 시점")
     if current_fee is None:
         unknowns.insert(0, "현재 월 납부액")
     if candidate_schedule is None:
@@ -176,6 +203,10 @@ def reference_delta(reference: dict | None, row: dict, months: int = COMPARE_MON
         # 할인이 끝나는 달과 그 다음 달 요금. 할인이 없으면 둘 다 None 이다.
         "discountEndsAfterMonths": int(period) if (is_promo and period is not None) else None,
         "feeAfterDiscount": int(row["monthly_fee"]) if is_promo else None,
+        "currentDiscountEndsAfterMonths": (
+            int(current_period) if (current_is_promo and current_period is not None) else None
+        ),
+        "currentFeeAfterDiscount": int(reference["monthly_fee"]) if current_is_promo else None,
         "currentData": _data_label(reference),
         "candidateData": _data_label(row),
         "dataDiffGb": data_diff,
@@ -191,8 +222,13 @@ def reference_delta(reference: dict | None, row: dict, months: int = COMPARE_MON
             for index in range(months)
         ],
         "unknowns": unknowns,
-        "assumption": f"현재 월 납부액이 {months}개월 동안 그대로 유지된다고 가정한 비교입니다. "
-                      "위약금과 결합할인 손실은 수집 데이터에 없어 반영하지 않았습니다.",
+        "assumption": (
+            f"현재 요금제의 확인된 할인 일정과 후보 요금의 할인 일정을 반영한 {months}개월 비교입니다. "
+            "위약금과 결합할인 손실은 수집 데이터에 없어 반영하지 않았습니다."
+            if current_is_promo and current_period is not None
+            else f"현재 월 납부액이 {months}개월 동안 그대로 유지된다고 가정한 비교입니다. "
+                 "위약금과 결합할인 손실은 수집 데이터에 없어 반영하지 않았습니다."
+        ),
     }
 
 
@@ -257,6 +293,8 @@ def to_plan_item(
         "tetheringGb": row.get("tethering_gb"),
         "hash": _hashtags(row, is_cheapest),
         "benefit": _benefit_text(row, matched_benefits),
+        # 목록 카드는 접이식 영역에서 전체 혜택을 보여준다. benefit은 비교표의 짧은 요약용이다.
+        "benefits": _benefit_items(row, matched_benefits),
         "benefitValue": benefit_value,
         "benefitDeductible": deductible,
         # 제공 기간이 확인되지 않은 혜택이 섞여 있으면 월 환산액은 추정이다.
@@ -527,6 +565,10 @@ if __name__ == "__main__":
     assert _data_label({"data_unlimited": True, "data": "무제한 (QoS 1Mbps)"}) == "무제한"
     assert _data_label({"data_unlimited": False, "data_gb": 4.5, "data": "x"}) == "4.5GB"
     assert _data_label({"data_unlimited": False, "data_gb": 20.0, "data": "x"}) == "20GB"
+    assert _data_label({"data_unlimited": False, "data_gb": 0.499, "data": "x"}) == "499MB"
+    # 추천·필터에는 월 환산량을 쓰되 화면은 원래 제공 구조를 보여준다.
+    assert _data_label({"data_unlimited": False, "data_gb": 71.0, "daily_data_gb": 2.0}) == "월 기본 11GB + 매일 2GB"
+    assert _data_label({"data_unlimited": False, "data_gb": 150.0, "daily_data_gb": 5.0}) == "매일 5GB"
 
     one = get_plan(rows[0]["plan_id"])
     assert one is not None and one["plan_name"] == rows[0]["plan_name"]

@@ -193,11 +193,11 @@ UNLIMITED_QOS_MBPS = 10.0
 
 DATA_TIERS = {
     "unlimited_full": "기본량 무제한",
-    "qos_hd": "소진 후 HD",
-    "qos_sd": "소진 후 480p",
-    "qos_lite": "소진 후 저화질",
-    "qos_text": "소진 후 문자·웹",
-    "capped": "소진 후 정책 미확인",
+    "qos_hd": "5Mbps",
+    "qos_sd": "3Mbps",
+    "qos_lite": "1Mbps",
+    "qos_text": "400Kbps",
+    "capped": "QoS 없음",
 }
 
 
@@ -893,9 +893,19 @@ def find_plans_mentioned_in_text(text: str) -> list[dict]:
 
     names = _plans["plan_name"].fillna("").astype(str)
     stems = names.map(_plan_name_stem)
+    full_names = names.map(normalize_plan_name)
+
+    # 괄호 안 제휴명까지 사용자가 말했으면 전체 이름을 먼저 본다. stem부터 비교하면
+    # 'TOP 11GB 기본 (CU할인)'도 'TOP 11GB 기본'으로 잘려 네이버페이·밀리의서재 등
+    # 같은 본체를 가진 모든 변형이 잡히고, 데이터 순서상 첫 상품으로 잘못 교체된다.
+    full_mentioned = full_names.map(lambda key: len(key) >= 4 and key in text_key)
+    if full_mentioned.any():
+        longest = max(full_names[full_mentioned].map(len))
+        matched = _plans[full_mentioned & (full_names.map(len) == longest)]
+        return [_row_summary(row) for _, row in matched.iterrows()]
+
     # '데이터 100GB'라는 스펙을 '데이터100G(밀리의서재)+'라는 상품으로 오인하지 않는다.
     generic_spec = stems.str.fullmatch(r"(?:데이터)?\d+(?:g|gb|기가)(?:무제한)?", case=False)
-    full_names = names.map(normalize_plan_name)
     mentioned = stems.map(lambda key: len(key) >= 4 and key in text_key) & (
         ~generic_spec | full_names.map(lambda key: bool(key) and key in text_key)
     )
@@ -930,6 +940,9 @@ def _row_summary(r) -> dict:
         "mvno_brand": r["mvno_brand"] if pd.notna(r["mvno_brand"]) else "",
         "network_gen": r["network_gen"] if pd.notna(r["network_gen"]) else "",
         "data": data,
+        # 일 제공형은 data_gb가 월 환산 총량이다. 상품명 속 '11GB'를 현재 데이터로
+        # 잘못 추출했을 때 원래 월 기본량인지 판별할 수 있도록 원본도 보존한다.
+        "base_data_gb": float(r["base_data_gb"]) if pd.notna(r.get("base_data_gb")) else None,
         "data_gb": float(r["data_gb"]) if pd.notna(r["data_gb"]) else None,
         "data_unlimited": bool(r["data_unlimited"]),
         "data_tier": r["data_tier"],

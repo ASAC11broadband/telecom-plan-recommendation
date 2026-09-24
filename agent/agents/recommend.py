@@ -8,7 +8,8 @@ import math
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from ..data import DATA_TIERS, data_tier, is_effectively_unlimited, diagnose_empty, filter_candidates, find_plans_by_name
+from ..data import (DATA_TIERS, data_tier, is_effectively_unlimited, diagnose_empty,
+                    filter_candidates, find_plans_by_name, normalize_plan_name)
 from ..mcda import CRITERIA, COMPARE_MONTHS, _switching_monthly_fee, evaluate_mcda, rank_smaa2
 from ..schemas import ScoredPlan, UserProfile
 from ..state import PipelineState
@@ -41,9 +42,37 @@ def _reference_from_profile(profile: UserProfile) -> dict | None:
 def _with_current_facts(plan: dict, profile: UserProfile) -> dict:
     """카탈로그 가격보다 사용자가 알려준 현재 납부액·제공량을 우선한다."""
     facts = {key: value for key, value in (_reference_from_profile(profile) or {}).items() if value is not None}
+    # 'TOP 11GB 기본' 같은 상품명 숫자를 LLM이 reference_data_gb=11로 함께 추출할 수 있다.
+    # 이 상품은 실제로 월 11GB + 매일 2GB(월 환산 71GB)이므로 11로 덮으면 같은 상품끼리
+    # 60GB 증가한 것처럼 보인다. 카탈로그 월 기본량과 같고 일 제공량이 있으면 상품명에서
+    # 중복 추출된 값으로 보고 카탈로그 총량을 유지한다.
+    reported_data = facts.get("data_gb")
+    if (
+        reported_data is not None
+        and plan.get("daily_data_gb")
+        and plan.get("base_data_gb") is not None
+        and math.isclose(float(reported_data), float(plan["base_data_gb"]), rel_tol=0, abs_tol=1e-9)
+    ):
+        facts.pop("data_gb", None)
     current = {**plan, **facts}
     if profile.reference_fee_won is not None:
-        current.update(monthly_fee=profile.reference_fee_won, discount_period_months=None, billing_price_known=True)
+        # 사용자가 말한 현재 납부액이 카탈로그의 프로모션 월 요금과 정확히 같다면,
+        # 해당 상품의 정상가·할인 기간도 현재 계약의 확인 가능한 정보다. 이를 지우면
+        # '7,700원 × 12개월'처럼 이미 알려진 할인 종료를 무시한 총비용이 된다.
+        # 카탈로그에 없는 과거 가입가·개별 결합할인 금액일 때만 기간을 알 수 없으므로
+        # 사용자가 말한 금액이 계속 유지된다고 가정한다.
+        matches_catalog_discount = (
+            plan.get("billing_price_known") is not False
+            and plan.get("discounted_fee") == profile.reference_fee_won
+        )
+        if matches_catalog_discount:
+            current["billing_price_known"] = True
+        else:
+            current.update(
+                monthly_fee=profile.reference_fee_won,
+                discount_period_months=None,
+                billing_price_known=True,
+            )
     if profile.reference_data_gb is not None and profile.reference_data_unlimited is None:
         current['data_unlimited'] = False
     if profile.reference_voice_minutes is not None and profile.reference_voice_unlimited is None:
@@ -71,6 +100,25 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
     if len(matched) == 1:
         return _with_current_facts(matched[0], profile), None
 
+    # 같은 상품명이 서로 다른 프로모션 가격으로 여러 번 수집된 경우, 사용자가 현재
+    # 납부액을 알려주면 그 가격과 일치하는 상품을 바로 확정한다.
+    if profile.reference_fee_won is not None:
+        fee_matched = [
+            plan for plan in matched
+            if profile.reference_fee_won in (plan.get("discounted_fee"), plan.get("monthly_fee"))
+        ]
+        if len(fee_matched) == 1:
+            return _with_current_facts(fee_matched[0], profile), None
+        # 과거 가입가처럼 현재 카탈로그에 없는 납부액을 말해도, 상품명이 같고 통신
+        # 스펙이 모두 같다면 그 스펙을 기준으로 삼고 가격만 사용자가 말한 값으로 덮는다.
+        identity_fields = (
+            "data_gb", "data_unlimited", "qos_mbps", "voice_minutes",
+            "voice_unlimited", "network_gen", "carrier", "mvno_brand",
+        )
+        identities = {tuple(plan.get(field) for field in identity_fields) for plan in matched}
+        if len(identities) == 1:
+            return _with_current_facts(matched[0], profile), None
+
     spec_fields = (
         "discounted_fee",
         "data_gb",
@@ -83,6 +131,19 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
     specs = {tuple(plan.get(field) for field in spec_fields) for plan in matched}
     if len(specs) == 1:
         return _with_current_facts(matched[0], profile), None
+
+    names = {str(plan.get("plan_name") or "").strip() for plan in matched}
+    if len(names) == 1:
+        fees = sorted({
+            int(plan["discounted_fee"])
+            for plan in matched
+            if plan.get("discounted_fee") is not None
+        })
+        fee_choices = " 또는 ".join(f"월 {fee:,}원" for fee in fees)
+        return None, (
+            f"'{next(iter(names))}' 상품은 확인했습니다. 같은 이름에 가격 조건이 여러 개 있습니다. "
+            f"현재 실제 월 납부액이 {fee_choices} 중 어느 쪽인지 알려주세요."
+        )
 
     choices = ", ".join(
         f"{plan['plan_name']}({plan['carrier']}, 월 {plan['discounted_fee']:,}원)"
@@ -138,6 +199,39 @@ def _is_pareto_better(candidate: dict, reference: dict) -> bool:
     return no_worse and strictly_better
 
 
+def _same_or_equivalent_to_reference(candidate: dict, reference: dict | None) -> bool:
+    """현재 상품 자체와, 이름만 다른 실질적으로 동일한 혜택 변형을 추천에서 뺀다.
+
+    같은 이름은 다른 프로모션 행이어도 현재 가입 상품을 다시 권하는 셈이라 제외한다.
+    이름이 달라도 사업자·제공량·속도·통화·12개월 평균요금이 모두 같으면 혜택 포장만
+    다른 동급 상품으로 본다. 실제 요금이나 핵심 스펙이 좋아지면 남긴다.
+    """
+    if not reference or not reference.get("plan_name"):
+        return False
+    if candidate.get("plan_id") == reference.get("plan_id"):
+        return True
+    candidate_name = normalize_plan_name(candidate.get("plan_name"))
+    reference_name = normalize_plan_name(reference.get("plan_name"))
+    if candidate_name and candidate_name == reference_name:
+        return True
+
+    core_fields = (
+        "carrier", "carrier_type", "host_mno", "mvno_brand", "network_gen",
+        "data_gb", "data_unlimited", "daily_data_gb", "qos_mbps", "tethering_gb",
+        "voice_minutes", "voice_unlimited", "sms_unlimited",
+    )
+    if any(candidate.get(field) != reference.get(field) for field in core_fields):
+        return False
+    if not (_known_comparison_price(candidate) and _known_comparison_price(reference)):
+        return False
+    return math.isclose(
+        _switching_monthly_fee(candidate),
+        _switching_monthly_fee(reference),
+        rel_tol=0,
+        abs_tol=0.5,
+    )
+
+
 # 요금제 데이터만으로는 끝까지 알 수 없는 것들. 유지든 전환이든 사용자가 직접 확인해야 한다.
 REFERENCE_CONFIRM_NOTES = (
     "청구서의 실제 납부액은 요금제 정가와 다를 수 있습니다(단말 할부금·부가서비스 제외분).",
@@ -170,7 +264,11 @@ def _known_comparison_price(plan: dict) -> bool:
     return fee is not None and (regular is None or regular == fee or plan.get('discount_period_months') is not None)
 
 
-def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict | None:
+def _reference_verdict(
+    reference: dict | None,
+    candidates: list[dict],
+    comparison_goals: list[str] | None = None,
+) -> dict | None:
     """현재 요금제를 유지하는 게 나은지 — 코드로만 판정한다.
 
     세 상태를 구분한다. 특히 '판단 불가'를 '유지가 낫다'로 흘려보내지 않는다.
@@ -218,10 +316,7 @@ def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict |
     better = sum(1 for plan in comparable if _is_pareto_better(plan, reference))
     cheaper = sum(1 for plan in comparable
                   if _switching_monthly_fee(plan) < _switching_monthly_fee(reference))
-    unknown = len(candidates) - len(comparable)
     scope = f"확인된 요금·제공량과 {COMPARE_MONTHS}개월 평균요금 기준으로 "
-    if unknown:
-        confirm.append(f"정보가 부족한 후보 {unknown}건은 우열 비교에서 제외했습니다.")
     if better:
         return {
             "status": "switch",
@@ -229,6 +324,31 @@ def _reference_verdict(reference: dict | None, candidates: list[dict]) -> dict |
                 scope + f"현재 요금제보다 나쁘지 않고 최소 한 항목이 더 나은 후보가 {better}건 있습니다. 실제 전환 이익은 결합할인과 위약금 확인 후 판단해 주세요."
             ),
             "betterCount": better,
+            "cheaperCount": cheaper,
+            "missing": [],
+            "confirm": confirm,
+        }
+    explicit_goals = [
+        goal for goal in (comparison_goals or [])
+        if goal in {"cheaper", "more_data", "faster_qos"}
+    ]
+    if explicit_goals:
+        goal_labels = {
+            "cheaper": "더 저렴한 요금",
+            "more_data": "더 많은 데이터",
+            "faster_qos": "더 빠른 소진 후 속도",
+        }
+        requested = "·".join(goal_labels[goal] for goal in explicit_goals)
+        return {
+            "status": "tradeoff",
+            "goal": explicit_goals[0] if len(explicit_goals) == 1 else "multiple",
+            "reason": (
+                f"요청하신 {requested} 조건을 만족하는 후보는 찾았습니다. 다만 "
+                f"{COMPARE_MONTHS}개월 평균요금·데이터·소진 후 속도·통화를 함께 비교하면 "
+                "현재 요금제보다 모든 항목에서 나쁘지 않은 완전한 상위 호환 후보는 없습니다. "
+                "아래 추천은 원하는 개선점과 다른 조건 사이의 맞교환 후보입니다."
+            ),
+            "betterCount": 0,
             "cheaperCount": cheaper,
             "missing": [],
             "confirm": confirm,
@@ -313,7 +433,7 @@ def _prefer_network_generation(ordered: list, by_id: dict[str, dict], preference
 
 
 # 화면에 내보내는 추천 개수. 여기 한 곳만 바꾸면 선정·리포트·테스트가 모두 따라온다.
-TOP_N = 5
+TOP_N = 3
 
 
 def _diverse_selection(ordered: list, by_id: dict[str, dict], limit: int = TOP_N) -> list:
@@ -354,7 +474,11 @@ def _diverse_selection(ordered: list, by_id: dict[str, dict], limit: int = TOP_N
     return sorted(picked, key=lambda decision: position[decision.plan_id])
 
 
-def _with_reference_baseline(profile: UserProfile, reference: dict | None) -> UserProfile:
+def _with_reference_baseline(
+    profile: UserProfile,
+    reference: dict | None,
+    relaxed_fields: list[str] | None = None,
+) -> UserProfile:
     """기준 요금제가 있으면 그 제공량을 데이터 목표치의 기본값으로 삼는다.
 
     '지금 쓰는 무제한 요금제보다 싼 걸로'라고만 하면 데이터 조건이 비어 있어, 예산만
@@ -362,6 +486,11 @@ def _with_reference_baseline(profile: UserProfile, reference: dict | None) -> Us
     아니다. 사용자가 데이터 조건을 직접 말했으면 그 값을 그대로 둔다.
     """
     if reference is None:
+        return profile
+    # 0건 화면에서 데이터 조건을 직접 풀었다면 현재 요금제의 제공량을 기본 조건으로
+    # 곧바로 되살리지 않는다. 버튼으로 해제한 명시적 의도가 비교 기본값보다 우선한다.
+    data_fields = {"data_unlimited", "min_data_gb", "target_data_gb", "max_data_gb"}
+    if data_fields.intersection(relaxed_fields or []):
         return profile
     if any(
         value is not None
@@ -399,8 +528,12 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
 
     # 기준 요금제가 있으면 그 수준을 데이터 조건의 기본값으로 세운 뒤 후보를 거른다.
     # 필터가 아니라 점수에만 반영하면 "무제한보다 싼 것" 요청에 0.5GB 요금제가 살아남는다.
-    ranking_profile = _with_reference_baseline(profile, reference)
-    candidates = filter_candidates(ranking_profile.model_dump())
+    ranking_profile = _with_reference_baseline(profile, reference, state.get("relaxed_fields"))
+    candidates = [
+        candidate
+        for candidate in filter_candidates(ranking_profile.model_dump())
+        if not _same_or_equivalent_to_reference(candidate, reference)
+    ]
     compared = _apply_comparison(candidates, reference, profile.comparison_goals or [])
     # '현재보다 더 나은 것'은 방향 요청이지 필수 조건이 아니다. 우위 후보가 없을 때 후보를
     # 0건으로 만들면 "비교하지 못했습니다"가 되는데, 사실은 비교한 끝에 우위가 없는 것이다.
@@ -417,7 +550,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
             "ranked": [],
             "reference": reference,
             # 후보가 0건이어도 그것만으로 현재 요금제가 유리하다고 말하지 않는다.
-            "reference_verdict": _reference_verdict(reference, []),
+            "reference_verdict": _reference_verdict(reference, [], profile.comparison_goals),
             "blockers": blockers,
             "clarification_question": None,
             "messages": [AIMessage(content="조건을 만족하는 요금제가 없습니다.", name="recommend")],
@@ -479,7 +612,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
         },
         "ranked": ranked,
         "reference": reference,
-        "reference_verdict": _reference_verdict(reference, candidates),
+        "reference_verdict": _reference_verdict(reference, candidates, profile.comparison_goals),
         "blockers": [],
         "clarification_question": None,
         "messages": [
