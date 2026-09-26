@@ -14,7 +14,7 @@ from ..data import (
 )
 from ..schemas import UserProfile
 from ..state import PipelineState, feedback_block, get_profile_llm, user_query
-from ..usage import estimate_monthly_data_gb
+from ..usage import estimate_monthly_data_gb, required_qos_mbps
 
 
 # 값이 있으면 data.py에서 그대로 필터링할 명시 조건 필드다.
@@ -154,7 +154,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   영상 하루 약 1시간=video_1h, 영상 하루 약 2시간=video_2h,
   영상 하루 3시간 이상=video_3h_plus.
 - smartchoice_usage_pattern을 저장한 경우 generic_video나 daily_video_hours를 중복 저장하지 않는다.
-- 앱을 언급했다는 이유만으로 min_qos_mbps를 만들지 않는다. 사용자가 소진 후 속도를 직접 요구한 경우에만 저장한다.
+- 앱을 언급했다는 이유만으로 min_qos_mbps를 만들지 않는다. 사용자가 소진 후에도 해당 앱·화질을
+  이용하고 싶다고 직접 요구한 경우에만 앱·화질에 필요한 최소 속도를 저장한다.
 
 [기준 요금제·비교]
 - 현재·기존 요금제 이름은 reference_plan_name에 저장한다.
@@ -253,13 +254,17 @@ def _drop_phantom_budget(profile: UserProfile, query: str) -> UserProfile:
 # "3만원 이하" 는 30,000원까지 포함이다. LLM 이 'N만원대' 규칙(N9,999)을 섞어 쓰면서
 # 정확히 30,000원인 상품 8건이 조용히 탈락한다. 상한은 코드로 못 박는다.
 _BUDGET_MAX_RE = re.compile(
-    r"([\d,]+(?:\.\d+)?)\s*(만원|천원|원)\s*(?:이하|까지|안(?:쪽)?|미만)", re.IGNORECASE
+    r"(?:(?P<amount>[\d,]+(?:\.\d+)?)\s*(?P<unit>만원|천원|원)|"
+    r"(?P<implicit_unit>(?<![가-힣\d,])(?:만원|천원)))"
+    r"\s*(?:이하|까지|안(?:쪽)?|미만)",
+    re.IGNORECASE,
 )
 _BUDGET_UNIT = {"만원": 10_000, "천원": 1_000, "원": 1}
 
 # 하한을 말하는 표현. 'N만원대'는 하한과 상한을 동시에 뜻하므로 여기 포함한다.
 _BUDGET_MIN_RE = re.compile(
-    r"[\d,]+(?:\.\d+)?\s*(?:만원|천원|원)\s*(?:이상|부터|넘|초과)"
+    r"(?:[\d,]+(?:\.\d+)?\s*(?:만원|천원|원)|"
+    r"(?<![가-힣\d,])(?:만원|천원))\s*(?:이상|부터|넘|초과)"
     r"|[\d,]+\s*만원\s*대"
     r"|최소\s*[\d,]+\s*(?:만원|천원|원)",
     re.IGNORECASE,
@@ -276,7 +281,9 @@ def _repair_budget_bounds(profile: UserProfile, query: str) -> UserProfile:
     updates: dict[str, object] = {}
     matches = list(_BUDGET_MAX_RE.finditer(query or ""))
     if matches:
-        amount, unit = matches[-1].group(1).replace(",", ""), matches[-1].group(2)
+        match = matches[-1]
+        amount = (match.group("amount") or "1").replace(",", "")
+        unit = match.group("unit") or match.group("implicit_unit")
         limit = int(float(amount) * _BUDGET_UNIT[unit])
         # '미만'만 경계를 뺀다. '이하/까지'는 그 금액을 포함한다.
         if matches[-1].group(0).rstrip().endswith("미만"):
@@ -425,6 +432,124 @@ _QOS_MIN_RELAX_RE = re.compile(
     r"(?:빼|제외|삭제|해제|없애|풀)",
     re.IGNORECASE,
 )
+
+_POST_EXHAUSTION_APP_INTENT_RE = re.compile(
+    r"(?:데이터\s*)?소진\s*후|qos|"
+    r"데이터.{0,10}?(?:다\s*)?(?:쓰고|써도|쓴\s*뒤|사용한\s*뒤|사용해도)|"
+    r"기본\s*제공량.{0,10}?(?:다\s*)?(?:쓰|사용)",
+    re.IGNORECASE,
+)
+_QOS_SERVICE_PATTERNS = (
+    ("youtube", re.compile(r"유튜브|youtube", re.IGNORECASE)),
+    ("netflix", re.compile(r"넷플릭스|netflix", re.IGNORECASE)),
+    ("disney_plus", re.compile(r"디즈니\s*(?:플러스|\+)|disney\s*\+?", re.IGNORECASE)),
+    ("tiktok", re.compile(r"틱톡|tiktok", re.IGNORECASE)),
+    ("instagram_reels", re.compile(r"인스타(?:그램)?\s*릴스|릴스", re.IGNORECASE)),
+    ("instagram", re.compile(r"인스타그램|instagram", re.IGNORECASE)),
+    ("spotify", re.compile(r"스포티파이|spotify", re.IGNORECASE)),
+    ("google_maps", re.compile(r"구글\s*지도|내비게이션|google\s*maps?", re.IGNORECASE)),
+    ("zoom", re.compile(r"줌|zoom", re.IGNORECASE)),
+    ("whatsapp", re.compile(r"왓츠앱|whatsapp", re.IGNORECASE)),
+)
+
+
+def _qos_mode_from_text(service: str, text: str) -> str | None:
+    """소진 후 이용 문장에서 앱별 화질·모드를 정규화한다."""
+    if service == "youtube":
+        if re.search(r"4k|uhd", text, re.IGNORECASE):
+            return "uhd_4k"
+        if re.search(r"1440p", text, re.IGNORECASE):
+            return "fullhd_1440p"
+        if re.search(r"1080p|fhd|full\s*hd", text, re.IGNORECASE):
+            return "fhd_1080p"
+        if re.search(r"720p|(?:^|\W)hd(?:\W|$)|고화질", text, re.IGNORECASE):
+            return "hd_720p"
+        if re.search(r"480p|(?:^|\W)sd(?:\W|$)|표준\s*화질", text, re.IGNORECASE):
+            return "sd_480p"
+        if re.search(r"240p|저화질", text, re.IGNORECASE):
+            return "low_240p"
+    elif service == "netflix":
+        if re.search(r"4k|uhd", text, re.IGNORECASE):
+            return "uhd_4k"
+        if re.search(r"1080p|fhd|full\s*hd", text, re.IGNORECASE):
+            return "fhd_1080p"
+        if re.search(r"(?:^|\W)hd(?:\W|$)|고화질", text, re.IGNORECASE):
+            return "hd"
+        if re.search(r"(?:^|\W)sd(?:\W|$)|표준\s*화질", text, re.IGNORECASE):
+            return "sd"
+        if re.search(r"저화질", text, re.IGNORECASE):
+            return "low"
+    elif service == "disney_plus":
+        if re.search(r"4k|uhd", text, re.IGNORECASE):
+            return "uhd_4k"
+        if re.search(r"라이브|실시간", text, re.IGNORECASE):
+            return "live"
+    elif service == "tiktok":
+        return "hd" if re.search(r"(?:^|\W)hd(?:\W|$)|고화질", text, re.IGNORECASE) else None
+    elif service == "instagram":
+        if re.search(r"라이브", text, re.IGNORECASE):
+            return "live"
+        if re.search(r"사진\s*피드|피드", text, re.IGNORECASE):
+            return "photo_feed"
+    elif service == "spotify":
+        if re.search(r"무손실|hi-?fi|lossless", text, re.IGNORECASE):
+            return "lossless_hifi"
+        if re.search(r"320\s*kbps|매우\s*높", text, re.IGNORECASE):
+            return "very_high_320kbps"
+    elif service == "google_maps":
+        if re.search(r"위성", text, re.IGNORECASE):
+            return "satellite"
+        if re.search(r"스트리트\s*뷰", text, re.IGNORECASE):
+            return "street_view"
+    elif service == "zoom":
+        if re.search(r"1080p|fhd|full\s*hd", text, re.IGNORECASE):
+            return "fhd_1080p"
+        if re.search(r"그룹.{0,5}hd|hd.{0,5}그룹", text, re.IGNORECASE):
+            return "group_hd"
+        if re.search(r"오디오|음성", text, re.IGNORECASE):
+            return "audio_only"
+    elif service == "whatsapp":
+        if re.search(r"그룹\s*영상", text, re.IGNORECASE):
+            return "group_video"
+        if re.search(r"영상\s*통화", text, re.IGNORECASE):
+            return "one_to_one_video"
+    return None
+
+
+def _apply_usage_based_qos(profile: UserProfile, query: str) -> UserProfile:
+    """소진 후 앱 이용 의도가 명시된 경우에만 앱·화질의 최소 QoS를 적용한다."""
+    text = query or ""
+    intents = list(_POST_EXHAUSTION_APP_INTENT_RE.finditer(text))
+    relaxations = list(_QOS_MIN_RELAX_RE.finditer(text))
+    if not intents or (relaxations and relaxations[-1].start() > intents[-1].start()):
+        return profile
+
+    requirements: list[float] = []
+    matched_service = False
+    unresolved_service = False
+    for service, pattern in _QOS_SERVICE_PATTERNS:
+        if not pattern.search(text):
+            continue
+        matched_service = True
+        required = required_qos_mbps(service, _qos_mode_from_text(service, text))
+        if required is not None:
+            requirements.append(required)
+        else:
+            unresolved_service = True
+
+    # 공식 수치를 찾지 못한 앱·모드는 임의 Mbps를 만들지 않는다. 다만 사용자가
+    # 소진 후 이용 자체를 요구했으므로 QoS 제공 여부만 필수로 남긴다.
+    if unresolved_service or (not matched_service and re.search(r"영상|동영상", text, re.IGNORECASE)):
+        return profile.model_copy(update={"min_qos_mbps": None, "requires_qos": True})
+    if not requirements:
+        return profile
+
+    return profile.model_copy(
+        update={
+            "min_qos_mbps": max(requirements),
+            "requires_qos": True,
+        }
+    )
 
 
 def _smartchoice_usage_pattern(query: str) -> str | None:
@@ -866,6 +991,8 @@ def core_signal_missing(profile: UserProfile | None) -> bool:
             profile.daily_video_hours,
             profile.daily_shortform_hours,
             profile.daily_game_hours,
+            profile.min_qos_mbps,
+            profile.requires_qos,
             profile.reference_data_gb,
         )
     )
@@ -1052,6 +1179,8 @@ _REPAIRS = (
     _apply_explicit_qos_requirement,
     _apply_benefit_preference_question,
     _drop_unrequested_benefit_followup,
+    # 앱·화질 추정값보다 바로 뒤의 명시적 Mbps 설정/해제가 최종 우선권을 갖는다.
+    _apply_usage_based_qos,
     _apply_explicit_qos_min,
     _apply_explicit_data_max,
     _apply_smartchoice_usage_rule,

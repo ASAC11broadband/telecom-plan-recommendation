@@ -33,12 +33,21 @@ const detailIdFromHash = () => new URLSearchParams(window.location.hash.split('?
 const SESSION_KEY = 'momoplan-session-v1';
 const MAX_COMPARE_PLANS = 5;
 const BENEFIT_RELAX_RE = /혜택\s*(?:유형|종류|카테고리)?\s*(?:조건)?\s*(?:은|을|는|이)?\s*(?:빼|제외|풀|없애|해제)/;
+const BUDGET_RELAX_RE = /(?:예산|가격|월\s*요금)\s*(상한|하한)?\s*(?:조건)?\s*(?:은|는|을|를)?\s*(?:빼|제외|삭제|해제|없애|풀)/;
+const BUDGET_SET_RE = /\d[\d,]*(?:\.\d+)?\s*(?:만|천)?\s*원\s*(?:이하|이내|미만|이상|부터|까지)/;
 const SPECIFIC_BENEFIT_RE = /스마트기기|스마트워치|태블릿|OTT|넷플릭스|유튜브\s*프리미엄|음악|오디오|도서|밀리의서재|멤버십|페이백|추가\s*데이터/i;
-function benefitRelaxFields(text: string): string[] {
-  if (!BENEFIT_RELAX_RE.test(text)) return [];
-  return /혜택\s*(?:유형|종류|카테고리)/.test(text)
-    ? ['wanted_benefit_categories']
-    : ['wanted_benefits', 'wanted_benefit_categories'];
+function conditionRelaxFields(text: string): string[] {
+  const fields: string[] = [];
+  if (BENEFIT_RELAX_RE.test(text)) {
+    fields.push(...(/혜택\s*(?:유형|종류|카테고리)/.test(text)
+      ? ['wanted_benefit_categories']
+      : ['wanted_benefits', 'wanted_benefit_categories']));
+  }
+  const budget = BUDGET_RELAX_RE.exec(text);
+  if (budget?.[1] === '상한') fields.push('budget_max_won');
+  else if (budget?.[1] === '하한') fields.push('budget_min_won');
+  else if (budget) fields.push('budget_min_won', 'budget_max_won');
+  return Array.from(new Set(fields));
 }
 const DEFAULT_BROWSE_STATE: BrowseState = {
   category: 'all',
@@ -145,17 +154,21 @@ export default function App() {
     if (loading) return;
     const version = ++requestVersion.current;
     const next: ChatMessage[] = [...messages, { role: 'user', content: text }];
-    const inferredBenefitRelaxations = benefitRelaxFields(text);
-    const newSpecificBenefit = inferredBenefitRelaxations.length === 0 && SPECIFIC_BENEFIT_RE.test(text);
-    const retainedBenefitRelaxations = newSpecificBenefit
-      ? []
-      : relaxedFields.filter(field => field === 'wanted_benefits' || field === 'wanted_benefit_categories');
+    const inferredRelaxations = conditionRelaxFields(text);
+    const newSpecificBenefit = !inferredRelaxations.some(field => field.startsWith('wanted_benefit'))
+      && SPECIFIC_BENEFIT_RE.test(text);
+    const newBudgetConstraint = BUDGET_SET_RE.test(text);
+    const retainedRelaxations = relaxedFields.filter(field => {
+      if (field === 'wanted_benefits' || field === 'wanted_benefit_categories') return !newSpecificBenefit;
+      if (field === 'budget_min_won' || field === 'budget_max_won') return !newBudgetConstraint;
+      return false;
+    });
     // 조건 풀기 버튼끼리는 누적하고, 사용자가 새 문장을 직접 보내면 새 의도를 우선해 초기화한다.
     const nextRelaxedFields = relaxField
       ? Array.from(new Set([...relaxedFields, relaxField]))
       : preserveRelaxations
         ? relaxedFields
-        : Array.from(new Set([...retainedBenefitRelaxations, ...inferredBenefitRelaxations]));
+        : Array.from(new Set([...retainedRelaxations, ...inferredRelaxations]));
     const before = result;
     setMessages(next);
     setRelaxedFields(nextRelaxedFields);
