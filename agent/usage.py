@@ -1,5 +1,26 @@
 """앱·화질별 이용 시간 또는 스마트초이스 생활패턴으로 월 데이터량을 추정한다."""
 
+
+SPECIFIC_GAME_GB_PER_HOUR = {
+    "casual_game": 0.015,
+    "pokemongo_game": 0.035,
+    "moba_game": 0.075,
+    "battle_royale_game": 0.075,
+    "league_of_legend_game": 0.075,
+    "battleground_game": 0.06,
+    "clashroyale_game": 0.03,
+    "online_rpg_game": 0.045,
+    "fortnite_game": 0.125,
+    "callofduty_game": 0.2,
+    "brawlstars_game": 0.05,
+    "stardewvalley_game": 0.03,
+}
+# 게임명이 없을 때는 위의 구체 게임 12종을 동일 가중치로 산술평균한다.
+AVERAGE_MOBILE_GAME_GB_PER_HOUR = round(
+    sum(SPECIFIC_GAME_GB_PER_HOUR.values()) / len(SPECIFIC_GAME_GB_PER_HOUR),
+    3,
+)
+
 USAGE_PROFILES_GB_PER_HOUR = {
     "youtube": {"low_240p": 0.2, "sd_480p": 0.6, "hd_720p": 1.95, "fullhd_1440p": 8.5, "uhd_4k": 15.0},
     "netflix": {"low": 0.3, "sd": 0.7, "hd": 3.0, "uhd_4k": 7.0},
@@ -11,21 +32,43 @@ USAGE_PROFILES_GB_PER_HOUR = {
     "google_maps": {"navigation": 0.005, "street_view": 0.05, "satellite": 0.15},
     "zoom": {"audio_only": 0.035, "one_to_one_sd": 0.54, "group_hd": 2.5},
     "whatsapp": {"text_voice": 0.04, "one_to_one_video": 0.25, "group_video": 0.5},
-    "mobile_game": {"typical": 0.055},
-    "casual_game": {"typical": 0.015},
-    "pokemongo_game": {"typical": 0.035},
-    "moba_game": {"typical": 0.075},
-    "battle_royale_game": {"typical": 0.075},
-    "league_of_legend_game": {"typical": 0.075},
-    "battleground_game": {"typical": 0.06},
-    "clashroyale_game": {"typical": 0.03},
-    "online_rpg_game": {"typical": 0.045},
-    "fortnite_game": {"typical": 0.125},
-    "callofduty_game": {"typical": 0.2},
-    "brawlstars_game": {"typical": 0.05},
-    "stardewvalley_game": {"typical": 0.03},
+    "mobile_game": {"typical": AVERAGE_MOBILE_GAME_GB_PER_HOUR},
+    **{
+        service: {"typical": gb_per_hour}
+        for service, gb_per_hour in SPECIFIC_GAME_GB_PER_HOUR.items()
+    },
     "generic_video": {"standard": 1.8},
     "generic_shortform": {"standard": 0.9},
+}
+
+# 공식 권장 속도를 확인할 수 있는 서비스만 저장한다. DB에 정확한 속도 단계가 없으면
+# 권장 속도 이상인 다음 QoS 단계로 올린다(예: 1.1Mbps -> 3Mbps).
+# 10Mbps를 넘는 값은 현재 DB에서 일치 상품이 없으므로 해당 화질을 보장하지 않는다.
+# 확인일: 2026-09-26
+# YouTube: https://support.google.com/youtube/answer/78358
+# Netflix: https://help.netflix.com/en/node/306
+# Disney+: https://help.disneyplus.com/article/disneyplus-en-ph-recommended-speeds
+# Zoom: https://support.zoom.com/hc/en/article?id=zm_kb&sysparm_article=KB0058323
+# Spotify: https://support.spotify.com/au/article/audio-quality/
+USAGE_REQUIRED_QOS_MBPS = {
+    "youtube": {
+        "sd_480p": 3.0,
+        "hd_720p": 3.0,
+        "fhd_1080p": 5.0,
+        "uhd_4k": 20.0,
+    },
+    "netflix": {"hd": 3.0, "fhd_1080p": 5.0, "uhd_4k": 15.0},
+    "disney_plus": {"automatic_hd": 5.0, "live": 10.0, "uhd_4k": 25.0},
+    "spotify": {
+        "normal_96kbps": 0.4,
+        "very_high_320kbps": 0.4,
+    },
+    "zoom": {
+        "audio_only": 0.4,
+        "one_to_one_sd": 3.0,
+        "group_hd": 3.0,
+        "fhd_1080p": 5.0,
+    },
 }
 
 SMARTCHOICE_USAGE_RANGES_GB = {
@@ -47,6 +90,15 @@ DEFAULT_USAGE_MODE = {
     "callofduty_game": "typical", "brawlstars_game": "typical", "stardewvalley_game": "typical",
     "generic_video": "standard", "generic_shortform": "standard",
 }
+
+
+def required_qos_mbps(service: str, mode: str | None = None) -> float | None:
+    """앱과 화질에 맞는 소진 후 최소 속도를 반환한다."""
+    modes = USAGE_REQUIRED_QOS_MBPS.get(service)
+    if not modes:
+        return None
+    selected_mode = mode or DEFAULT_USAGE_MODE.get(service)
+    return modes.get(selected_mode or "")
 
 USAGE_MODE_LABELS = {
     "low_240p": "저화질 240p", "sd_480p": "SD 480p", "hd_720p": "HD 720p",
@@ -78,7 +130,8 @@ QUALITY_BASED_SERVICES = {
     "youtube", "netflix", "disney_plus", "tiktok", "instagram", "instagram_reels", "zoom"
 }
 DAYS_PER_MONTH = 30
-BUFFER_RATE = 1.1
+# 앱 사용시간으로 포착되지 않는 웹 서핑·메신저 등의 월 기본 사용량.
+BASELINE_GENERAL_DATA_GB = 7.0
 
 
 def estimate_monthly_data_gb(
@@ -145,29 +198,25 @@ def estimate_monthly_data_gb(
 
     if default_mode_labels:
         notes.insert(0, f"화질을 별도로 말씀하지 않아 {', '.join(default_mode_labels)} 기준으로 계산")
-    estimated = round(total * BUFFER_RATE, 1)
-    notes.append(
-        "말씀하신 활동 외에도 메신저, 웹 검색, 지도 등 일상적인 데이터 사용을 "
-        f"고려해 10%를 추가하여 월 약 {estimated:g}GB로 예상"
-    )
+    estimated = round(total + BASELINE_GENERAL_DATA_GB, 1)
     return float(estimated), notes
 
 
 if __name__ == "__main__":
     youtube, youtube_notes = estimate_monthly_data_gb(daily_usage_hours={"youtube": 1})
-    assert youtube == 64.4, (youtube, youtube_notes)
+    assert youtube == 65.5, (youtube, youtube_notes)
     assert any("HD 720p" in note for note in youtube_notes)
-    assert any("일상적인 데이터 사용" in note and "10%" in note for note in youtube_notes)
+    assert not any("10%" in note for note in youtube_notes)
 
     netflix_4k, _ = estimate_monthly_data_gb(
         daily_usage_hours={"netflix": 1}, usage_modes={"netflix": "uhd_4k"}
     )
-    assert netflix_4k == 231.0, netflix_4k
+    assert netflix_4k == 217.0, netflix_4k
 
     no_duplicate, _ = estimate_monthly_data_gb(
         daily_video_hours=2, daily_usage_hours={"youtube": 1}
     )
-    assert no_duplicate == 64.4, no_duplicate
+    assert no_duplicate == 65.5, no_duplicate
 
     smartchoice, smartchoice_notes = estimate_monthly_data_gb(smartchoice_usage_pattern="video_2h")
     assert smartchoice == 80.0 and "50~80GB" in smartchoice_notes[0]

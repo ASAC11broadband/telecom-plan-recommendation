@@ -134,12 +134,15 @@ _BENEFIT_RELAX_RE = re.compile(
     r"혜택\s*(?:유형|종류|카테고리)?\s*(?:조건)?\s*(?:은|을|는|이)?\s*"
     r"(?:빼|제외|풀|없애|해제)"
 )
-_PLAN_INFO_SCOPE_QUESTION = (
-    "요금제 정보를 정확히 비교하려면 범위를 알려주세요. "
-    "알뜰폰만·통신 3사만·전체 중 어디를 볼까요? "
-    "최저가·최고가는 초기 월 요금과 12개월 평균 비용 중 어떤 기준으로 볼지도 알려주세요."
+_BUDGET_RELAX_RE = re.compile(
+    r"(?:예산|가격|월\s*요금)\s*(?P<bound>상한|하한)?\s*(?:조건)?\s*"
+    r"(?:은|는|을|를)?\s*(?:빼|제외|삭제|해제|없애|풀)",
+    re.IGNORECASE,
 )
-_PLAN_INFO_SCOPE_PREFIX = "요금제 정보를 정확히 비교하려면"
+_PLAN_INFO_SCOPE_QUESTION = (
+    "알뜰폰, 통신 3사, 전체 요금제 중 어떤 범위에서 찾아볼까요?"
+)
+_PLAN_INFO_SCOPE_PREFIX = "알뜰폰, 통신 3사, 전체 요금제 중"
 _OFF_TOPIC_MESSAGE = (
     "모모플랜은 휴대폰 요금제 비교를 도와드려요. "
     "요금제와 관련되지 않은 질문에는 답할 수 없습니다."
@@ -238,23 +241,10 @@ def _quick_chat_response(messages: list[Message]) -> dict | None:
             "알뜰폰" if re.search(r"알뜰폰", combined) else
             "통신 3사" if re.search(r"통신\s*3사|3사만", combined) else ""
         )
-        metric = (
-            "12개월 평균 비용" if re.search(r"12\s*개월|1\s*년|연평균|평균\s*비용|총비용", combined) else
-            "초기 월 요금" if re.search(r"초기|첫\s*달|첫\s*월|월\s*요금", combined) else ""
-        )
         if not scope:
-            message = _PLAN_INFO_SCOPE_QUESTION if not metric else (
-                f"{_PLAN_INFO_SCOPE_PREFIX} 알뜰폰만·통신 3사만·전체 중 어느 범위로 볼까요?"
-            )
-            return _conversation_only_response("plan_info", message)
-        if intent not in ("5g", "lte") and not metric:
-            return _conversation_only_response(
-                "plan_info",
-                f"{_PLAN_INFO_SCOPE_PREFIX} {scope} 범위에서 초기 월 요금과 "
-                "12개월 평균 비용 중 어떤 기준으로 볼까요?",
-            )
+            return _conversation_only_response("plan_info", _PLAN_INFO_SCOPE_QUESTION)
         return _conversation_only_response(
-            "plan_info", _plan_information_answer(intent, scope, metric or "초기 월 요금")
+            "plan_info", _plan_information_answer(intent, scope, "초기 월 요금")
         )
 
     # 요금제 단서가 없는 평서문도 서비스 밖이다. 다만 요금제 추가 질문에 대한
@@ -275,6 +265,8 @@ def _quick_chat_response(messages: list[Message]) -> dict | None:
         _ARITHMETIC_RE.fullmatch(latest)
         or (not _TELECOM_SIGNAL_RE.search(latest)
             and not _GAME_USAGE_RE.search(latest)
+            and not _BENEFIT_RELAX_RE.search(latest)
+            and not _BUDGET_RELAX_RE.search(latest)
             and not short_plan_reply)
     ):
         return _conversation_only_response("off_topic", _OFF_TOPIC_MESSAGE)
@@ -282,13 +274,25 @@ def _quick_chat_response(messages: list[Message]) -> dict | None:
 
 
 def _inferred_relaxed_fields(messages: list[Message]) -> list[str]:
-    """직접 입력한 혜택 조건 해제도 버튼과 같은 구조화된 필드로 전달한다."""
+    """직접 입력한 조건 해제도 버튼과 같은 구조화된 필드로 전달한다."""
     latest = next((message.content for message in reversed(messages) if message.role == "user"), "")
-    if not _BENEFIT_RELAX_RE.search(latest):
-        return []
-    if re.search(r"혜택\s*(?:유형|종류|카테고리)", latest):
-        return ["wanted_benefit_categories"]
-    return ["wanted_benefits", "wanted_benefit_categories"]
+    relaxed: list[str] = []
+    if _BENEFIT_RELAX_RE.search(latest):
+        if re.search(r"혜택\s*(?:유형|종류|카테고리)", latest):
+            relaxed.append("wanted_benefit_categories")
+        else:
+            relaxed.extend(["wanted_benefits", "wanted_benefit_categories"])
+
+    budget = _BUDGET_RELAX_RE.search(latest)
+    if budget:
+        bound = budget.group("bound")
+        if bound == "상한":
+            relaxed.append("budget_max_won")
+        elif bound == "하한":
+            relaxed.append("budget_min_won")
+        else:
+            relaxed.extend(["budget_min_won", "budget_max_won"])
+    return list(dict.fromkeys(relaxed))
 
 
 @app.post("/api/recommend")
@@ -305,7 +309,22 @@ def recommend(req: RecommendRequest) -> dict:
     ]
     # 버튼이 보낸 정확한 필드가 있으면 그 값을 우선한다. 직접 입력한 문장에만
     # 자연어 해제 판정을 적용해 다른 혜택 필드까지 뜻밖에 지우지 않는다.
-    relaxed_fields = list(dict.fromkeys(req.relaxedFields or _inferred_relaxed_fields(req.messages)))
+    inferred_fields = _inferred_relaxed_fields(req.messages)
+    explicit_groups = {
+        "benefit" if field in {"wanted_benefits", "wanted_benefit_categories"}
+        else "budget" if field in {"budget_min_won", "budget_max_won"}
+        else field
+        for field in req.relaxedFields
+    }
+    inferred_fields = [
+        field for field in inferred_fields
+        if (
+            "benefit" if field in {"wanted_benefits", "wanted_benefit_categories"}
+            else "budget" if field in {"budget_min_won", "budget_max_won"}
+            else field
+        ) not in explicit_groups
+    ]
+    relaxed_fields = list(dict.fromkeys([*req.relaxedFields, *inferred_fields]))
     try:
         state = graph.invoke({"messages": history, "relaxed_fields": relaxed_fields})
     except Exception as exc:  # LLM 장애·키 누락은 화면이 이유를 보여줘야 한다

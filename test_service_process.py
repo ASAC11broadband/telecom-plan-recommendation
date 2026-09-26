@@ -15,15 +15,28 @@ from agent.agents.recommend import (recommend_node, _apply_comparison, _referenc
 from agent.agents.evaluation import _ranking_errors, evaluation_node
 from agent.agents.profiling import (BENEFIT_PREFERENCE_QUESTION, benefit_preference_missing,
                                     _apply_explicit_qos_min, _apply_relaxed_fields,
+                                    _apply_usage_based_qos,
                                     _apply_user_age, _drop_reference_name_data_constraint,
-                                    _repair_general_comparison,
+                                    _repair_budget_bounds, _repair_general_comparison,
                                     _drop_unrequested_benefit_followup)
-from backend.main import app, Message, _quick_chat_response, _llm_calls, LLM_CALLS_PER_MINUTE
+from backend.main import (app, Message, _quick_chat_response, _inferred_relaxed_fields,
+                          _llm_calls, LLM_CALLS_PER_MINUTE)
 from backend.plans import (COMPARE_MONTHS, monthly_fee_schedule, reference_delta,
                            to_plan_item, total_cost)
+from agent.usage import (AVERAGE_MOBILE_GAME_GB_PER_HOUR, SPECIFIC_GAME_GB_PER_HOUR,
+                         estimate_monthly_data_gb)
 
 
 class ServiceProcessTests(unittest.TestCase):
+    def test_implicit_one_in_korean_money_units_is_recognized(self):
+        implicit_man = _repair_budget_bounds(UserProfile(), '월 요금이 만원 이하인 요금제')
+        explicit_thousand = _repair_budget_bounds(UserProfile(), '월 5천원 이하인 요금제')
+        implicit_thousand = _repair_budget_bounds(UserProfile(), '월 천원 이하인 요금제')
+
+        self.assertEqual(implicit_man.budget_max_won, 10_000)
+        self.assertEqual(explicit_thousand.budget_max_won, 5_000)
+        self.assertEqual(implicit_thousand.budget_max_won, 1_000)
+
     def test_full_benefit_suffix_wins_when_current_plan_is_mentioned(self):
         """괄호 속 제휴명까지 말했으면 같은 본체의 다른 혜택 상품으로 바꾸지 않는다."""
         from agent.data import find_plans_mentioned_in_text
@@ -116,6 +129,86 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(invoke.call_args.args[0]['relaxed_fields'], ['wanted_benefits'])
 
+    def test_typed_budget_ceiling_relaxation_stays_in_recommendation_flow(self):
+        """예산 상한 해제 문장은 오프토픽이 아니며 정확한 필드 하나만 제거한다."""
+        messages = [
+            Message(role='user', content='통신 3사 넷플릭스 혜택 있는 요금제 추천해줘'),
+            Message(role='assistant', content='월 데이터 사용량이나 희망 월 예산을 알려주세요.'),
+            Message(role='user', content='월 5만원 이하'),
+            Message(role='assistant', content='조건에 맞는 요금제를 찾지 못했어요.'),
+            Message(role='user', content='예산 상한 조건은 빼고 다시 추천해줘'),
+        ]
+        self.assertIsNone(_quick_chat_response(messages))
+        self.assertEqual(_inferred_relaxed_fields(messages), ['budget_max_won'])
+
+    def test_app_usage_adds_seven_gb_without_changing_smartchoice_ranges(self):
+        youtube, notes = estimate_monthly_data_gb(daily_usage_hours={'youtube': 1})
+        smartchoice, _ = estimate_monthly_data_gb(smartchoice_usage_pattern='video_2h')
+        self.assertEqual(youtube, 65.5)
+        self.assertFalse(any('10%' in note for note in notes))
+        self.assertEqual(smartchoice, 80.0)
+
+    def test_unspecified_mobile_game_uses_specific_game_arithmetic_mean(self):
+        expected_mean = round(
+            sum(SPECIFIC_GAME_GB_PER_HOUR.values()) / len(SPECIFIC_GAME_GB_PER_HOUR),
+            3,
+        )
+        game, notes = estimate_monthly_data_gb(daily_game_hours=1)
+
+        self.assertEqual(expected_mean, 0.068)
+        self.assertEqual(AVERAGE_MOBILE_GAME_GB_PER_HOUR, expected_mean)
+        self.assertEqual(game, 9.0)
+        self.assertTrue(any('0.068GB/시간' in note for note in notes))
+
+    def test_app_quality_qos_is_only_applied_for_post_exhaustion_use(self):
+        plain = _apply_usage_based_qos(UserProfile(), '유튜브 HD 화질로 봐요')
+        youtube = _apply_usage_based_qos(
+            UserProfile(), '데이터 소진 후에도 유튜브 HD 화질로 보고 싶어요')
+        netflix = _apply_usage_based_qos(
+            UserProfile(), '소진 후 속도로 넷플릭스를 볼 수 있는 요금제')
+
+        self.assertIsNone(plain.min_qos_mbps)
+        self.assertIsNone(plain.requires_qos)
+        self.assertEqual(youtube.min_qos_mbps, 3.0)
+        self.assertTrue(youtube.requires_qos)
+        self.assertEqual(netflix.min_qos_mbps, 3.0)
+        self.assertTrue(netflix.requires_qos)
+
+    def test_official_qos_thresholds_and_unsupported_apps_are_distinguished(self):
+        youtube_1080 = _apply_usage_based_qos(
+            UserProfile(), '소진 후에도 유튜브 1080p로 보고 싶어요')
+        youtube_4k = _apply_usage_based_qos(
+            UserProfile(), '소진 후에도 유튜브 4K로 보고 싶어요')
+        netflix_4k = _apply_usage_based_qos(
+            UserProfile(), '넷플릭스 4K를 데이터 소진 후에도 보고 싶어요')
+        disney_live = _apply_usage_based_qos(
+            UserProfile(), '디즈니+ 라이브를 소진 후에도 보고 싶어요')
+        spotify = _apply_usage_based_qos(
+            UserProfile(), 'Spotify 320kbps를 데이터 소진 후에도 듣고 싶어요')
+        unsupported = _apply_usage_based_qos(
+            UserProfile(min_qos_mbps=5), '소진 후에도 틱톡을 보고 싶어요')
+
+        self.assertEqual(youtube_1080.min_qos_mbps, 5.0)
+        self.assertEqual(youtube_4k.min_qos_mbps, 20.0)
+        self.assertEqual(netflix_4k.min_qos_mbps, 15.0)
+        self.assertEqual(disney_live.min_qos_mbps, 10.0)
+        self.assertEqual(spotify.min_qos_mbps, 0.4)
+        self.assertIsNone(unsupported.min_qos_mbps)
+        self.assertTrue(unsupported.requires_qos)
+        self.assertEqual(filter_candidates(youtube_4k.model_dump(exclude_none=True)), [])
+
+    def test_explicit_qos_value_and_later_relaxation_override_app_inference(self):
+        explicit_query = '소진 후에도 유튜브 HD로 보고 싶고 QoS 1Mbps 이상이면 돼'
+        inferred = _apply_usage_based_qos(UserProfile(), explicit_query)
+        explicit = _apply_explicit_qos_min(inferred, explicit_query)
+        relaxed_query = '소진 후에도 유튜브 HD로 보고 싶어\nQoS 조건은 빼줘'
+        relaxed = _apply_explicit_qos_min(
+            _apply_usage_based_qos(UserProfile(), relaxed_query), relaxed_query)
+
+        self.assertEqual(inferred.min_qos_mbps, 3.0)
+        self.assertEqual(explicit.min_qos_mbps, 1.0)
+        self.assertIsNone(relaxed.min_qos_mbps)
+
     def test_typed_benefit_relaxation_clears_pending_question(self):
         """직접 입력과 버튼 모두 혜택 유형을 빼고 추가 질문 없이 다시 추천한다."""
         profile = UserProfile(
@@ -207,13 +300,14 @@ class ServiceProcessTests(unittest.TestCase):
                     {'role': 'user', 'content': '알뜰폰만'},
                 ],
             })
-            third = self.client.post('/api/recommend', json={
+            expensive_first = self.client.post('/api/recommend', json={
+                'messages': [{'role': 'user', 'content': '제일 비싼 요금제가 뭐야?'}],
+            })
+            expensive_second = self.client.post('/api/recommend', json={
                 'messages': [
-                    {'role': 'user', 'content': '가장 싼 요금제가 뭐야?'},
-                    {'role': 'assistant', 'content': first.json()['assistantMessage']},
-                    {'role': 'user', 'content': '알뜰폰만'},
-                    {'role': 'assistant', 'content': second.json()['assistantMessage']},
-                    {'role': 'user', 'content': '12개월 평균 비용으로'},
+                    {'role': 'user', 'content': '제일 비싼 요금제가 뭐야?'},
+                    {'role': 'assistant', 'content': expensive_first.json()['assistantMessage']},
+                    {'role': 'user', 'content': '전체'},
                 ],
             })
             network = self.client.post('/api/recommend', json={
@@ -225,10 +319,14 @@ class ServiceProcessTests(unittest.TestCase):
             })
             invoke.assert_not_called()
         self.assertEqual(first.json()['conversationKind'], 'plan_info')
-        self.assertIn('범위', first.json()['assistantMessage'])
+        self.assertEqual(
+            first.json()['assistantMessage'],
+            '알뜰폰, 통신 3사, 전체 요금제 중 어떤 범위에서 찾아볼까요?',
+        )
         self.assertEqual(second.json()['conversationKind'], 'plan_info')
-        self.assertIn('어떤 기준으로 볼까요', second.json()['assistantMessage'])
-        self.assertIn('12개월 평균 비용 기준으로 가장 싼', third.json()['assistantMessage'])
+        self.assertIn('초기 월 요금 기준으로 가장 싼', second.json()['assistantMessage'])
+        self.assertEqual(expensive_first.json()['assistantMessage'], first.json()['assistantMessage'])
+        self.assertIn('초기 월 요금 기준으로 가장 비싼', expensive_second.json()['assistantMessage'])
         self.assertIn('5G 요금제는', network.json()['assistantMessage'])
 
     def test_latest_followup_can_remove_minimum_qos_constraint(self):
