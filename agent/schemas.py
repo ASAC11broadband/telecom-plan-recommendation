@@ -33,6 +33,12 @@ class UserProfile(BaseModel):
     budget_min_won: Optional[int] = Field(None, description="월 예산 하한(원). 언급 없으면 null")
     budget_max_won: Optional[int] = Field(None, description="월 예산 상한(원). 언급 없으면 null")
     min_data_gb: Optional[float] = Field(None, description="최소 데이터량(GB)")
+    min_monthly_base_data_gb: Optional[float] = Field(
+        None, description="일 제공형 요금제에서 요구한 월 기본 제공량의 최소값(GB)"
+    )
+    min_daily_data_gb: Optional[float] = Field(
+        None, description="요금제가 매일 새로 제공해야 하는 최소 데이터량(GB). 하루 사용량과 구분"
+    )
     target_data_gb: Optional[float] = Field(
         None,
         description="목표 데이터량(GB). '100GB 정도'처럼 근접 적합도를 계산할 때 사용",

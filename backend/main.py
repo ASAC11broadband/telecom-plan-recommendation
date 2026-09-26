@@ -139,6 +139,14 @@ _BUDGET_RELAX_RE = re.compile(
     r"(?:은|는|을|를)?\s*(?:빼|제외|삭제|해제|없애|풀)",
     re.IGNORECASE,
 )
+_DAILY_DATA_RELAX_RE = re.compile(
+    r"(?:매일|하루|일일)\s*(?:제공\s*)?(?:데이터|용량)\s*(?:조건)?\s*(?:은|는|을|를)?\s*"
+    r"(?:빼|제외|삭제|해제|없애|풀)"
+)
+_MONTHLY_BASE_DATA_RELAX_RE = re.compile(
+    r"월\s*기본\s*(?:데이터|용량)\s*(?:조건)?\s*(?:은|는|을|를)?\s*"
+    r"(?:빼|제외|삭제|해제|없애|풀)"
+)
 _PLAN_INFO_SCOPE_QUESTION = (
     "알뜰폰, 통신 3사, 전체 요금제 중 어떤 범위에서 찾아볼까요?"
 )
@@ -292,6 +300,10 @@ def _inferred_relaxed_fields(messages: list[Message]) -> list[str]:
             relaxed.append("budget_min_won")
         else:
             relaxed.extend(["budget_min_won", "budget_max_won"])
+    if _DAILY_DATA_RELAX_RE.search(latest):
+        relaxed.append("min_daily_data_gb")
+    if _MONTHLY_BASE_DATA_RELAX_RE.search(latest):
+        relaxed.append("min_monthly_base_data_gb")
     return list(dict.fromkeys(relaxed))
 
 

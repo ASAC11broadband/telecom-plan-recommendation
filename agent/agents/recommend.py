@@ -489,7 +489,8 @@ def _with_reference_baseline(
         return profile
     # 0건 화면에서 데이터 조건을 직접 풀었다면 현재 요금제의 제공량을 기본 조건으로
     # 곧바로 되살리지 않는다. 버튼으로 해제한 명시적 의도가 비교 기본값보다 우선한다.
-    data_fields = {"data_unlimited", "min_data_gb", "target_data_gb", "max_data_gb"}
+    data_fields = {"data_unlimited", "min_data_gb", "min_monthly_base_data_gb",
+                   "min_daily_data_gb", "target_data_gb", "max_data_gb"}
     if data_fields.intersection(relaxed_fields or []):
         return profile
     if any(
@@ -497,6 +498,8 @@ def _with_reference_baseline(
         for value in (
             profile.data_unlimited,
             profile.min_data_gb,
+            profile.min_monthly_base_data_gb,
+            profile.min_daily_data_gb,
             profile.target_data_gb,
             profile.max_data_gb,
             profile.estimated_monthly_data_gb,

@@ -115,6 +115,8 @@ export interface Profile {
   budget_max_won?: number;
   budget_min_won?: number;
   min_data_gb?: number;
+  min_monthly_base_data_gb?: number;
+  min_daily_data_gb?: number;
   target_data_gb?: number;
   max_data_gb?: number;
   data_unlimited?: boolean;

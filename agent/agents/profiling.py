@@ -22,6 +22,8 @@ CONSTRAINT_FIELDS = (
     "budget_min_won",
     "budget_max_won",
     "min_data_gb",
+    "min_monthly_base_data_gb",
+    "min_daily_data_gb",
     "max_data_gb",
     "data_unlimited",
     "require_full_unlimited",
@@ -59,6 +61,12 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
   사용자가 직접 아래쪽 경계를 말했을 때만 채운다.
 - N만원 정도·내외·안팎 → N만원 ±5,000원
 - 데이터 NGB 이상은 min_data_gb, 데이터 NGB 이하·미만·최대 NGB는 max_data_gb에 저장한다.
+  '매일/하루에 NGB씩 제공·주는 요금제'는 min_daily_data_gb=N으로 저장한다.
+  '월 기본 11GB + 매일 2GB'는 min_monthly_base_data_gb=11과 min_daily_data_gb=2를 함께 저장한다.
+  min_monthly_base_data_gb는 월 기본량과 일 제공량을 함께 요구할 때만 사용한다.
+  '월 기본 11GB 이상'만 말했으면 일반 min_data_gb=11로 저장한다.
+  일 제공량을 min_data_gb에 복사하지 않는다. '하루 NGB를 쓴다/사용한다'는 이용량이지
+  일 제공형 요금제 조건이 아니므로 min_daily_data_gb에 저장하지 않는다.
   데이터 NGB 정도·쯤·내외·전후처럼 목표량을 말하면 target_data_gb에 저장하고
   min_data_gb에는 복사하지 않는다.
   데이터 상한을 요청하면 무제한 요금제는 제외한다. QoS·소진 후 NMbps 이상, 테더링 NGB 이상은 각각 최소 필드에 저장한다.
@@ -820,7 +828,71 @@ def _repair_reference_plan_name(profile: UserProfile, query: str) -> UserProfile
     return profile
 
 
-_DATA_AMOUNT_IN_TEXT_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:GB|G|기가)\b", re.IGNORECASE)
+_DATA_AMOUNT_IN_TEXT_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:GB|G|기가)(?![A-Za-z])", re.IGNORECASE)
+_DAILY_ALLOWANCE_RE = re.compile(
+    r"(?:매일|하루(?:에)?|일일|(?<![가-힣])일(?:당)?)\s*(?:기본\s*)?(?:데이터\s*)?"
+    r"(?P<amount>\d+(?:\.\d+)?)\s*(?:GB|G|기가)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_MONTHLY_BASE_RE = re.compile(
+    r"(?:월|매월|한\s*달(?:에)?)\s*(?:기본\s*)?(?:데이터\s*)?"
+    r"(?P<amount>\d+(?:\.\d+)?)\s*(?:GB|G|기가)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_DAILY_USAGE_VERB_RE = re.compile(
+    r"^\s*(?:씩\s*)?(?:를|을|가|이)?\s*(?:정도\s*)?(?:쓰|쓴|씁|사용|소모|이용|필요)"
+)
+
+
+def _apply_daily_allowance(profile: UserProfile, query: str) -> UserProfile:
+    """'매일 5GB 제공'을 월 5GB나 하루 5GB 사용량으로 오해하지 않는다."""
+    text = query or ""
+    if profile.reference_plan_name:
+        text = re.sub(re.escape(profile.reference_plan_name), " ", text, flags=re.IGNORECASE)
+    matches = list(_DAILY_ALLOWANCE_RE.finditer(text))
+    daily_matches = [match for match in matches if not _DAILY_USAGE_VERB_RE.match(text[match.end():match.end() + 16])]
+    if not daily_matches:
+        updates: dict[str, object] = {}
+        if profile.min_monthly_base_data_gb is not None:
+            # 월 기본량만 말한 질문은 일 제공형으로 한정하지 않는다.
+            updates["min_monthly_base_data_gb"] = None
+            if profile.min_data_gb is None:
+                updates["min_data_gb"] = profile.min_monthly_base_data_gb
+        # '하루 5GB를 쓴다'는 일 제공형 필터가 아니라 30일 기준 월 사용 목표다.
+        if matches:
+            updates["min_daily_data_gb"] = None
+            if len(list(_DATA_AMOUNT_IN_TEXT_RE.finditer(text))) == 1:
+                updates.update({
+                    "min_data_gb": None,
+                    "target_data_gb": float(matches[-1].group("amount")) * 30,
+                })
+        return profile.model_copy(update=updates) if updates else profile
+
+    daily = daily_matches[-1]
+    daily_gb = float(daily.group("amount"))
+    updates: dict[str, object] = {"min_daily_data_gb": daily_gb}
+    monthly_matches = list(_MONTHLY_BASE_RE.finditer(text))
+    monthly_base = next(
+        (
+            float(match.group("amount"))
+            for match in reversed(monthly_matches)
+            if "기본" in match.group(0)
+            or "+" in (text[match.end():daily.start()] if match.end() <= daily.start()
+                       else text[daily.end():match.start()])
+        ),
+        None,
+    )
+    updates["min_monthly_base_data_gb"] = monthly_base
+    # LLM이 일 제공량이나 그 월 환산치를 월 데이터 필드로 복사했으면 제거한다.
+    # 별도로 말한 월 총량 조건이 있으면 그대로 유지한다.
+    mistaken_monthly_values = {daily_gb, daily_gb * 30 + (monthly_base or 0)}
+    if monthly_base is not None:
+        mistaken_monthly_values.add(monthly_base)
+    for field in ("min_data_gb", "target_data_gb", "max_data_gb"):
+        value = getattr(profile, field)
+        if value is not None and any(abs(float(value) - wrong) < 1e-6 for wrong in mistaken_monthly_values):
+            updates[field] = None
+    return profile.model_copy(update=updates)
 
 
 def _drop_reference_name_data_constraint(profile: UserProfile, query: str) -> UserProfile:
@@ -984,6 +1056,8 @@ def core_signal_missing(profile: UserProfile | None) -> bool:
         value is not None
         for value in (
             profile.min_data_gb,
+            profile.min_monthly_base_data_gb,
+            profile.min_daily_data_gb,
             profile.target_data_gb,
             profile.max_data_gb,
             profile.data_unlimited,
@@ -1188,6 +1262,7 @@ _REPAIRS = (
     _repair_reference_plan_name,
     # 정확한 현재 상품명을 복구한 뒤 이름 속 GB와 별도 요구량을 구분한다.
     _drop_reference_name_data_constraint,
+    _apply_daily_allowance,
     _apply_ambiguous_reference_fee_reply,
     _drop_current_carrier_scope,
 )

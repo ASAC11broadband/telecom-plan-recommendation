@@ -34,6 +34,8 @@ const SESSION_KEY = 'momoplan-session-v1';
 const MAX_COMPARE_PLANS = 5;
 const BENEFIT_RELAX_RE = /혜택\s*(?:유형|종류|카테고리)?\s*(?:조건)?\s*(?:은|을|는|이)?\s*(?:빼|제외|풀|없애|해제)/;
 const BUDGET_RELAX_RE = /(?:예산|가격|월\s*요금)\s*(상한|하한)?\s*(?:조건)?\s*(?:은|는|을|를)?\s*(?:빼|제외|삭제|해제|없애|풀)/;
+const DAILY_DATA_RELAX_RE = /(?:매일|하루|일일)\s*(?:제공\s*)?(?:데이터|용량)\s*(?:조건)?\s*(?:은|는|을|를)?\s*(?:빼|제외|삭제|해제|없애|풀)/;
+const MONTHLY_BASE_DATA_RELAX_RE = /월\s*기본\s*(?:데이터|용량)\s*(?:조건)?\s*(?:은|는|을|를)?\s*(?:빼|제외|삭제|해제|없애|풀)/;
 const BUDGET_SET_RE = /\d[\d,]*(?:\.\d+)?\s*(?:만|천)?\s*원\s*(?:이하|이내|미만|이상|부터|까지)/;
 const SPECIFIC_BENEFIT_RE = /스마트기기|스마트워치|태블릿|OTT|넷플릭스|유튜브\s*프리미엄|음악|오디오|도서|밀리의서재|멤버십|페이백|추가\s*데이터/i;
 function conditionRelaxFields(text: string): string[] {
@@ -47,6 +49,8 @@ function conditionRelaxFields(text: string): string[] {
   if (budget?.[1] === '상한') fields.push('budget_max_won');
   else if (budget?.[1] === '하한') fields.push('budget_min_won');
   else if (budget) fields.push('budget_min_won', 'budget_max_won');
+  if (DAILY_DATA_RELAX_RE.test(text)) fields.push('min_daily_data_gb');
+  if (MONTHLY_BASE_DATA_RELAX_RE.test(text)) fields.push('min_monthly_base_data_gb');
   return Array.from(new Set(fields));
 }
 const DEFAULT_BROWSE_STATE: BrowseState = {

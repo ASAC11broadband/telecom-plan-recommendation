@@ -92,3 +92,5 @@
 
 /* Give comparison explanations enough width and avoid single Korean-character orphans. */
 .report-document .alternative-table .r{display:grid;grid-template-columns:minmax(125px,24%) minmax(0,1fr);align-items:start;gap:20px}.alternative-name{line-height:1.65;word-break:keep-all}.alternative-copy{text-align:left;line-height:1.8;font-weight:500!important;word-break:keep-all;overflow-wrap:normal;text-wrap:pretty}@media(max-width:600px){.report-document .alternative-table .r{grid-template-columns:1fr;gap:7px}.alternative-copy{text-align:left}}
+
+.recommendation-benefits{width:100%;margin:12px 0}.recommendation-benefits summary{font-size:12px}.recommendation-benefits li{white-space:normal;overflow-wrap:anywhere;word-break:keep-all}
