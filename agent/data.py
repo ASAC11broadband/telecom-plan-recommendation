@@ -688,6 +688,16 @@ def filter_candidates(profile: dict) -> list[dict]:
         # 무제한은 data_gb가 비어 있어 수치 비교가 성립하지 않는다 → 예상량을 충족으로 본다.
         df = df[df["data_unlimited"] | (df["data_gb"] >= required_data_gb)]
 
+    if profile.get("min_daily_data_gb") is not None:
+        # 월 총량이 같아도 매일 다시 지급하는 구조가 아니면 이 조건을 만족하지 않는다.
+        df = df[df["daily_data_gb"] >= float(profile["min_daily_data_gb"])]
+    if profile.get("min_monthly_base_data_gb") is not None:
+        # 크롤러의 data_gb는 월 기본량 + 일 제공량*30으로 환산되어 있다.
+        # 일 제공량이 없는 상품은 이 조합 조건을 만족하지 않는다.
+        daily = df["daily_data_gb"]
+        monthly_base = df["data_gb"] - daily * 30
+        df = df[daily.notna() & (monthly_base >= float(profile["min_monthly_base_data_gb"]) - 1e-6)]
+
     if profile.get("max_data_gb") is not None:
         # '100GB 이하'는 기본 제공 데이터의 상한이다. 제공량을 특정할 수 없는
         # 무제한 요금제는 상한을 만족한다고 볼 수 없으므로 함께 제외한다.
@@ -781,6 +791,8 @@ CONSTRAINT_LABELS = {
     "budget_min_won": "최소 요금",
     "budget_max_won": "예산 상한",
     "min_data_gb": "최소 데이터",
+    "min_monthly_base_data_gb": "월 기본 데이터",
+    "min_daily_data_gb": "매일 제공 데이터",
     "max_data_gb": "최대 데이터",
     "data_unlimited": "데이터 무제한",
     "require_full_unlimited": "완전 무제한만",

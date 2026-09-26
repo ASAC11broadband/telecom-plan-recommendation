@@ -188,6 +188,8 @@ function keptConditions(profile: Profile | null, includeNetworkPreference = true
   if (has('budget_min_won', p.budget_min_won)) kept.push(`월 ${p.budget_min_won!.toLocaleString()}원 이상`);
   if (has('budget_max_won', p.budget_max_won)) kept.push(`월 ${p.budget_max_won!.toLocaleString()}원 이하`);
   if (has('min_data_gb', p.min_data_gb)) kept.push(`데이터 ${p.min_data_gb!.toLocaleString()}GB 이상`);
+  if (has('min_monthly_base_data_gb', p.min_monthly_base_data_gb)) kept.push(`월 기본 ${p.min_monthly_base_data_gb!.toLocaleString()}GB 이상`);
+  if (has('min_daily_data_gb', p.min_daily_data_gb)) kept.push(`매일 ${p.min_daily_data_gb!.toLocaleString()}GB 이상 제공`);
   if (has('max_data_gb', p.max_data_gb)) kept.push(`데이터 ${p.max_data_gb!.toLocaleString()}GB 이하`);
   if (has('require_full_unlimited', p.require_full_unlimited)) kept.push('속도 제한 없는 완전 무제한만');
   else if (has('data_unlimited', p.data_unlimited)) kept.push('데이터 무제한');
@@ -484,7 +486,7 @@ function PlanCard({
   onSave: () => void;
   onReport: () => void;
 }) {
-  const hasBenefit = Boolean(plan.benefit && plan.benefit !== '부가 혜택 없음' && !/정보 없음/.test(plan.benefit));
+  const benefits = [...new Set(plan.benefits.filter(Boolean))];
   return (
     <div className={`card recommendation-plan-card${plan.best ? ' accent' : ''}`}>
       <div className="plan-head">
@@ -532,9 +534,12 @@ function PlanCard({
         </div>
       </div>
 
-      {hasBenefit && <div className="result-benefits result-benefits-compact">
-        <div className="result-benefit-item"><span>주요 혜택</span><strong>{plan.benefit}</strong></div>
-      </div>}
+      {benefits.length > 0 && (
+        <details className="tile-benefits recommendation-benefits">
+          <summary>부가혜택 보기 <span>{benefits.length}</span></summary>
+          <ul>{benefits.map((benefit) => <li key={benefit}>{benefit}</li>)}</ul>
+        </details>
+      )}
       {plan.dataWarnings.map(warning => <div className="promo-note" key={warning}>{warning}</div>)}
       {plan.costIsEstimate && <div className="promo-note">할인 기간 미확인 · 아래 비용은 현재가 유지 가정</div>}
       <div className="plan-foot">

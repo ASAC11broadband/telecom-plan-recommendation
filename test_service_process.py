@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from agent.data import all_plans, filter_candidates, PLANS_CSV, CONSTRAINT_LABELS
+from agent.data import all_plans, filter_candidates, diagnose_empty, PLANS_CSV, CONSTRAINT_LABELS
 from agent.schemas import UserProfile, ScoredPlan
 from agent.agents.recommend import (recommend_node, _apply_comparison, _reference_verdict,
                                     _dedupe_identical_offers, _diverse_selection, _offer_character,
@@ -14,7 +14,7 @@ from agent.agents.recommend import (recommend_node, _apply_comparison, _referenc
                                     _same_or_equivalent_to_reference, TOP_N)
 from agent.agents.evaluation import _ranking_errors, evaluation_node
 from agent.agents.profiling import (BENEFIT_PREFERENCE_QUESTION, benefit_preference_missing,
-                                    _apply_explicit_qos_min, _apply_relaxed_fields,
+                                    _apply_daily_allowance, _apply_explicit_qos_min, _apply_relaxed_fields,
                                     _apply_usage_based_qos,
                                     _apply_user_age, _drop_reference_name_data_constraint,
                                     _repair_budget_bounds, _repair_general_comparison,
@@ -87,7 +87,8 @@ class ServiceProcessTests(unittest.TestCase):
         """조건 풀기 버튼은 LLM 해석과 무관하게 모든 blocker 필드를 실제로 비운다."""
         values = {
             'budget_min_won': 10000, 'budget_max_won': 30000,
-            'min_data_gb': 100.0, 'max_data_gb': 10.0,
+            'min_data_gb': 100.0, 'min_monthly_base_data_gb': 11.0,
+            'min_daily_data_gb': 2.0, 'max_data_gb': 10.0,
             'data_unlimited': True, 'require_full_unlimited': True,
             'min_qos_mbps': 5.0, 'requires_qos': True,
             'min_tethering_gb': 50.0, 'min_voice_minutes': 300,
@@ -108,6 +109,69 @@ class ServiceProcessTests(unittest.TestCase):
 
         widened = _apply_relaxed_fields(UserProfile(), ['include_mno'])
         self.assertTrue(widened.include_mno)
+
+    def test_daily_allowance_is_not_monthly_data_or_daily_usage(self):
+        offered = _apply_daily_allowance(
+            UserProfile(min_data_gb=5), '하루에 데이터 5GB씩 주는 요금제 추천해줘 월 2만원 이하'
+        )
+        self.assertEqual(offered.min_daily_data_gb, 5)
+        self.assertIsNone(offered.min_data_gb)
+        self.assertEqual(_apply_daily_allowance(UserProfile(), '매일 3GB 제공').min_daily_data_gb, 3)
+        self.assertEqual(_apply_daily_allowance(UserProfile(), '일일 2GB 지급').min_daily_data_gb, 2)
+
+        combined = _apply_daily_allowance(
+            UserProfile(min_data_gb=11), '월 11GB+일 2GB 주는 요금제'
+        )
+        self.assertEqual(combined.min_monthly_base_data_gb, 11)
+        self.assertEqual(combined.min_daily_data_gb, 2)
+        self.assertIsNone(combined.min_data_gb)
+
+        reversed_order = _apply_daily_allowance(UserProfile(), '매일 2GB + 월 기본 11GB')
+        self.assertEqual(reversed_order.min_daily_data_gb, 2)
+        self.assertEqual(reversed_order.min_monthly_base_data_gb, 11)
+
+        monthly_only = _apply_daily_allowance(
+            UserProfile(min_monthly_base_data_gb=11), '월 기본 11GB 이상 추천해줘'
+        )
+        self.assertIsNone(monthly_only.min_monthly_base_data_gb)
+        self.assertEqual(monthly_only.min_data_gb, 11)
+
+        consumed = _apply_daily_allowance(
+            UserProfile(min_data_gb=5, min_daily_data_gb=5), '하루에 5GB를 쓴다'
+        )
+        self.assertIsNone(consumed.min_daily_data_gb)
+        self.assertIsNone(consumed.min_data_gb)
+        self.assertEqual(consumed.target_data_gb, 150)
+
+        self.assertEqual(
+            _inferred_relaxed_fields([Message(role='user', content='매일 제공 데이터 조건은 빼고 추천해줘')]),
+            ['min_daily_data_gb'],
+        )
+
+    def test_daily_allowance_filters_real_structure_and_can_be_relaxed(self):
+        profile = {
+            'budget_max_won': 20_000,
+            'min_daily_data_gb': 5,
+            'hard_constraints': ['budget_max_won', 'min_daily_data_gb'],
+        }
+        candidates = filter_candidates(profile)
+        self.assertTrue(candidates)
+        self.assertTrue(all(row['daily_data_gb'] is not None and row['daily_data_gb'] >= 5
+                            and row['discounted_fee'] <= 20_000 for row in candidates))
+        combined = filter_candidates({**profile, 'min_daily_data_gb': 2,
+                                      'min_monthly_base_data_gb': 11})
+        self.assertTrue(combined)
+        self.assertTrue(all(row['daily_data_gb'] >= 2 and
+                            row['data_gb'] - row['daily_data_gb'] * 30 >= 11 - 1e-6
+                            for row in combined))
+
+        impossible = {**profile, 'min_daily_data_gb': 100}
+        blockers = diagnose_empty(impossible)
+        self.assertTrue(any(item['field'] == 'min_daily_data_gb' and item['candidates'] > 0
+                            for item in blockers))
+        relaxed = _apply_relaxed_fields(UserProfile(**impossible), ['min_daily_data_gb'])
+        self.assertIsNone(relaxed.min_daily_data_gb)
+        self.assertTrue(filter_candidates(relaxed.model_dump()))
 
     def test_relaxed_data_condition_is_not_restored_from_current_plan(self):
         """현재 요금제 비교의 자동 데이터 기준도 사용자가 풀면 다시 붙지 않아야 한다."""
