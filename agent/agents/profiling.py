@@ -62,7 +62,8 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - N만원 정도·내외·안팎 → N만원 ±5,000원
 - 데이터 NGB 이상은 min_data_gb, 데이터 NGB 이하·미만·최대 NGB는 max_data_gb에 저장한다.
   '매일/하루에 NGB씩 제공·주는 요금제'는 min_daily_data_gb=N으로 저장한다.
-  '월 기본 11GB + 매일 2GB'는 min_monthly_base_data_gb=11과 min_daily_data_gb=2를 함께 저장한다.
+  '월 기본 11GB + 매일 2GB', '한 달에 10GB 그리고 매일 2GB 제공'은
+  min_monthly_base_data_gb와 min_daily_data_gb에 각각 저장한다.
   min_monthly_base_data_gb는 월 기본량과 일 제공량을 함께 요구할 때만 사용한다.
   '월 기본 11GB 이상'만 말했으면 일반 min_data_gb=11로 저장한다.
   일 제공량을 min_data_gb에 복사하지 않는다. '하루 NGB를 쓴다/사용한다'는 이용량이지
@@ -113,7 +114,18 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - 포괄적인 혜택 유형은 wanted_benefit_categories에 다음 정식 카테고리명으로 저장한다.
   OTT·영상 스트리밍='영상/OTT', 음악·오디오='음악/오디오', 도서·전자책='도서/콘텐츠',
   외부 제휴 서비스='제휴서비스', 여러 종류 중 선택='복합/선택혜택', AI 교육·모의고사='교육/AI서비스', 멤버십='멤버십',
-  스마트워치·태블릿='스마트기기', 추가 데이터='추가데이터', 사은품·페이백='사은품/페이백'.
+  스마트기기 혜택 전반(워치·태블릿·회선 포함)='스마트기기',
+  기기값·할부금 할인='스마트기기', 스마트기기 회선 요금·데이터쉐어링을 특정하면
+  '스마트기기 회선/데이터쉐어링',
+  추가 데이터='추가데이터', 페이백·캐시백='페이백', 포인트·적립='포인트/적립',
+  상품권·사은품='상품권/사은품', 쿠폰='쿠폰/할인', 무료 유심·배송비='유심/배송비',
+  요금 할인='요금할인', 로밍='로밍', 보험·안심='보험/안심'.
+- '페이백'은 상품권·네이버페이 포인트·쿠폰·무료 유심과 다른 유형이다.
+  이름에 페이백/캐시백 지급이 확인되지 않으면 페이백으로 추측하지 않는다.
+  '사은품이나 페이백', '사은품/페이백'은 wanted_benefit_categories에
+  ['상품권/사은품', '페이백']을 넣고 benefit_match_mode='any'로 둔다.
+  '사은품과 페이백 둘 다'는 같은 두 유형에 benefit_match_mode='all'을 쓴다.
+  '사은품/페이백'이라는 통합 분류값은 프로필에 저장하지 않는다.
 - 넷플릭스·지니뮤직·밀리의서재처럼 특정 서비스나 혜택을 지정하면 wanted_benefits에 저장한다.
   혜택 이름만 넣고 '포함/혜택/되는' 같은 수식어는 뺀다. '유튜브 프리미엄 포함된' → '유튜브 프리미엄'
 - '음악 혜택'은 wanted_benefit_categories=['음악/오디오']이고 wanted_benefits에는 넣지 않는다.
@@ -667,11 +679,13 @@ def _apply_explicit_qos_requirement(profile: UserProfile, query: str) -> UserPro
 
 BENEFIT_PREFERENCE_QUESTION = (
     "어떤 혜택을 찾으시나요? OTT·영상, 음악·오디오, 도서·콘텐츠, 멤버십, "
-    "스마트기기, 추가 데이터, 사은품/페이백 중에서 말씀해 주세요."
+    "스마트기기(워치·태블릿·데이터쉐어링), 추가 데이터, 제휴서비스, 교육, 페이백, "
+    "포인트·적립, 상품권·사은품, 쿠폰·할인, 유심·배송비, 요금할인, "
+    "로밍, 보험·안심 중에서 말씀해 주세요."
 )
 _VAGUE_BENEFIT_PREFERENCE_RE = re.compile(
     r"(?:부가\s*)?혜택\s*(?:이|은|을|도)?\s*(?:현재보다\s*)?(?:더\s*)?"
-    r"(?:좋(?:은|아|고|게)|괜찮(?:은|아|고)|나은|우선|중요|중심|"
+    r"(?:(?:가장|제일|특히)\s*)?(?:좋(?:은|아|고|게)|괜찮(?:은|아|고)|나은|우선|중요|중심|"
     r"많(?:은|아|고|게)|다양(?:한|해|하고)|풍부(?:한|해))",
     re.IGNORECASE,
 )
@@ -877,8 +891,11 @@ def _apply_daily_allowance(profile: UserProfile, query: str) -> UserProfile:
             float(match.group("amount"))
             for match in reversed(monthly_matches)
             if "기본" in match.group(0)
-            or "+" in (text[match.end():daily.start()] if match.end() <= daily.start()
-                       else text[daily.end():match.start()])
+            or re.search(
+                r"(?:\+|그리고|및|더해|추가로|추가|,\s*|，\s*|에\s*(?:매일|하루|일))",
+                text[match.end():daily.start()] if match.end() <= daily.start()
+                else text[daily.end():match.start()],
+            )
         ),
         None,
     )
@@ -1001,6 +1018,37 @@ def _normalize_benefit_requests(profile: UserProfile) -> UserProfile:
             "wanted_benefit_categories": categories or None,
         }
     )
+
+
+def _repair_gift_pair_request(profile: UserProfile, query: str) -> UserProfile:
+    """최신 발화의 사은품/페이백 둘 중 하나와 둘 다를 별도 분류로 확정한다."""
+    latest = (query or "").splitlines()[-1].strip()
+    if re.search(r"빼|제외|상관없|원치|싫", latest):
+        return profile
+    if not (re.search(r"사은품|상품권", latest) and re.search(r"페이백|캐시백", latest)):
+        return profile
+    pair = re.search(
+        r"(?:사은품|상품권)\s*(?:/|·|이나|또는|혹은|및|과|와|하고)\s*(?:페이백|캐시백)"
+        r"|(?:페이백|캐시백)\s*(?:/|·|이나|또는|혹은|및|과|와|하고)\s*(?:사은품|상품권)",
+        latest,
+    )
+    if not pair:
+        return profile
+    together = bool(re.search(r"둘\s*다|모두|동시|및|과|와|하고", pair.group(0) + latest[pair.end():]))
+    categories = [
+        category for category in profile.wanted_benefit_categories or []
+        if category not in {"상품권/사은품", "페이백"}
+    ]
+    categories.extend(["상품권/사은품", "페이백"])
+    names = [
+        name for name in profile.wanted_benefits or []
+        if not (re.search(r"사은품|상품권", name) and re.search(r"페이백|캐시백", name))
+    ]
+    return profile.model_copy(update={
+        "wanted_benefits": names or None,
+        "wanted_benefit_categories": list(dict.fromkeys(categories)),
+        "benefit_match_mode": "all" if together else "any",
+    })
 
 
 def _normalize_profile(profile: UserProfile) -> UserProfile:
@@ -1251,6 +1299,7 @@ _REPAIRS = (
     _apply_network_preference,
     _apply_user_age,
     _apply_explicit_qos_requirement,
+    _repair_gift_pair_request,
     _apply_benefit_preference_question,
     _drop_unrequested_benefit_followup,
     # 앱·화질 추정값보다 바로 뒤의 명시적 Mbps 설정/해제가 최종 우선권을 갖는다.
@@ -1578,7 +1627,7 @@ if __name__ == "__main__":
         )
     )
     assert named_video.smartchoice_usage_pattern is None
-    assert named_video.estimated_monthly_data_gb == 64.4
+    assert named_video.estimated_monthly_data_gb == 65.5
     assert named_video.min_qos_mbps is None
 
     print("self-check ok")

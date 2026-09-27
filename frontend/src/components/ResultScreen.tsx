@@ -354,22 +354,26 @@ export function ResultScreen({
   const visibleConditions = conditionCells(result).filter(({ value, k }) => value !== '미지정' && k !== '후보군').slice(0, 5);
   const verdict = result.referenceVerdict;
   const verdictTitle = verdict?.status === 'keep'
-    ? '현재 요금제 유지도 좋은 선택입니다'
+    ? '현재 요금제보다 확실히 나은 후보는 확인되지 않았어요'
     : verdict?.status === 'switch'
       ? '현재보다 유리한 전환 후보가 있어요'
       : verdict?.status === 'tradeoff'
         ? verdict.goal === 'more_data'
           ? '데이터가 더 많은 후보를 찾았어요'
           : '원하는 개선 후보를 찾았어요'
-      : '비교하려면 정보가 조금 더 필요해요';
+      : verdict?.missing.length
+        ? '판단에 정보가 더 필요해요'
+        : result.candidateCount === 0
+          ? '비교할 후보가 없어 판단할 수 없어요'
+          : '후보의 정보가 부족해 판단할 수 없어요';
   const verdictBadge = verdict?.status === 'keep'
-    ? '유지 추천'
+    ? '우위 후보 없음'
     : verdict?.status === 'switch'
       ? `전환 후보 ${(verdict.betterCount ?? result.plans.length).toLocaleString()}개`
       : verdict?.status === 'tradeoff'
         ? '조건별 비교'
-      : '추가 확인 필요';
-  const verdictIcon = verdict?.status === 'keep' ? '✓' : verdict?.status === 'switch' ? '↗' : verdict?.status === 'tradeoff' ? '⇄' : '?';
+      : result.candidateCount === 0 && !verdict?.missing.length ? '비교 후보 없음' : '추가 확인 필요';
+  const verdictIcon = verdict?.status === 'keep' ? '–' : verdict?.status === 'switch' ? '↗' : verdict?.status === 'tradeoff' ? '⇄' : '?';
   const referenceName = result.referencePlan?.name || result.profile?.reference_plan_name || '입력한 현재 요금제';
 
   return shell(

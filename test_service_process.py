@@ -6,7 +6,8 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from agent.data import all_plans, filter_candidates, diagnose_empty, PLANS_CSV, CONSTRAINT_LABELS
+from agent.data import (all_plans, benefit_requests_match, filter_candidates,
+                        diagnose_empty, PLANS_CSV, CONSTRAINT_LABELS)
 from agent.schemas import UserProfile, ScoredPlan
 from agent.agents.recommend import (recommend_node, _apply_comparison, _reference_verdict,
                                     _dedupe_identical_offers, _diverse_selection, _offer_character,
@@ -303,6 +304,119 @@ class ServiceProcessTests(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(invoke.call_args.args[0]['relaxed_fields'], ['wanted_benefit_categories'])
+
+    def test_specific_benefit_categories_do_not_collapse_to_gifts(self):
+        from agent.data import get_plan, normalize_benefit_category
+        from agent.agents.profiling import (_apply_benefit_preference_question,
+                                            _repair_gift_pair_request)
+
+        expected = {
+            '페이백': '페이백', 'OTT': '영상/OTT',
+            '사은품': '상품권/사은품', '유심': '유심/배송비',
+        }
+        for reply, category in expected.items():
+            with self.subTest(reply=reply):
+                self.assertEqual(normalize_benefit_category(reply), category)
+                self.assertIsNone(_quick_chat_response([
+                    Message(role='assistant', content=BENEFIT_PREFERENCE_QUESTION),
+                    Message(role='user', content=reply),
+                ]))
+
+        profile = {
+            'budget_max_won': 40_000, 'min_data_gb': 50,
+            'wanted_benefit_categories': ['페이백'],
+            'hard_constraints': ['budget_max_won', 'min_data_gb', 'wanted_benefit_categories'],
+        }
+        payback = filter_candidates(profile)
+        self.assertTrue(payback)
+        self.assertTrue(all('페이백' in row['benefit_categories'] for row in payback))
+        self.assertTrue(all(row['billing_price_known'] for row in payback))
+        gift_only = filter_candidates({**profile, 'wanted_benefit_categories': ['상품권/사은품']})
+        self.assertTrue(gift_only)
+        self.assertTrue(any('페이백' not in row['benefit_categories'] for row in gift_only))
+
+        # 네이버페이로 지급된다는 이유만으로 페이백 전용 상품을 포인트 적립
+        # 검색에 포함하지 않는다. CSV 태그가 실제 후보 필터까지 반영되어야 한다.
+        cashback_only = get_plan('11741')
+        self.assertIsNotNone(cashback_only)
+        self.assertIn('페이백', cashback_only['benefit_categories'])
+        self.assertNotIn('포인트/적립', cashback_only['benefit_categories'])
+        point_candidates = filter_candidates({'wanted_benefit_categories': ['포인트/적립']})
+        self.assertNotIn('11741', {row['plan_id'] for row in point_candidates})
+        self.assertNotIn('사은품/페이백', cashback_only['benefit_categories'])
+        broad_candidates = filter_candidates({
+            'wanted_benefit_categories': ['상품권/사은품', '페이백'],
+            'benefit_match_mode': 'any',
+        })
+        self.assertTrue(broad_candidates)
+        self.assertTrue(all(
+            {'상품권/사은품', '페이백'}.intersection(row['benefit_categories'])
+            for row in broad_candidates
+        ))
+        from agent.mcda import _benefit_fit
+        broad_request = {
+            'wanted_benefit_categories': ['상품권/사은품', '페이백'],
+            'benefit_match_mode': 'any',
+        }
+        self.assertEqual(_benefit_fit({'benefit_categories': ['페이백']}, broad_request), 1.0)
+        self.assertEqual(_benefit_fit({'benefit_categories': ['상품권/사은품']}, broad_request), 1.0)
+        self.assertEqual(_benefit_fit({'benefit_categories': ['포인트/적립']}, broad_request), 0.0)
+
+        vague = _apply_benefit_preference_question(
+            UserProfile(budget_max_won=40_000, min_data_gb=50),
+            '부가 혜택을 가장 중요하게 봐서 다시 추천해줘',
+        )
+        self.assertEqual(vague.followup_question, BENEFIT_PREFERENCE_QUESTION)
+        broad = UserProfile(wanted_benefits=['사은품이나 페이백'])
+        optional = _repair_gift_pair_request(broad, '사은품이나 페이백 혜택을 보여줘')
+        self.assertEqual(optional.wanted_benefit_categories, ['상품권/사은품', '페이백'])
+        self.assertEqual(optional.benefit_match_mode, 'any')
+        self.assertIsNone(optional.wanted_benefits)
+        both = _repair_gift_pair_request(broad, '사은품과 페이백 둘 다 있는 요금제')
+        self.assertEqual(both.wanted_benefit_categories, ['상품권/사은품', '페이백'])
+        self.assertEqual(both.benefit_match_mode, 'all')
+        self.assertEqual(
+            _repair_gift_pair_request(broad, '사은품/페이백 혜택을 넓게 보여줘')
+            .benefit_match_mode, 'any')
+
+    def test_choice_benefits_are_not_counted_as_simultaneous(self):
+        mixed = {
+            'benefit_categories': ['복합/선택혜택', '영상/OTT', '음악/오디오'],
+            'benefit_details': [{
+                'name': '티빙/지니 중 택1',
+                'primary_category': '복합/선택혜택',
+                'categories': ['복합/선택혜택', '영상/OTT', '음악/오디오'],
+            }],
+        }
+        pair = ['영상/OTT', '음악/오디오']
+        self.assertTrue(benefit_requests_match(mixed, [], pair, 'any'))
+        self.assertFalse(benefit_requests_match(mixed, [], pair, 'all'))
+        from agent.mcda import _benefit_fit
+        self.assertLess(_benefit_fit(mixed, {
+            'wanted_benefit_categories': pair, 'benefit_match_mode': 'all',
+        }), 1.0)
+
+        separate = {
+            **mixed,
+            'benefit_details': [
+                {'name': '티빙', 'categories': ['영상/OTT'], 'selectable': True, 'select_group': '택1'},
+                {'name': '지니', 'categories': ['음악/오디오'], 'selectable': True, 'select_group': '택1'},
+            ],
+        }
+        self.assertFalse(benefit_requests_match(separate, [], pair, 'all'))
+        separate['benefit_details'][1]['select_group'] = '다른 그룹'
+        self.assertTrue(benefit_requests_match(separate, [], pair, 'all'))
+
+        smart_line = {
+            'benefit_categories': ['스마트기기 회선/데이터쉐어링'],
+            'benefit_details': [{
+                'name': '데이터쉐어링 1회선 무료',
+                'categories': ['스마트기기 회선/데이터쉐어링'],
+            }],
+        }
+        self.assertTrue(benefit_requests_match(smart_line, [], ['스마트기기'], 'all'))
+        self.assertFalse(benefit_requests_match(
+            smart_line, [], ['스마트기기', '스마트기기 회선/데이터쉐어링'], 'all'))
 
     def test_unrelated_questions_stay_in_chat_without_llm(self):
         for question in ('손흥민 알아?', '52-4는 뭐야?', '한국의 수도가 어디야?', '나 너 좋아해'):
@@ -1040,8 +1154,8 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertGreater(len(soft), len(hard))
         self.assertTrue(any(r['carrier_type'] == 'MVNO' for r in soft))
 
-    def test_keep_current_plan_is_distinguished_from_cannot_tell(self):
-        """유지 권고와 판단 불가는 다른 상태다. 후보가 없다는 사실만으로 유지가 유리하다고 하지 않는다."""
+    def test_no_clear_improvement_is_distinguished_from_cannot_tell(self):
+        """우위 후보 없음과 판단 불가는 다르다. 후보가 없다고 유지를 권하지 않는다."""
         current = {'discounted_fee': 30000, 'data_gb': 50.0, 'data_unlimited': False}
 
         # 요금만 알고 데이터를 모르면 비교가 성립하지 않는다
@@ -1059,11 +1173,19 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(better['status'], 'switch')
         self.assertEqual(better['betterCount'], 1)
 
-        # 더 싸지만 데이터가 적은 후보뿐이면 유지. 맞교환이라는 사실을 함께 말한다.
+        # 더 싸지만 데이터가 적은 후보뿐이면 우위 없음. 맞교환이라는 사실을 말한다.
         tradeoff = _reference_verdict(current, [{'discounted_fee': 9000, 'data_gb': 5.0}])
         self.assertEqual(tradeoff['status'], 'keep')
         self.assertEqual(tradeoff['cheaperCount'], 1)
         self.assertIn('맞교환', tradeoff['reason'])
+        self.assertNotIn('유지', tradeoff['reason'])
+        self.assertNotIn('최적이라고 단정', tradeoff['reason'])
+
+        # 더 싼 후보가 없으면 '더 싼 후보 0건' 같은 문장을 만들지 않는다.
+        not_cheaper = _reference_verdict(current, [{'discounted_fee': 40000, 'data_gb': 40.0}])
+        self.assertEqual(not_cheaper['status'], 'keep')
+        self.assertEqual(not_cheaper['cheaperCount'], 0)
+        self.assertIn('더 저렴한 후보도 확인되지 않았습니다', not_cheaper['reason'])
 
         # 어느 상태든 데이터로 알 수 없는 항목은 확인 안내로 남는다
         for verdict in (fee_only, empty, better, tradeoff):
@@ -1085,11 +1207,11 @@ class ServiceProcessTests(unittest.TestCase):
         from agent.data import benefit_summary
         for basis in ('monthly', ''):
             value = benefit_summary([{'name': '매달 5천원 페이백', 'value_won': 5000,
-                                      'value_basis': basis, 'categories': ['사은품/페이백']}])
+                                      'value_basis': basis, 'categories': ['페이백']}])
             self.assertTrue(value['estimated'])
             self.assertEqual(value['deductible_won'], 0)
         value = benefit_summary([{'name': '3개월 유지 후 일시금', 'value_won': 24000,
-                                  'value_basis': 'one_off', 'months': 3, 'categories': ['사은품/페이백']}])
+                                  'value_basis': 'one_off', 'months': 3, 'categories': ['페이백']}])
         self.assertEqual(value['monthly_won'], 2000)
 
     def test_reference_verdict_banners_are_returned_by_api(self):

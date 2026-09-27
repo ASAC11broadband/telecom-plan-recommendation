@@ -111,13 +111,33 @@ BENEFIT_CATEGORY_ALIASES = {
     "스마트워치": "스마트기기",
     "워치": "스마트기기",
     "태블릿": "스마트기기",
+    "스마트기기 회선": "스마트기기 회선/데이터쉐어링",
+    "스마트기기 회선/데이터쉐어링": "스마트기기 회선/데이터쉐어링",
+    "데이터쉐어링": "스마트기기 회선/데이터쉐어링",
+    "데이터 쉐어링": "스마트기기 회선/데이터쉐어링",
     "추가데이터": "추가데이터",
     "추가 데이터": "추가데이터",
-    "사은품": "사은품/페이백",
-    "페이백": "사은품/페이백",
-    "상품권": "사은품/페이백",
-    "캐시백": "사은품/페이백",
-    "사은품/페이백": "사은품/페이백",
+    "사은품": "상품권/사은품",
+    "상품권": "상품권/사은품",
+    "상품권/사은품": "상품권/사은품",
+    "페이백": "페이백",
+    "캐시백": "페이백",
+    "포인트": "포인트/적립",
+    "적립": "포인트/적립",
+    "포인트/적립": "포인트/적립",
+    "쿠폰": "쿠폰/할인",
+    "할인쿠폰": "쿠폰/할인",
+    "쿠폰/할인": "쿠폰/할인",
+    "유심": "유심/배송비",
+    "무료 유심": "유심/배송비",
+    "배송비": "유심/배송비",
+    "유심/배송비": "유심/배송비",
+    "요금할인": "요금할인",
+    "요금 할인": "요금할인",
+    "로밍": "로밍",
+    "보험": "보험/안심",
+    "안심": "보험/안심",
+    "보험/안심": "보험/안심",
     "기타": "기타",
 }
 
@@ -144,8 +164,10 @@ def normalize_benefit_category(value: object) -> str | None:
 
 
 def has_benefit_category(categories: object, requested: object) -> bool:
-    """후보의 카테고리 목록에 요청 카테고리가 정확히 포함되는지 확인한다."""
+    """단일 혜택 유형을 검사한다. 스마트기기는 회선 혜택도 포괄한다."""
     category = normalize_benefit_category(requested)
+    if category == "스마트기기":
+        return bool({"스마트기기", "스마트기기 회선/데이터쉐어링"} & set(categories or []))
     return bool(category) and category in (categories or [])
 
 
@@ -370,6 +392,7 @@ def load() -> None:
                 {
                     "name": str(row.get("benefit_name") or ""),
                     "categories": categories,
+                    "primary_category": _opt_text(row.get("benefit_category")),
                     # 혜택의 원화 가치. 크롤러가 값을 못 채운 혜택은 None 이고 0 원이 아니다.
                     "value_won": _opt_int(row.get("benefit_value_won")),
                     # 크롤러가 채우는 단위·기간. 옛 스키마의 CSV 에는 없어 빈값이 되고,
@@ -378,7 +401,7 @@ def load() -> None:
                     "months": _opt_int(row.get("benefit_months")),
                     "user_pay_won": _opt_int(row.get("user_pay_won")),
                     # 택1 혜택. 같은 select_group 안에서는 하나만 실제로 받는다.
-                    "selectable": bool(row.get("is_selectable")),
+                    "selectable": str(row.get("is_selectable") or "").strip().lower() in {"true", "1", "yes"},
                     "select_group": _opt_text(row.get("select_group")),
                     # 카드 실적·별도 가입 같은 추가 조건. 자동 차감 여부를 여기서 가른다.
                     "condition": _opt_text(row.get("benefit_condition")),
@@ -425,9 +448,9 @@ def _opt_text(value) -> str:
 # 비교 구간으로 나눠 월 환산한다. 구간은 agent.mcda.COMPARE_MONTHS 하나로 통일돼 있다
 # (추천 가격 효용·화면 총비용·혜택 월 환산이 같은 기간을 써야 서로 비교된다).
 BENEFIT_AMORTIZE_MONTHS = COMPARE_MONTHS
-_ONE_OFF_CATEGORIES = {"사은품/페이백"}
+_ONE_OFF_CATEGORIES = {"페이백", "포인트/적립", "상품권/사은품", "쿠폰/할인", "유심/배송비"}
 # 현금으로 돌려받는 혜택. 사용자가 그 서비스를 쓰는지와 무관하게 납부 총액이 줄어든다.
-_CASH_CATEGORIES = {"사은품/페이백"}
+_CASH_CATEGORIES = {"페이백"}
 # 기간을 '끝이 없다'고 못 박은 표현. '기간 미상'과 구분해야 한다.
 _INDEFINITE_RE = re.compile(r"평생|무기한|무제한\s*제공|계속\s*제공|약정\s*내내")
 # 추가 실적·별도 가입이 필요한 혜택. 자동으로 절약액에서 빼면 안 된다.
@@ -610,6 +633,99 @@ def has_benefit(search_text: str, benefit: object) -> bool:
     return bool(needle) and needle in haystack
 
 
+def benefit_requests_match(
+    plan: object, wanted_names: list[str], wanted_categories: list[str], mode: str = "all"
+) -> bool:
+    """택1 그룹과 한 행의 대체 선택지를 고려해 혜택 요구를 검증한다."""
+    requirements = [
+        ("name", normalize_benefit(name)) for name in wanted_names if normalize_benefit(name)
+    ]
+    categories = [normalize_benefit_category(value) for value in wanted_categories]
+    if any(value is None for value in categories):
+        return False
+    requirements.extend(("category", value) for value in categories)
+    requirements = list(dict.fromkeys(requirements))
+    if not requirements:
+        return True
+
+    details = [item for item in (plan.get("benefit_details") or []) if isinstance(item, dict)]
+    broad_smart_with_line = mode != "any" and "스마트기기 회선/데이터쉐어링" in categories
+
+    def category_matches(values: object, value: str) -> bool:
+        options = set(values or [])
+        if value == "스마트기기" and not broad_smart_with_line:
+            return bool(options & {"스마트기기", "스마트기기 회선/데이터쉐어링"})
+        return value in options
+
+    if not details:
+        text = f"{plan.get('ott_options') or ''} | " + " | ".join(plan.get("included_benefits") or [])
+        checks = [
+            has_benefit(text, value) if kind == "name"
+            else category_matches(plan.get("benefit_categories"), value)
+            for kind, value in requirements
+        ]
+        return any(checks) if mode == "any" else all(checks)
+
+    def matches(detail: dict, requirement: tuple[str, str]) -> bool:
+        kind, value = requirement
+        return (
+            has_benefit(detail.get("name", ""), value)
+            if kind == "name"
+            else category_matches(detail.get("categories"), value)
+        )
+
+    choices = [
+        [index for index, detail in enumerate(details) if matches(detail, request)]
+        for request in requirements
+    ]
+    if mode == "any":
+        return any(choices)
+    if any(not options for options in choices):
+        return False
+
+    used_rows: set[int] = set()
+    chosen_groups: dict[str, int] = {}
+    # 제약이 큰 조건부터 배치하면 '택1' 충돌을 빠르게 판별할 수 있다.
+    ordered = sorted(choices, key=len)
+
+    def assign(position: int) -> bool:
+        if position == len(ordered):
+            return True
+        for index in ordered[position]:
+            detail = details[index]
+            group = str(detail.get("select_group") or "") if detail.get("selectable") else ""
+            if group and group in chosen_groups and chosen_groups[group] != index:
+                continue
+            row_categories = detail.get("categories") or []
+            name = str(detail.get("name") or "")
+            # 한 행에 나열된 대체 선택지는 검색할 수는 있지만 동시에 받을 수는 없다.
+            exclusive_row = bool(re.search(r"또는|택\s*1|중\s*1|\bor\b", name, re.IGNORECASE)) or (
+                len(row_categories) > 1 and (
+                    detail.get("primary_category") == "복합/선택혜택"
+                    or not re.search(r"\+|\s및\s|함께", name)
+                )
+            )
+            if exclusive_row and index in used_rows:
+                continue
+            added_row = index not in used_rows
+            if added_row:
+                used_rows.add(index)
+            if group:
+                chosen_groups[group] = index
+            if assign(position + 1):
+                return True
+            if added_row:
+                used_rows.remove(index)
+            if group and group not in (
+                str(details[other].get("select_group") or "")
+                for other in used_rows
+            ):
+                chosen_groups.pop(group, None)
+        return False
+
+    return assign(0)
+
+
 # 가입 자격 조건. 전체의 12%(331건)가 연령·신분 전용 상품이다.
 _AGE_LIMIT_RE = re.compile(r"만\s*(\d+)\s*세\s*(이하|이상|미만|초과)")
 
@@ -751,7 +867,7 @@ def filter_candidates(profile: dict) -> list[dict]:
     # 선호는 mcda._benefit_fit 이 점수로만 반영한다. hard_constraints 가 아예 없는
     # 호출(직접 dict 를 넘기는 테스트·스크립트)은 예전처럼 필수로 본다.
     hard = profile.get("hard_constraints")
-    benefit_is_hard = not hard or bool(
+    benefit_is_hard = hard is None or bool(
         {"wanted_benefits", "wanted_benefit_categories"}.intersection(hard)
     )
 
@@ -765,7 +881,7 @@ def filter_candidates(profile: dict) -> list[dict]:
             return []
         benefit_masks.append(
             df["benefit_categories"].map(
-                lambda values, value=normalized: value in values
+                lambda values, value=normalized: has_benefit_category(values, value)
             )
         )
     if benefit_masks:
@@ -777,6 +893,17 @@ def filter_candidates(profile: dict) -> list[dict]:
             for mask in benefit_masks[1:]:
                 matches = matches & mask
         df = df[matches]
+        # 요금제 전체 태그는 택1 선택지와 한 행에 적힌 'A 또는 B'를 합쳐 버린다.
+        # 여러 혜택을 모두 요구할 때는 실제로 동시 선택 가능한 조합인지 다시 확인한다.
+        if profile.get("benefit_match_mode") != "any" and len(benefit_masks) > 1:
+            df = df[df.apply(
+                lambda row: benefit_requests_match(
+                    row,
+                    profile.get("wanted_benefits") or [],
+                    profile.get("wanted_benefit_categories") or [],
+                    "all",
+                ), axis=1
+            )]
 
     if profile.get("min_discount_period_months") is not None:
         df = df[
@@ -1199,7 +1326,7 @@ if __name__ == "__main__":
     assert monthly_benefit_value([{"name": "A", "value_won": None, "categories": []}]) == 0
     # 일시금은 비교 구간(12개월)으로 편다. 60,000원 -> 월 5,000원.
     assert monthly_benefit_value(
-        [{"name": "페이백", "value_won": 60000, "categories": ["사은품/페이백"]}]
+        [{"name": "페이백", "value_won": 60000, "categories": ["페이백"]}]
     ) == 5000
 
     # 월 지급액·제공 기간·일시금을 각각 구분한다. 비교 구간은 12개월.
@@ -1231,9 +1358,13 @@ if __name__ == "__main__":
 
     # 차감 가능한 금액과 참고값을 가른다.
     cash = benefit_summary(
-        [{"name": "페이백 (12개월)", "value_won": 120_000, "categories": ["사은품/페이백"]}]
+        [{"name": "페이백 (12개월)", "value_won": 120_000, "categories": ["페이백"]}]
     )
     assert cash["deductible_won"] == 10_000 and cash["estimated"] is False
+    gift = benefit_summary(
+        [{"name": "마트 상품권 2만원", "value_won": 20_000, "categories": ["상품권/사은품"]}]
+    )
+    assert gift["monthly_won"] > 0 and gift["deductible_won"] == 0
 
     # 구독형은 이용 여부를 확인할 수 없어 차감하지 않는다.
     ott = benefit_summary([{"name": "넷플릭스", "value_won": 17_000, "categories": ["영상/OTT"]}])
@@ -1243,7 +1374,7 @@ if __name__ == "__main__":
     # 카드 실적·가입 조건이 붙은 현금 혜택도 자동 차감하지 않는다.
     carded = benefit_summary(
         [{
-            "name": "페이백 (12개월)", "value_won": 120_000, "categories": ["사은품/페이백"],
+            "name": "페이백 (12개월)", "value_won": 120_000, "categories": ["페이백"],
             "condition": "제휴카드 전월 실적 30만원",
         }]
     )

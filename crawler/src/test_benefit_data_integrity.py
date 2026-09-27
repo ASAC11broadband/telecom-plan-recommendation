@@ -8,14 +8,19 @@ from schema import (
     BENEFIT_CATEGORIES,
     classify_benefit_name,
     final_path,
+    serving_path,
     infer_benefit_search_categories,
+    is_duplicate_device_discount_fragment,
     normalize_service,
     summarize_benefits,
 )
 
 
 def _read(name: str) -> list[dict[str, str]]:
-    with final_path(name).open(encoding="utf-8-sig", newline="") as file:
+    path = final_path(name)
+    if not path.exists():
+        path = serving_path(name)
+    with path.open(encoding="utf-8-sig", newline="") as file:
         return list(csv.DictReader(file))
 
 
@@ -36,6 +41,22 @@ class BenefitDataIntegrityTests(unittest.TestCase):
                     ),
                     row["benefit_category"],
                 )
+
+    def test_repeated_device_discount_fragments_are_not_served(self):
+        self.assertFalse(any(is_duplicate_device_discount_fragment(row) for row in self.benefits))
+
+    def test_cashback_and_data_voucher_do_not_have_unrelated_search_tags(self):
+        for row in self.benefits:
+            tags = [tag for tag in row["benefit_search_categories"].split(" | ") if tag]
+            self.assertNotIn("사은품/페이백", tags, row["benefit_name"])
+            self.assertNotEqual(row["benefit_category"], "사은품/페이백")
+            self.assertNotIn(row["benefit_category"], tags, row["benefit_name"])
+            if row["benefit_category"] == "페이백":
+                self.assertNotIn("포인트/적립", tags, row["benefit_name"])
+            if row["benefit_category"] == "추가데이터":
+                self.assertNotIn("쿠폰/할인", tags, row["benefit_name"])
+            if row["benefit_category"] == "스마트기기 회선/데이터쉐어링":
+                self.assertNotIn("스마트기기", tags, row["benefit_name"])
 
     def test_same_benefit_name_never_has_conflicting_categories(self):
         categories_by_name: dict[str, set[str]] = defaultdict(set)

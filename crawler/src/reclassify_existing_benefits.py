@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import csv
+import argparse
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -15,7 +16,9 @@ from schema import (
     classify_benefit_name,
     final_path,
     infer_benefit_search_categories,
+    is_duplicate_device_discount_fragment,
     normalize_service,
+    serving_path,
     summarize_benefits,
 )
 
@@ -49,7 +52,13 @@ def _write_atomic(path: Path, columns: list[str], rows: list[dict[str, str]]) ->
 
 
 def main() -> None:
-    _benefit_columns, benefits = _read(BENEFITS_PATH)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--serving", action="store_true", help="추천 서비스의 data/ CSV를 재분류")
+    args = parser.parse_args()
+    benefit_path = serving_path(BENEFITS_PATH.name) if args.serving else BENEFITS_PATH
+    plans_path = serving_path(PLANS_PATH.name) if args.serving else PLANS_PATH
+    _benefit_columns, benefits = _read(benefit_path)
+    benefits = [row for row in benefits if not is_duplicate_device_discount_fragment(row)]
     changes: Counter[tuple[str, str]] = Counter()
     for benefit in benefits:
         before = benefit.get("benefit_category", "") or "기타"
@@ -71,14 +80,14 @@ def main() -> None:
     for benefit in benefits:
         by_plan[benefit.get("plan_id", "")].append(benefit)
 
-    plan_columns, plans = _read(PLANS_PATH)
+    plan_columns, plans = _read(plans_path)
     for plan in plans:
         summary = summarize_benefits(by_plan.get(plan.get("plan_id", ""), []))
         for field in SUMMARY_FIELDS:
             plan[field] = str(summary.get(field, ""))
 
-    _write_atomic(BENEFITS_PATH, BENEFIT_COLUMNS, benefits)
-    _write_atomic(PLANS_PATH, plan_columns, plans)
+    _write_atomic(benefit_path, BENEFIT_COLUMNS, benefits)
+    _write_atomic(plans_path, plan_columns, plans)
 
     print(f"혜택 {len(benefits)}건, 요금제 {len(plans)}건 재분류 완료")
     for (before, after), count in sorted(changes.items()):

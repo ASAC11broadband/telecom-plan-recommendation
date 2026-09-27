@@ -545,7 +545,7 @@ def parse_detail(plan_id: str, plan_name: str):
         # 반복 페이백이면 한 달치 금액을, 아니면 일시금을 그대로 싣는다.
         # 총액으로 접지 않으므로 기간(benefit_months)이 살아남는다.
         benefits.append(make_benefit_row(
-            plan_id, "", plan_name, classify_benefit_name(label, "사은품/페이백"), label,
+            plan_id, "", plan_name, classify_benefit_name(label, "상품권/사은품"), label,
             value_won=per_month if per_month is not None else (_parse_krw(label) or ""),
             value_basis="monthly" if per_month is not None else "",
             months=months,

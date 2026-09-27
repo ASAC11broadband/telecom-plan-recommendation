@@ -195,7 +195,7 @@ export interface RecommendResponse {
   referencePlan: PlanItem | null;
   /** 상품명을 몰라도 사용자가 말한 현재 납부액·데이터량만으로 비교할 때 쓰는 원본 값. */
   referenceFacts: ReferenceFacts | null;
-  /** 현재 요금제 유지/전환/판단불가. 서버가 코드로 판정한 값이며 LLM 판정이 아니다. */
+  /** 현재 요금제 대비 우위 후보 없음/전환 후보 있음/판단불가. 서버가 코드로 판정한다. */
   referenceVerdict: ReferenceVerdict | null;
   profile: Profile | null;
   followupQuestion: string | null;
