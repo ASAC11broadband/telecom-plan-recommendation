@@ -257,17 +257,23 @@ def _quick_chat_response(messages: list[Message]) -> dict | None:
 
     # 요금제 단서가 없는 평서문도 서비스 밖이다. 다만 요금제 추가 질문에 대한
     # 짧은 확인·나이·이용 시간 답변은 이어 받는다.
+    # 직전 답변이 잘못된 범위 거절이었어도 그보다 앞선 혜택 질문은 유지한다.
+    pending_benefit_question = False
+    for message in reversed(messages[:-1]):
+        if message.role != "assistant":
+            continue
+        if message.content.startswith("어떤 혜택을 찾으시나요?"):
+            pending_benefit_question = True
+            break
+        if message.content != _OFF_TOPIC_MESSAGE:
+            break
     short_plan_reply = (
-        previous_assistant
+        bool(previous_assistant)
         and previous_assistant != _OFF_TOPIC_MESSAGE
         and not previous_assistant.startswith(_PLAN_INFO_SCOPE_PREFIX)
-        and (
-            _SHORT_PLAN_REPLY_RE.fullmatch(latest)
-            or (
-                previous_assistant.startswith("어떤 혜택을 찾으시나요?")
-                and normalize_benefit_category(latest) is not None
-            )
-        )
+        and bool(_SHORT_PLAN_REPLY_RE.fullmatch(latest))
+    ) or (
+        pending_benefit_question and normalize_benefit_category(latest) is not None
     )
     if (
         _ARITHMETIC_RE.fullmatch(latest)
