@@ -367,6 +367,17 @@ class ServiceProcessTests(unittest.TestCase):
             '부가 혜택을 가장 중요하게 봐서 다시 추천해줘',
         )
         self.assertEqual(vague.followup_question, BENEFIT_PREFERENCE_QUESTION)
+        preferred = _apply_benefit_preference_question(
+            UserProfile(min_data_gb=50),
+            '데이터 50GB 이상이고 혜택을 선호해. 요금제 추천해줘',
+        )
+        self.assertEqual(preferred.followup_question, BENEFIT_PREFERENCE_QUESTION)
+        self.assertTrue(preferred.needs_user_input)
+        specific = _apply_benefit_preference_question(
+            UserProfile(min_data_gb=50, wanted_benefit_categories=['영상/OTT']),
+            '데이터 50GB 이상이고 OTT 혜택을 선호해. 요금제 추천해줘',
+        )
+        self.assertFalse(specific.needs_user_input)
         broad = UserProfile(wanted_benefits=['사은품이나 페이백'])
         optional = _repair_gift_pair_request(broad, '사은품이나 페이백 혜택을 보여줘')
         self.assertEqual(optional.wanted_benefit_categories, ['상품권/사은품', '페이백'])
@@ -452,6 +463,32 @@ class ServiceProcessTests(unittest.TestCase):
             Message(role='assistant', content=BENEFIT_PREFERENCE_QUESTION),
             Message(role='user', content='교육'),
         ]))
+        from agent.data import normalize_benefit_category
+        for reply, expected in (
+            ('보험 ,안심', '보험/안심'),
+            ('보험,안심', '보험/안심'),
+            ('보험/안심', '보험/안심'),
+            ('OTT, 영상', '영상/OTT'),
+            ('포인트 , 적립', '포인트/적립'),
+        ):
+            with self.subTest(reply=reply):
+                self.assertEqual(normalize_benefit_category(reply), expected)
+                self.assertIsNone(_quick_chat_response([
+                    Message(role='assistant', content=BENEFIT_PREFERENCE_QUESTION),
+                    Message(role='user', content=reply),
+                ]))
+        self.assertIsNone(_quick_chat_response([
+            Message(role='assistant', content=BENEFIT_PREFERENCE_QUESTION),
+            Message(role='user', content='보험 ,안심'),
+            Message(role='assistant', content='모모플랜은 휴대폰 요금제 비교를 도와드려요. 요금제와 관련되지 않은 질문에는 답할 수 없습니다.'),
+            Message(role='user', content='보험/안심'),
+        ]))
+        self.assertEqual(_quick_chat_response([
+            Message(role='assistant', content=BENEFIT_PREFERENCE_QUESTION),
+            Message(role='user', content='손흥민 알아?'),
+            Message(role='assistant', content='모모플랜은 휴대폰 요금제 비교를 도와드려요. 요금제와 관련되지 않은 질문에는 답할 수 없습니다.'),
+            Message(role='user', content='52-4는 뭐야?'),
+        ])['conversationKind'], 'off_topic')
         self.assertIsNone(_quick_chat_response([
             Message(role='assistant', content='연령을 알려주세요.'),
             Message(role='user', content='20대'),

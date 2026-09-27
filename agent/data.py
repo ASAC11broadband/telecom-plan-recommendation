@@ -152,7 +152,9 @@ BENEFIT_NAME_ALIASES = {
 
 def normalize_benefit_category(value: object) -> str | None:
     """사용자 표현 또는 정식 카테고리명을 DB 카테고리명으로 바꾼다."""
-    text = str(value or "").strip().casefold().replace("·", "/").replace(".", "/")
+    text = str(value or "").strip().casefold().replace(".", "/")
+    # 안내 문구의 '보험·안심'을 '보험, 안심'처럼 답해도 같은 분류로 읽는다.
+    text = re.sub(r"\s*[/,·]\s*", "/", text)
     # '복합/선택혜택'처럼 정식 명칭 자체가 '혜택'으로 끝나는 값은 먼저 확정한다.
     exact = BENEFIT_CATEGORY_ALIASES.get(text)
     if exact:
@@ -160,7 +162,14 @@ def normalize_benefit_category(value: object) -> str | None:
     for suffix in ("포함", "혜택", "제공", "되는", "있는", "카테고리"):
         if text.endswith(suffix) and len(text) > len(suffix):
             text = text[: -len(suffix)].strip()
-    return BENEFIT_CATEGORY_ALIASES.get(text)
+    category = BENEFIT_CATEGORY_ALIASES.get(text)
+    if category:
+        return category
+    # 'OTT, 영상'처럼 안내 문구의 두 단어를 반대 순서로 답한 경우도 허용한다.
+    parts = text.split("/")
+    if len(parts) == 2 and all(parts):
+        return BENEFIT_CATEGORY_ALIASES.get(f"{parts[1]}/{parts[0]}")
+    return None
 
 
 def has_benefit_category(categories: object, requested: object) -> bool:
