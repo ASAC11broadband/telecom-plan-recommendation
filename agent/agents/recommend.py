@@ -269,10 +269,10 @@ def _reference_verdict(
     candidates: list[dict],
     comparison_goals: list[str] | None = None,
 ) -> dict | None:
-    """현재 요금제를 유지하는 게 나은지 — 코드로만 판정한다.
+    """현재 요금제와 후보의 비교 결과를 코드로만 판정한다.
 
     세 상태를 구분한다. 특히 '판단 불가'를 '유지가 낫다'로 흘려보내지 않는다.
-      keep         현재 요금제를 모든 비교 항목에서 앞서는 후보가 없다.
+      keep         확인된 항목에서 현재 요금제보다 확실히 우위인 후보가 없다.
       switch       파레토 우위 후보가 있다(모든 항목에서 나쁘지 않고 최소 한 항목이 낫다).
       undetermined 비교가 성립하지 않는다 — 현재 스펙을 모르거나 후보가 없다.
 
@@ -356,9 +356,12 @@ def _reference_verdict(
     return {
         "status": "keep",
         "reason": (
-            scope + "현재 요금제보다 확실히 우위인 후보를 찾지 못했습니다. "
-            f"더 싼 후보 {cheaper}건은 제공량이나 속도와 맞교환이 필요합니다. "
-            "현재 수준을 유지하려면 기존 요금제도 선택지입니다. 이것만으로 현재 요금제가 최적이라고 단정할 수는 없습니다."
+            scope
+            + (
+                f"더 저렴한 후보 {cheaper}건은 데이터·속도·통화 등 다른 항목과 맞교환이 필요합니다. "
+                if cheaper else "더 저렴한 후보도 확인되지 않았습니다. "
+            )
+            + "아래 후보와 현재 요금제를 비교해 보세요."
         ),
         "betterCount": 0,
         "cheaperCount": cheaper,

@@ -173,6 +173,9 @@ def _full_speed_coverage(plan: dict, target_gb: float | None) -> float:
 
 
 def _benefit_fit(plan: dict, profile: object | dict | None) -> float:
+    # data.py가 이 모듈의 비교 기간 상수를 읽으므로 함수 안에서 가져와 순환 import를 피한다.
+    from .data import benefit_requests_match, has_benefit_category, normalize_benefit_category
+
     wanted_names = list(_profile_value(profile, "wanted_benefits") or [])
     wanted_categories = list(_profile_value(profile, "wanted_benefit_categories") or [])
     requested = len(wanted_names) + len(wanted_categories)
@@ -186,10 +189,18 @@ def _benefit_fit(plan: dict, profile: object | dict | None) -> float:
             *(str(value) for value in plan.get("benefit_details") or []),
         ]
     ).casefold()
-    categories = {str(value).casefold() for value in plan.get("benefit_categories") or []}
     matched_names = sum(str(value).casefold() in searchable for value in wanted_names)
-    matched_categories = sum(str(value).casefold() in categories for value in wanted_categories)
-    return (matched_names + matched_categories) / requested
+    matched_categories = sum(
+        has_benefit_category(plan.get("benefit_categories"), normalize_benefit_category(value))
+        for value in wanted_categories
+    )
+    matched = matched_names + matched_categories
+    if _profile_value(profile, "benefit_match_mode") == "any":
+        return 1.0 if matched else 0.0
+    if matched == requested and requested > 1 and _profile_value(profile, "benefit_match_mode") != "any":
+        if not benefit_requests_match(plan, wanted_names, wanted_categories, "all"):
+            matched -= 1  # 택1 선택지를 '모두 제공'으로 만점 처리하지 않는다.
+    return matched / requested
 
 
 def _utility_rows(

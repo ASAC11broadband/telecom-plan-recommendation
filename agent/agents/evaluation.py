@@ -22,7 +22,7 @@ import math
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from ..data import age_eligible, find_candidate, has_benefit, has_benefit_category, slim
+from ..data import age_eligible, benefit_requests_match, find_candidate, slim
 from ..schemas import Evaluation, UserProfile
 from ..state import PipelineState, get_eval_llm
 
@@ -62,23 +62,14 @@ retry_target 을 정해라 — 조건 추출이 틀렸으면 profiling, 고른 �
 리포트: {report}"""
 
 
-def _benefit_text(plan: dict) -> str:
-    return f"{plan.get('ott_options') or ''} | " + " | ".join(plan.get("included_benefits") or [])
-
-
 def _matches_requested_benefits(profile: UserProfile, plan: dict) -> bool:
     """서비스명·카테고리 조건을 프로필의 AND/OR 방식으로 함께 검증한다."""
-    checks = [
-        has_benefit(_benefit_text(plan), benefit)
-        for benefit in profile.wanted_benefits or []
-    ]
-    checks.extend(
-        has_benefit_category(plan.get("benefit_categories"), category)
-        for category in profile.wanted_benefit_categories or []
+    return benefit_requests_match(
+        plan,
+        profile.wanted_benefits or [],
+        profile.wanted_benefit_categories or [],
+        profile.benefit_match_mode,
     )
-    if not checks:
-        return True
-    return any(checks) if profile.benefit_match_mode == "any" else all(checks)
 
 
 # UserProfile 의 hard_constraints 필드명 → 후보 dict 검증식.

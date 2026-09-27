@@ -71,6 +71,37 @@ class BenefitClassificationTests(unittest.TestCase):
                     classify_benefit_name(name, "OTT/구독"), category
                 )
 
+    def test_device_discount_is_not_partner_service(self):
+        name = "디바이스 할인 (1개 or 2개 선택 가능) 1개 선택 시 최대 12천원 할인 2개 선택 시 각 최대 6천원 할인"
+        self.assertEqual(classify_benefit_name(name, "제휴서비스"), "스마트기기")
+        self.assertEqual(
+            infer_benefit_search_categories(name, "스마트기기"), []
+        )
+
+    def test_device_line_fee_is_not_hardware_discount(self):
+        for name in ("1대 월정액 할인 (최대 11,000원)", "2대 월정액 할인(최대 33,000원)"):
+            self.assertEqual(
+                classify_benefit_name(name, "스마트기기"),
+                "스마트기기 회선/데이터쉐어링",
+            )
+            self.assertEqual(
+                infer_benefit_search_categories(name, "스마트기기 회선/데이터쉐어링"), []
+            )
+
+    def test_writer_omits_repeated_device_discount_explanation(self):
+        detail = "디바이스 할인 (1개 or 2개 선택 가능) / 1개 선택 시 최대 12천원 할인"
+        rows = [
+            {"plan_id": "test", "benefit_name": "디바이스 할인 (1개 or 2개 선택 가능)", "benefit_detail": detail},
+            {"plan_id": "test", "benefit_name": "1개 선택 시 최대 12천원 할인", "benefit_detail": detail},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "benefits.csv"
+            write_benefits(rows, path)
+            with path.open(encoding="utf-8-sig", newline="") as file:
+                saved = list(csv.DictReader(file))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["benefit_category"], "스마트기기")
+
     def test_legacy_category_never_survives_as_default(self):
         result = classify_benefit_name("프로모션 혜택", "OTT/구독")
         self.assertEqual(result, "제휴서비스")
@@ -91,7 +122,7 @@ class BenefitClassificationTests(unittest.TestCase):
         self.assertEqual(primary, "교육/AI서비스")
         self.assertEqual(
             infer_benefit_search_categories(name, primary),
-            ["교육/AI서비스", "영상/OTT"],
+            ["영상/OTT"],
         )
 
     def test_mixed_media_bundle_has_all_search_categories(self):
@@ -112,17 +143,54 @@ class BenefitClassificationTests(unittest.TestCase):
             {"음악/오디오", "도서/콘텐츠", "제휴서비스"},
         )
 
-    def test_roaming_and_protection_are_other_even_when_coupon(self):
-        for name in (
-            "데이터 로밍 3일 무료 쿠폰",
-            "로밍 50% 할인",
-            "단말보험 최대 4,500원 할인",
-            "추가혜택 KT 안심박스 무료제공",
+    def test_roaming_and_protection_are_specific_even_when_coupon(self):
+        for name, category in (
+            ("데이터 로밍 3일 무료 쿠폰", "로밍"),
+            ("로밍 50% 할인", "로밍"),
+            ("단말보험 최대 4,500원 할인", "보험/안심"),
+            ("추가혜택 KT 안심박스 무료제공", "보험/안심"),
         ):
             with self.subTest(name=name):
                 self.assertEqual(
-                    classify_benefit_name(name, "사은품/페이백"), "기타"
+                    classify_benefit_name(name, "사은품/페이백"), category
                 )
+
+    def test_cash_gifts_coupons_and_sim_support_are_distinct(self):
+        for name, category in (
+            ("네이버페이 매달 5천원 페이백 (평생)", "페이백"),
+            ("첫 달 요금 네이버페이로 전액 환급", "페이백"),
+            ("요금 5천원 환급", "페이백"),
+            ("네이버페이 5,000원", "포인트/적립"),
+            ("네이버페이 매월 5,000P 제공", "포인트/적립"),
+            ("네이버페이 포인트로 5천원 환급", "포인트/적립"),
+            ("마트상품권, 네이버페이 최대 2만원", "상품권/사은품"),
+            ("쇼핑라운지 할인쿠폰 5천원권", "쿠폰/할인"),
+            ("KT유심&배송비 무료", "유심/배송비"),
+            ("유심사 3일 500MB 할인 쿠폰 지급", "쿠폰/할인"),
+            ("스마트기기 2회선 이용요금 무료", "스마트기기 회선/데이터쉐어링"),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(classify_benefit_name(name, "사은품/페이백"), category)
+
+    def test_single_category_does_not_repeat_in_search_tags(self):
+        name = "네이버페이 매달 5천원 페이백 (평생)"
+        tags = infer_benefit_search_categories(name, classify_benefit_name(name))
+        self.assertEqual(tags, [])
+
+    def test_data_coupon_is_not_cash_discount_coupon(self):
+        name = "데이터쿠폰 20GB"
+        self.assertEqual(classify_benefit_name(name), "추가데이터")
+        self.assertEqual(
+            infer_benefit_search_categories(name, "추가데이터"),
+            [],
+        )
+
+    def test_mixed_gift_and_point_keeps_both_search_types(self):
+        name = "마트상품권, 네이버페이 최대 2만원"
+        self.assertEqual(
+            infer_benefit_search_categories(name, classify_benefit_name(name)),
+            ["포인트/적립"],
+        )
 
     def test_membership_grade_without_membership_word(self):
         self.assertEqual(
@@ -142,7 +210,7 @@ class BenefitClassificationTests(unittest.TestCase):
             with path.open(encoding="utf-8-sig", newline="") as file:
                 saved = next(csv.DictReader(file))
         self.assertEqual(saved["benefit_category"], "도서/콘텐츠")
-        self.assertEqual(saved["benefit_search_categories"], "도서/콘텐츠")
+        self.assertEqual(saved["benefit_search_categories"], "")
         self.assertEqual(saved["benefit_service"], "조선일보")
 
     def test_merge_accepts_legacy_interim_without_search_category_column(self):

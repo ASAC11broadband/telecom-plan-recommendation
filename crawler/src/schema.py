@@ -162,8 +162,16 @@ BENEFIT_CATEGORIES = [
     "교육/AI서비스",
     "멤버십",
     "스마트기기",
+    "스마트기기 회선/데이터쉐어링",
     "추가데이터",
-    "사은품/페이백",
+    "페이백",
+    "포인트/적립",
+    "상품권/사은품",
+    "쿠폰/할인",
+    "유심/배송비",
+    "요금할인",
+    "로밍",
+    "보험/안심",
     "기타",
 ]
 
@@ -397,19 +405,67 @@ def classify_benefit_name(name: str, default: str = "기타") -> str:
         return "영상/OTT"
     if "구독" in folded:
         return "제휴서비스"
+    if any(k in text for k in ("로밍", "해외 eSIM")):
+        return "로밍"
+    if any(k in text for k in ("보험", "폰케어", "안심박스", "청소년 보호", "집지킴", "돌봄이")):
+        return "보험/안심"
     if any(k in text for k in OTHER_KEYWORDS):
         return "기타"
+    if any(k in text for k in ("데이터쉐어링", "데이터 쉐어링", "스마트기기 월정액", "스마트기기 이용 요금", "스마트기기 1회선", "스마트기기 2회선")):
+        return "스마트기기 회선/데이터쉐어링"
+    # 기기값·할부금 할인이 아니라 연결 회선의 월정액 할인이다.
+    if re.search(r"\d+\s*대\s*월정액", text):
+        return "스마트기기 회선/데이터쉐어링"
     if any(k in text for k in ("디바이스", "워치", "태블릿", "액션캠", "스마트기기")):
         return "스마트기기"
+    # 대상이 생략된 숫자 선택 문구만으로 제휴서비스라고 추정하지 않는다.
+    # 동일 행의 디바이스 할인 본문은 위 규칙으로 분류하고, 설명 조각은 별도 제거한다.
+    if re.search(r"\d+\s*개\s*선택\s*시", text):
+        return "기타"
     if any(k in text.upper() for k in MEMBERSHIP_KEYWORDS):
         return "멤버십"
     # 사은품 판정도 추가데이터보다 뒤다. "데이터쿠폰 20GB"(모요 23행)처럼 데이터를
     # 더 주는 혜택에 '쿠폰'이 붙는 이름이 있다.
     if EXTRA_DATA_RE.search(text):
         return "추가데이터"
-    if any(k in text for k in ("쿠폰", "상품권", "페이백", "캐시백", "사은품", "포인트")):
-        return "사은품/페이백"
+    # 지급 형태는 서로 대체할 수 없다. 네이버페이 포인트나 쿠폰만 주는 상품을
+    # 사용자의 '페이백' 요청에 포함시키지 않는다.
+    if any(k in text for k in ("페이백", "캐시백")):
+        return "페이백"
+    # 네이버페이는 지급 수단이다. '요금 환급'은 페이백으로 보되,
+    # 포인트로 환급한다고 명시한 경우는 현금 차감 대상으로 분류하지 않는다.
+    if "환급" in text and not (
+        any(k in text for k in ("포인트", "적립"))
+        or re.search(r"\d[\d,]*\s*P\b", text, re.IGNORECASE)
+    ):
+        return "페이백"
+    if re.search(r"유심(?!사)|배송비|\bUSIM\b", text, re.IGNORECASE):
+        return "유심/배송비"
+    if "요금할인" in text or "요금 할인" in text:
+        return "요금할인"
+    if any(k in text for k in ("상품권", "사은품", "증정", "에어팟")):
+        return "상품권/사은품"
+    if any(k in text for k in ("네이버페이", "포인트", "적립", "S-머니", "Npay")):
+        return "포인트/적립"
+    if any(k in text for k in ("쿠폰", "할인")):
+        # '1대 월정액 할인', '1개 선택 시 할인'처럼 이름에 대상이 생략된
+        # 선택지는 원래 크롤러 표의 유형을 유지한다.
+        if "쿠폰" not in text and default in {"스마트기기", "제휴서비스"}:
+            return default
+        return "쿠폰/할인"
+    if default == "사은품/페이백":
+        return "상품권/사은품"
     return default
+
+
+def is_duplicate_device_discount_fragment(row: dict) -> bool:
+    """KT 디바이스 할인 본문을 다시 쪼갠 선택 수/금액 설명 행만 식별한다."""
+    name = str(row.get("benefit_name") or "").strip()
+    detail = str(row.get("benefit_detail") or "")
+    return bool(
+        re.fullmatch(r"[12]개\s*선택\s*시\s*(?:각\s*)?최대\s*\d+천원\s*할인", name)
+        and "디바이스 할인" in detail
+    )
 
 
 # 결합·추가·공유로 데이터를 더 주는 혜택. (데이터|결합) 뒤에 (추가|공유|쉐어|결합|용량)이
@@ -488,7 +544,7 @@ MEMBERSHIP_KEYWORDS = (
 def infer_benefit_search_categories(
     name: str, primary_category: str | None = None
 ) -> list[str]:
-    """혜택 하나가 카테고리 검색에서 노출돼야 할 모든 분류를 돌려준다.
+    """대표 분류만으로 찾을 수 없는 실제 추가 검색 유형만 돌려준다.
 
     `benefit_category`는 대표 분류 하나를 유지한다. 대신 이름 하나에 영상·음악·
     도서 등이 함께 있는 복합 혜택은 이 목록에 관련 분류를 모두 넣어, 어느 쪽으로
@@ -497,9 +553,9 @@ def infer_benefit_search_categories(
     text = name or ""
     folded = text.casefold()
     primary = primary_category or classify_benefit_name(text)
-    # 복합은 데이터 관리용 대표 분류다. 검색 태그에는 사용자가 실제로 찾을
-    # 영상·음악·도서·기기·제휴 서비스 유형만 넣는다.
-    matched = set() if primary == "복합/선택혜택" else {primary}
+    # 일반 행의 대표 분류를 태그에 반복하지 않는다. 복합/선택혜택은 구성
+    # 서비스별로 검색되어야 하므로 그 실제 유형만 태그로 기록한다.
+    matched: set[str] = set()
 
     def contains_any(keywords) -> bool:
         return any(keyword.casefold() in folded for keyword in keywords)
@@ -514,10 +570,21 @@ def infer_benefit_search_categories(
         matched.add("도서/콘텐츠")
     if contains_any(DIGITAL_PARTNER_KEYWORDS):
         matched.add("제휴서비스")
-    if folded.strip() in {"삼성", "애플"} or any(
+    # 데이터쿠폰은 데이터 제공량이지 금전 할인 쿠폰이 아니다.
+    if "쿠폰" in text and primary != "추가데이터":
+        matched.add("쿠폰/할인")
+    if "상품권" in text:
+        matched.add("상품권/사은품")
+    # '네이버페이 페이백'의 네이버페이는 지급 수단이다. 페이백을 포인트 적립
+    # 혜택으로도 검색되게 하면 서로 다른 지급 방식을 혼동한다.
+    if primary != "페이백" and any(
+        token in text for token in ("네이버페이", "포인트", "적립", "S-머니")
+    ):
+        matched.add("포인트/적립")
+    if primary != "스마트기기 회선/데이터쉐어링" and (folded.strip() in {"삼성", "애플"} or any(
         keyword.casefold() in folded
         for keyword in ("디바이스", "워치", "태블릿", "액션캠", "스마트기기")
-    ):
+    )):
         matched.add("스마트기기")
 
     # KT가 세 서비스명을 줄여 쓴 원문. '지니'와 '밀리'만으로 전역 키워드를
@@ -525,18 +592,7 @@ def infer_benefit_search_categories(
     if "티빙/지니/밀리" in text:
         matched.update({"영상/OTT", "음악/오디오", "도서/콘텐츠"})
 
-    if not matched:
-        matched.add(primary)
-
-    # 대표 분류가 실제 검색 유형이면 맨 앞에 두고, 복합 대표 분류이면 실제
-    # 구성 요소만 공통 카테고리 순서대로 반환한다.
-    if primary in matched:
-        return [primary] + [
-            category
-            for category in BENEFIT_CATEGORIES
-            if category in matched and category != primary
-        ]
-    return [category for category in BENEFIT_CATEGORIES if category in matched]
+    return [category for category in BENEFIT_CATEGORIES if category in matched and category != primary]
 
 
 # "혜택" 칸에 적혀 있지만 실제로는 "별도로 더 주는 건 없다"는 뜻인 문구들
@@ -712,6 +768,7 @@ def write_plans(rows, path):
 
 
 def write_benefits(rows, path):
+    rows = [row for row in rows if not is_duplicate_device_discount_fragment(row)]
     for row in rows:
         # 통신사별 파서가 표 헤더에서 추정한 카테고리는 폴백일 뿐이다. 저장 직전에
         # 모든 행을 공통 규칙으로 다시 분류해야 새 크롤링에서도 예전 분류가 살아나지
@@ -800,13 +857,19 @@ def expand_select_variants(plan: dict, benefits: list[dict]) -> list[tuple[dict,
 
 def summarize_benefits(benefit_rows: list[dict]) -> dict:
     """혜택 long rows -> plans.csv에 넣을 요약 컬럼들."""
+    benefit_rows = [
+        row for row in benefit_rows if not is_duplicate_device_discount_fragment(row)
+    ]
     # ott_option_*은 이름 그대로 영상 OTT만 요약한다. 음악·전자책·AI 구독은
     # 별도 카테고리이며 OTT 개수에 더하지 않는다.
     ott = [b for b in benefit_rows if b["benefit_category"] == "영상/OTT"]
     membership = [b for b in benefit_rows if b["benefit_category"] == "멤버십"]
-    smart = [b for b in benefit_rows if b["benefit_category"] == "스마트기기"]
+    smart = [b for b in benefit_rows if b["benefit_category"] in {
+        "스마트기기", "스마트기기 회선/데이터쉐어링"
+    }]
     data = [b for b in benefit_rows if b["benefit_category"] == "추가데이터"]
-    gift = [b for b in benefit_rows if b["benefit_category"] == "사은품/페이백"]
+    gift_categories = {"페이백", "포인트/적립", "상품권/사은품", "쿠폰/할인", "유심/배송비", "요금할인"}
+    gift = [b for b in benefit_rows if b["benefit_category"] in gift_categories]
 
     def names(rows):
         return " | ".join(dict.fromkeys(r["benefit_name"] for r in rows if r.get("benefit_name")))
@@ -851,14 +914,14 @@ if __name__ == "__main__":
         ("추가데이터 10GB 제공", "사은품/페이백", "추가데이터"),
         ("헬로모바일 결합시, 추가 데이터 10GB 증정", "사은품/페이백", "추가데이터"),
         ("데이터쿠폰 20GB", "사은품/페이백", "추가데이터"),  # '쿠폰'보다 데이터가 먼저
-        # 진짜 사은품은 그대로 남아야 한다
-        ("네이버페이 5,000원", "사은품/페이백", "사은품/페이백"),
-        ("일반유심/배송비 무료", "사은품/페이백", "사은품/페이백"),
-        ("쇼핑라운지 할인쿠폰 5천원권", "기타", "사은품/페이백"),
-        ("에어팟4", "사은품/페이백", "사은품/페이백"),
+        # 같은 상위 분류였던 포인트·유심·쿠폰·사은품을 구별한다.
+        ("네이버페이 5,000원", "사은품/페이백", "포인트/적립"),
+        ("일반유심/배송비 무료", "사은품/페이백", "유심/배송비"),
+        ("쇼핑라운지 할인쿠폰 5천원권", "기타", "쿠폰/할인"),
+        ("에어팟4", "사은품/페이백", "상품권/사은품"),
         ("U+ 멤버십 VIP콕(24개월 간 매월 제공)", "사은품/페이백", "멤버십"),
-        ("스마트기기 이용 요금 50% 할인 (1회선)", "사은품/페이백", "스마트기기"),
-        ("폰케어 서비스", "기타", "기타"),
+        ("스마트기기 이용 요금 50% 할인 (1회선)", "사은품/페이백", "스마트기기 회선/데이터쉐어링"),
+        ("폰케어 서비스", "기타", "보험/안심"),
     ]
     for name, default, expected in CASES:
         got = classify_benefit_name(name, default)
