@@ -2,18 +2,22 @@
 
 실제 API를 호출하지 않는다. 추천 정확도/사용자 만족도 시험이 아니다.
 """
+import re
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
+from langchain_core.messages import HumanMessage
+from langgraph.graph import END
 from agent.data import (all_plans, benefit_requests_match, filter_candidates,
                         diagnose_empty, PLANS_CSV, CONSTRAINT_LABELS)
-from agent.schemas import UserProfile, ScoredPlan
+from agent.graph import route_after_evaluation
+from agent.schemas import ProfileCheck, ProfileIssue, UserProfile, ScoredPlan
 from agent.agents.recommend import (recommend_node, _apply_comparison, _reference_verdict,
                                     _dedupe_identical_offers, _diverse_selection, _offer_character,
                                     _is_pareto_better, _resolve_reference,
                                     _same_or_equivalent_to_reference, TOP_N)
-from agent.agents.evaluation import _ranking_errors, evaluation_node
+from agent.agents.evaluation import _ranking_errors, evaluation_node, profile_check_node
 from agent.agents.profiling import (BENEFIT_PREFERENCE_QUESTION, benefit_preference_missing,
                                     _apply_daily_allowance, _apply_explicit_qos_min, _apply_relaxed_fields,
                                     _apply_usage_based_qos,
@@ -1366,13 +1370,66 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertIsNone(response.json()['referencePlan'])
         self.assertEqual(response.json()['referenceFacts']['discounted_fee'], 50000)
 
-    def test_report_only_errors_retry_report(self):
+    def test_card_check_rewrites_report_once_then_drops_the_sentence(self):
         row = self.rows[0]
-        state = {'ranked': [ScoredPlan(plan_id=row['plan_id'], plan_name=row['plan_name'], score=90)],
-                 'candidates': [row], 'report': '', 'profile': None}
-        result = evaluation_node(state, {})
-        self.assertFalse(result['evaluation'].passed)
-        self.assertEqual(result['evaluation'].retry_target, 'report')
+        card = ScoredPlan(plan_id=row['plan_id'], plan_name=row['plan_name'], score=90,
+                          reason='가격 대비 쓸 만합니다. 위약금 없이 언제든 해지할 수 있습니다.')
+        state = {'ranked': [card], 'candidates': [row], 'report': card.reason, 'profile': None}
+        first = evaluation_node(state, {})
+        self.assertFalse(first['evaluation'].passed)
+        self.assertEqual(first['evaluation'].retry_target, 'report')
+        self.assertEqual(route_after_evaluation({**state, **first}, {}), 'report')
+        second = evaluation_node({**state, 'attempt': first['attempt']}, {})
+        self.assertTrue(second['evaluation'].passed)
+        self.assertEqual(second['ranked'][0].reason, '가격 대비 쓸 만합니다.')
+        self.assertEqual(route_after_evaluation({**state, **second}, {}), END)
+
+    def test_profile_check_releases_retracted_condition_that_repairs_revive(self):
+        """정규식 보정이 1턴의 '10GB 이하'를 되살려도, 인용이 확인된 철회는 그 자리에서 푼다."""
+        turns = ['월 2만원 이하, 데이터 10GB 이하로 추천해줘', '데이터 상한은 빼고 다시 추천해줘']
+        profile = UserProfile(budget_max_won=20000, max_data_gb=10,
+                              hard_constraints=['budget_max_won', 'max_data_gb'])
+        issue = ProfileIssue(field='max_data_gb', verdict='retracted', turn=2, quote='데이터 상한은 빼고',
+                             source_turn=1, source_quote='데이터 10GB 이하')
+        judge = MagicMock()
+        judge.with_structured_output.return_value.invoke.return_value = ProfileCheck(issues=[issue])
+        state = {'messages': [HumanMessage(content=t) for t in turns], 'profile': profile}
+        with patch('agent.agents.evaluation.get_eval_llm', return_value=judge):
+            result = profile_check_node(state, {})
+        self.assertIsNone(result['profile'].max_data_gb)
+        self.assertNotIn('max_data_gb', result['profile'].hard_constraints)
+        self.assertNotIn('relaxed_fields', result)  # 현재 요금제 기준선은 그대로 둔다
+
+        judge.with_structured_output.return_value.invoke.side_effect = TimeoutError()
+        with patch('agent.agents.evaluation.get_eval_llm', return_value=judge):
+            result = profile_check_node(state, {})
+        self.assertNotIn('profile', result)  # 검증 실패는 추천을 막지 않는다
+
+    def test_failed_rewrite_keeps_first_report_and_drops_only_flagged_sentence(self):
+        from langchain_core.messages import AIMessage
+        from agent.graph import graph
+
+        def write(messages, config=None):
+            if write.calls:
+                raise TimeoutError()  # 설명 검증이 시킨 재작성이 실패
+            write.calls += 1
+            data = messages[0].content.rsplit('<REPORT_DATA>', 1)[1]
+            names = re.findall(r'"plan_name": "([^"]+)"', data)[:TOP_N]
+            return AIMessage(content='\n\n'.join(
+                f'### {rank}순위 — {name}\n데이터가 넉넉합니다. 위약금 없이 해지할 수 있습니다.'
+                for rank, name in enumerate(dict.fromkeys(names), start=1)))
+        write.calls = 0
+        profiler, writer, judge = MagicMock(), MagicMock(), MagicMock()
+        profiler.with_structured_output.return_value.invoke.return_value = UserProfile(budget_max_won=30000, min_data_gb=20)
+        writer.invoke.side_effect = write
+        judge.with_structured_output.return_value.invoke.return_value = ProfileCheck()
+        with patch('agent.agents.profiling.get_profile_llm', return_value=profiler), \
+             patch('agent.agents.report.get_report_llm', return_value=writer), \
+             patch('agent.agents.evaluation.get_eval_llm', return_value=judge):
+            state = graph.invoke({'messages': [HumanMessage(content='3만원 이하 20GB 이상')]})
+        self.assertTrue(state['evaluation'].passed)
+        self.assertTrue(all('위약금' not in plan.reason for plan in state['ranked']))
+        self.assertTrue(all('데이터가 넉넉합니다.' in plan.reason for plan in state['ranked'][:TOP_N]))
 
     def test_input_limits(self):
         self.assertEqual(self.client.post('/api/analysis/ask', json={'question': 'x' * 2001}).status_code, 422)

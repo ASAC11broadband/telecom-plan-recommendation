@@ -42,6 +42,8 @@ class PipelineState(TypedDict, total=False):
 
     feedback: Annotated[list[str], operator.add]  # 재시도 피드백 누적
     attempt: int                                  # 리포트를 만든 횟수
+    # 검증 에이전트가 무엇을 잡고 어떻게 했는지. 화면에는 내보내지 않고 로그·분석용으로만 쓴다.
+    eval_log: Annotated[list[dict], operator.add]
 
 
 def user_query(state: PipelineState) -> str:
@@ -96,5 +98,9 @@ def get_llm(config: RunnableConfig | None = None) -> BaseChatModel:
 
 
 def get_eval_llm(config: RunnableConfig | None = None) -> BaseChatModel:
-    """평가 전용. 규칙 준수가 중요해서 상위 모델 (mini 는 판정 지시를 무시하는 경향)."""
-    return ChatOpenAI(model=EVAL_MODEL, temperature=TEMPERATURE, max_retries=MAX_RETRIES, timeout=40)
+    """조건 검증 전용. 규칙 준수가 중요해서 상위 모델 (mini 는 판정 지시를 무시하는 경향).
+
+    검증은 결과물이 아니라서 오래 기다릴 가치가 없다. 실패하면 검증을 건너뛰고
+    추천은 그대로 나가므로(fail-open) 재시도를 줄이고 시간 제한을 짧게 둔다.
+    """
+    return ChatOpenAI(model=EVAL_MODEL, temperature=TEMPERATURE, max_retries=1, timeout=20)
