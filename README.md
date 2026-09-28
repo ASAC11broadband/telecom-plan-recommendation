@@ -4,7 +4,7 @@
 다기준(SMAA-2) 순위와 근거 리포트를 만든다. 총비용 비교는 12개월 기준이다.
 
 ```
-agent/      LLM 파이프라인 (profiling → recommend → report → evaluation)
+agent/      LLM 파이프라인 (profiling → 조건 검증 → recommend → report → 설명 검증)
 backend/    FastAPI
 frontend/   React + Vite 화면
 crawler/    통신 3사·모요 수집·일일 갱신
@@ -44,7 +44,7 @@ cd frontend && npm install && npm run dev       # 프론트 (5173)
 ```bash
 python -m agent.data              # 하드 필터
 python -m agent.agents.report     # ranked ↔ candidates 결합 (plan_id 기준)
-python -m agent.agents.evaluation # 환각·Hard Constraint·순위 검증
+python -m agent.agents.evaluation # 조건 검증(발화 인용 대조)·설명 검증(카드 문장)
 python -m backend.plans           # 12개월 비용 계산, PlanItem 변환
 cd frontend && npm run lint       # 타입 체크
 ```

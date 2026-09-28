@@ -394,9 +394,13 @@ def _clean_card_reason(reason: str) -> str:
     누락된 원본 값은 전체 리포트의 가입 전 확인에서 다룰 수 있지만, 그 사실만으로는
     추천 근거가 아니므로 상품별 카드 문장에서 제거한다.
     """
-    sentences = re.split(r"\n+|(?<=[.!?。])\s+", reason or "")
-    useful = [sentence.strip() for sentence in sentences if sentence.strip() and not _UNHELPFUL_CARD_REASON.search(sentence)]
+    useful = [sentence for sentence in split_sentences(reason) if not _UNHELPFUL_CARD_REASON.search(sentence)]
     return " ".join(useful)
+
+
+def split_sentences(text: str) -> list[str]:
+    """카드 문장 단위. 화면(ReportScreen reasonPoints)과 설명 검증이 같은 규칙으로 자른다."""
+    return [sentence.strip() for sentence in re.split(r"\n+|(?<=[.!?。])\s+", text or "") if sentence.strip()]
 
 
 def _card_reason(reason: str, plan: Mapping[str, Any]) -> str:
@@ -501,11 +505,26 @@ def report_node(state: PipelineState, config: RunnableConfig) -> dict:
         prompt = REPORT_PROMPT.format(
             report_data=json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         )
-        response = get_report_llm(config).invoke(
-            [SystemMessage(content=prompt)], config=config
+        # 설명 검증이 시킨 재작성이 실패하면 앞서 만든 리포트를 그대로 둔다. evaluation 이 걸린
+        # 문장만 빼고 끝낸다. 첫 작성의 실패는 예전처럼 올려 보낸다. 재작성인지는 이번 실행의
+        # 검증 결과로 판단한다(attempt·report 는 체크포인터 스레드에서 이전 턴 값이 남는다).
+        previous = state.get("evaluation")
+        rewriting = bool(
+            state.get("report") and previous is not None
+            and not previous.passed and previous.retry_target == "report"
         )
-        report = _response_text(response.content)
+        try:
+            response = get_report_llm(config).invoke(
+                [SystemMessage(content=prompt)], config=config
+            )
+            report = _response_text(response.content)
+        except Exception:
+            if rewriting:
+                return {}
+            raise
         if not report:
+            if rewriting:
+                return {}
             raise ValueError("Report Agent가 빈 응답을 반환했습니다.")
         report = _repair_daily_reference_claim(report, reference)
         report = _ensure_all_ranks(report, recommendations)

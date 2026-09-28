@@ -193,6 +193,31 @@ class UserProfile(BaseModel):
     notes: Optional[str] = Field(None, description="기타 요구사항 요약. 언급 없으면 null")
 
 
+class ProfileIssue(BaseModel):
+    """조건 검증(Evaluation ①)이 찾은 추출 오류 하나. 인용은 코드가 발화와 대조한다."""
+
+    field: str = Field(..., description="문제가 있는 UserProfile 필드명")
+    verdict: Literal["retracted", "wrong_value", "missed", "soften", "phantom"] = Field(
+        ...,
+        description=(
+            "retracted: 뒤 턴에서 뺀 조건이 남아 있음 / wrong_value: 값이 말한 것과 다름 / "
+            "missed: 말한 조건이 빠짐 / soften: 희망으로 말한 혜택이 필수로 들어감 / "
+            "phantom: 말한 적 없는 조건"
+        ),
+    )
+    turn: int = Field(..., ge=1, description="quote 가 있는 사용자 발화 번호(1부터)")
+    quote: str = Field(..., description="근거가 되는 사용자 발화 원문을 글자 그대로 복사")
+    source_turn: Optional[int] = Field(None, description="retracted 일 때 조건을 처음 건 발화 번호")
+    source_quote: Optional[str] = Field(None, description="retracted 일 때 조건을 처음 건 원문")
+    value: Optional[float] = Field(None, description="wrong_value/missed 일 때 사용자가 말한 값(원·GB·분 단위 숫자)")
+
+
+class ProfileCheck(BaseModel):
+    """조건 검증 결과. 문제가 없으면 빈 목록."""
+
+    issues: list[ProfileIssue] = Field(default_factory=list)
+
+
 class ScoredPlan(BaseModel):
     """2단계 산출물 — 점수가 매겨진 요금제 하나."""
 
@@ -219,7 +244,7 @@ class ScoredPlan(BaseModel):
 
 
 class Evaluation(BaseModel):
-    """4단계 산출물 — 채점 결과와 재시도 지시."""
+    """4단계 산출물 — 설명 검증 결과와 재시도 지시. 화면은 passed 만 읽는다."""
 
     passed: bool = Field(False, description="리포트가 후보 데이터와 모순되는 주장이 없으면 true")
     feedback: str = Field("", description="모순 내용과 개선 지시. 합격이면 빈 문자열")
