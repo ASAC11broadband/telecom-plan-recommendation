@@ -90,6 +90,25 @@ def _with_current_facts(plan: dict, profile: UserProfile) -> dict:
     return current
 
 
+def _has_value(value: object) -> bool:
+    return value is not None and value != "" and not (
+        isinstance(value, float) and math.isnan(value)
+    )
+
+
+def _compatible_duplicate_rows(plans: list[dict], fields: tuple[str, ...]) -> bool:
+    """출처별 중복 행에서 빈값은 충돌로 보지 않고, 확인된 값끼리만 비교한다."""
+    return all(
+        len({plan.get(field) for plan in plans if _has_value(plan.get(field))}) <= 1
+        for field in fields
+    )
+
+
+def _most_complete_row(plans: list[dict], fields: tuple[str, ...]) -> dict:
+    """동일 상품 중 비교 필드가 가장 잘 채워진 행을 기준으로 사용한다."""
+    return max(plans, key=lambda plan: sum(_has_value(plan.get(field)) for field in fields))
+
+
 def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
     if not profile.reference_plan_name:
         return _reference_from_profile(profile), None
@@ -115,9 +134,8 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
             "data_gb", "data_unlimited", "qos_mbps", "voice_minutes",
             "voice_unlimited", "network_gen", "carrier", "mvno_brand",
         )
-        identities = {tuple(plan.get(field) for field in identity_fields) for plan in matched}
-        if len(identities) == 1:
-            return _with_current_facts(matched[0], profile), None
+        if _compatible_duplicate_rows(matched, identity_fields):
+            return _with_current_facts(_most_complete_row(matched, identity_fields), profile), None
 
     spec_fields = (
         "discounted_fee",
@@ -128,9 +146,8 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
         "voice_unlimited",
         "network_gen",
     )
-    specs = {tuple(plan.get(field) for field in spec_fields) for plan in matched}
-    if len(specs) == 1:
-        return _with_current_facts(matched[0], profile), None
+    if _compatible_duplicate_rows(matched, spec_fields):
+        return _with_current_facts(_most_complete_row(matched, spec_fields), profile), None
 
     names = {str(plan.get("plan_name") or "").strip() for plan in matched}
     if len(names) == 1:
@@ -139,10 +156,15 @@ def _resolve_reference(profile: UserProfile) -> tuple[dict | None, str | None]:
             for plan in matched
             if plan.get("discounted_fee") is not None
         })
-        fee_choices = " 또는 ".join(f"월 {fee:,}원" for fee in fees)
+        if len(fees) > 1:
+            fee_choices = " 또는 ".join(f"월 {fee:,}원" for fee in fees)
+            return None, (
+                f"'{next(iter(names))}' 상품은 확인했습니다. 같은 이름에 가격 조건이 여러 개 있습니다. "
+                f"현재 실제 월 납부액이 {fee_choices} 중 어느 쪽인지 알려주세요."
+            )
         return None, (
-            f"'{next(iter(names))}' 상품은 확인했습니다. 같은 이름에 가격 조건이 여러 개 있습니다. "
-            f"현재 실제 월 납부액이 {fee_choices} 중 어느 쪽인지 알려주세요."
+            f"'{next(iter(names))}' 상품은 확인했지만 같은 요금에 제공 조건이 다른 상품이 있습니다. "
+            "데이터 제공량이나 통신 세대를 함께 알려주세요."
         )
 
     choices = ", ".join(
@@ -261,7 +283,17 @@ def _known_comparison_price(plan: dict) -> bool:
         return False
     fee = plan.get('discounted_fee')
     regular = plan.get('monthly_fee')
-    return fee is not None and (regular is None or regular == fee or plan.get('discount_period_months') is not None)
+    discount_type = str(plan.get('discount_type') or '')
+    # 선택약정은 몇 개월 뒤 정상가로 복귀하는 단기 프로모션이 아니라 약정 기간 동안
+    # 정률로 적용되는 요금 조건이다. 수집 데이터에 별도 할인 개월 수가 없어도
+    # 표시된 선택약정 월 요금은 카탈로그 간 비교 기준으로 사용할 수 있다.
+    recurring_contract_discount = '선택약정' in discount_type
+    return fee is not None and (
+        regular is None
+        or regular == fee
+        or plan.get('discount_period_months') is not None
+        or recurring_contract_discount
+    )
 
 
 def _reference_verdict(
@@ -269,7 +301,7 @@ def _reference_verdict(
     candidates: list[dict],
     comparison_goals: list[str] | None = None,
 ) -> dict | None:
-    """현재 요금제와 후보의 비교 결과를 코드로만 판정한다.
+    """기준 요금제와 후보의 비교 결과를 코드로만 판정한다.
 
     세 상태를 구분한다. 특히 '판단 불가'를 '유지가 낫다'로 흘려보내지 않는다.
       keep         확인된 항목에서 현재 요금제보다 확실히 우위인 후보가 없다.
@@ -291,7 +323,7 @@ def _reference_verdict(
         return {
             "status": "undetermined",
             "reason": (
-                f"현재 요금제의 {', '.join(missing)}을(를) 알 수 없어 지금이 유리한지 판단하지 못했습니다."
+                f"기준 요금제의 {', '.join(missing)}을(를) 알 수 없어 비교 결과를 판단하지 못했습니다."
             ),
             "missing": missing,
             "confirm": confirm,
@@ -301,8 +333,8 @@ def _reference_verdict(
         return {
             "status": "undetermined",
             "reason": (
-                "조건을 만족하는 후보가 없어 현재 요금제와 비교하지 못했습니다. "
-                "후보가 없다는 것이 현재 요금제가 유리하다는 뜻은 아닙니다."
+                "조건을 만족하는 후보가 없어 기준 요금제와 비교하지 못했습니다. "
+                "후보가 없다는 것이 기준 요금제가 유리하다는 뜻은 아닙니다."
             ),
             "missing": [],
             "confirm": confirm,
@@ -311,7 +343,7 @@ def _reference_verdict(
     comparable = [plan for plan in candidates
                   if axes.issubset(_known_reference_axes(plan)) and _known_comparison_price(plan)]
     if not comparable:
-        return {"status": "undetermined", "reason": "후보의 요금·제공량 정보가 부족해 현재 요금제와 비교하지 못했습니다.",
+        return {"status": "undetermined", "reason": "후보의 요금·제공량 정보가 부족해 기준 요금제와 비교하지 못했습니다.",
                 "missing": [], "confirm": confirm}
     better = sum(1 for plan in comparable if _is_pareto_better(plan, reference))
     cheaper = sum(1 for plan in comparable
@@ -321,7 +353,7 @@ def _reference_verdict(
         return {
             "status": "switch",
             "reason": (
-                scope + f"현재 요금제보다 나쁘지 않고 최소 한 항목이 더 나은 후보가 {better}건 있습니다. 실제 전환 이익은 결합할인과 위약금 확인 후 판단해 주세요."
+                scope + f"기준 요금제보다 나쁘지 않고 최소 한 항목이 더 나은 후보가 {better}건 있습니다. 실제 전환 이익은 결합할인과 위약금 확인 후 판단해 주세요."
             ),
             "betterCount": better,
             "cheaperCount": cheaper,
@@ -345,7 +377,7 @@ def _reference_verdict(
             "reason": (
                 f"요청하신 {requested} 조건을 만족하는 후보는 찾았습니다. 다만 "
                 f"{COMPARE_MONTHS}개월 평균요금·데이터·소진 후 속도·통화를 함께 비교하면 "
-                "현재 요금제보다 모든 항목에서 나쁘지 않은 완전한 상위 호환 후보는 없습니다. "
+                "기준 요금제보다 모든 항목에서 나쁘지 않은 완전한 상위 호환 후보는 없습니다. "
                 "아래 추천은 원하는 개선점과 다른 조건 사이의 맞교환 후보입니다."
             ),
             "betterCount": 0,
@@ -361,7 +393,7 @@ def _reference_verdict(
                 f"더 저렴한 후보 {cheaper}건은 데이터·속도·통화 등 다른 항목과 맞교환이 필요합니다. "
                 if cheaper else "더 저렴한 후보도 확인되지 않았습니다. "
             )
-            + "아래 후보와 현재 요금제를 비교해 보세요."
+            + "아래 후보와 기준 요금제를 비교해 보세요."
         ),
         "betterCount": 0,
         "cheaperCount": cheaper,

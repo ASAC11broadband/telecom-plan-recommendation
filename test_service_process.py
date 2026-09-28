@@ -24,7 +24,7 @@ from agent.agents.profiling import (BENEFIT_PREFERENCE_QUESTION, benefit_prefere
                                     _apply_user_age, _drop_reference_name_data_constraint,
                                     _repair_budget_bounds, _repair_general_comparison,
                                     _drop_unrequested_benefit_followup)
-from backend.main import (app, Message, _quick_chat_response, _inferred_relaxed_fields,
+from backend.main import (app, Message, _plan_qa_context, _quick_chat_response, _inferred_relaxed_fields,
                           _llm_calls, LLM_CALLS_PER_MINUTE)
 from backend.plans import (COMPARE_MONTHS, monthly_fee_schedule, reference_delta,
                            to_plan_item, total_cost)
@@ -72,6 +72,31 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertIsNone(question)
         self.assertEqual(selected['plan_name'], 'TOP 11GB 기본 (CU할인)')
         self.assertEqual(selected['discounted_fee'], 7700)
+
+    def test_same_plan_from_two_sources_uses_complete_row_without_reasking_price(self):
+        """요고 30의 공식·모요 중복은 빈 network_gen 차이만으로 다른 상품이 아니다."""
+        reference, question = _resolve_reference(UserProfile(reference_plan_name='요고 30'))
+        self.assertIsNone(question)
+        self.assertEqual(reference['plan_name'], '요고 30')
+        self.assertEqual(reference['discounted_fee'], 30000)
+        self.assertEqual(reference['network_gen'], '5G')
+
+        reference, question = _resolve_reference(UserProfile(
+            reference_plan_name='요고 30', reference_fee_won=30000,
+        ))
+        self.assertIsNone(question)
+        self.assertEqual(reference['discounted_fee'], 30000)
+
+    def test_one_character_plan_name_typo_resolves_only_unique_close_name(self):
+        """요교 30처럼 유일한 한 글자 오타는 요고 30으로 연결한다."""
+        from agent.data import find_plans_by_name
+
+        matched = find_plans_by_name('요교 30')
+        self.assertTrue(matched)
+        self.assertEqual({plan['plan_name'] for plan in matched}, {'요고 30'})
+        reference, question = _resolve_reference(UserProfile(reference_plan_name='요교 30'))
+        self.assertIsNone(question)
+        self.assertEqual(reference['plan_name'], '요고 30')
 
     def test_price_only_reply_selects_the_ambiguous_current_plan(self):
         """가격 확인 질문에 '월 7,700원짜리'라고만 답해도 예산이 아닌 현재 요금이다."""
@@ -228,6 +253,52 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(AVERAGE_MOBILE_GAME_GB_PER_HOUR, expected_mean)
         self.assertEqual(game, 9.0)
         self.assertTrue(any('0.068GB/시간' in note for note in notes))
+
+    def test_named_app_usage_is_stable_across_benefit_followups(self):
+        from agent.agents.profiling import _normalize_profile, _repair_explicit_app_usages
+
+        conversation = (
+            '유튜브 하루에 한시간 보고 게임도 하루에 한시간 해 월 4만원 이하로 추천해줘\n'
+            '월 40,000원 이하 조건은 그대로 두고, 부가 혜택을 가장 중요하게 봐서 다시 추천해줘.\n'
+            '쿠폰,할인'
+        )
+        drifted = UserProfile(daily_video_hours=1, daily_game_hours=1)
+        repaired = _normalize_profile(_repair_explicit_app_usages(drifted, conversation))
+
+        self.assertEqual(
+            {usage.service: usage.daily_hours for usage in repaired.app_usages},
+            {'youtube': 1.0, 'mobile_game': 1.0},
+        )
+        self.assertIsNone(repaired.daily_video_hours)
+        self.assertIsNone(repaired.daily_game_hours)
+        self.assertEqual(repaired.estimated_monthly_data_gb, 67.5)
+
+    def test_other_named_streaming_apps_keep_their_own_usage_rates(self):
+        from agent.agents.profiling import _normalize_profile, _repair_explicit_app_usages
+
+        conversation = '넷플릭스 하루 30분, 디즈니 플러스 하루 두시간 봐\n혜택은 쿠폰 할인이 중요해'
+        repaired = _normalize_profile(_repair_explicit_app_usages(
+            UserProfile(daily_video_hours=2.5), conversation))
+        usages = {usage.service: usage.daily_hours for usage in repaired.app_usages}
+
+        self.assertEqual(usages, {'netflix': 0.5, 'disney_plus': 2.0})
+        self.assertIsNone(repaired.daily_video_hours)
+        self.assertEqual(repaired.estimated_monthly_data_gb, 172.0)
+
+    def test_later_app_time_change_or_removal_wins(self):
+        from agent.agents.profiling import _repair_explicit_app_usages
+
+        changed = _repair_explicit_app_usages(
+            UserProfile(app_usages=[{'service': 'youtube', 'daily_hours': 1}]),
+            '유튜브 하루 한시간 봐\n유튜브는 하루 30분으로 바꿔줘',
+        )
+        removed = _repair_explicit_app_usages(
+            changed,
+            '유튜브 하루 한시간 봐\n이제 유튜브는 빼줘',
+        )
+
+        self.assertEqual(changed.app_usages[0].daily_hours, 0.5)
+        self.assertEqual(removed.app_usages, [])
 
     def test_app_quality_qos_is_only_applied_for_post_exhaustion_use(self):
         plain = _apply_usage_based_qos(UserProfile(), '유튜브 HD 화질로 봐요')
@@ -433,6 +504,55 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertFalse(benefit_requests_match(
             smart_line, [], ['스마트기기', '스마트기기 회선/데이터쉐어링'], 'all'))
 
+    def test_specific_plan_benefit_questions_do_not_start_recommendation(self):
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content='초이스 OTT 1개를 포함합니다.')
+        for question in (
+            '요고 30 요금제의 혜택에는 어떤 게 있어?',
+            '요교 30 요금제를 쓰는데 혜택에 어떤 게 있지?',
+        ):
+            with self.subTest(question=question), \
+                 patch('backend.main.graph.invoke') as invoke, \
+                 patch('backend.main.get_llm', return_value=llm):
+                response = self.client.post('/api/recommend', json={
+                    'messages': [{'role': 'user', 'content': question}],
+                })
+                invoke.assert_not_called()
+            payload = response.json()
+            self.assertTrue(payload['conversationOnly'])
+            self.assertEqual(payload['conversationKind'], 'plan_info')
+            self.assertEqual(payload['plans'], [])
+            self.assertIn('초이스 OTT 1개', payload['assistantMessage'])
+            self.assertNotIn('3개의 요금제', payload['assistantMessage'])
+
+    def test_plan_qa_router_handles_information_followups_but_not_recommendations(self):
+        information_questions = (
+            '요고 30 요금제 월 요금은 얼마야?',
+            '요고 30 요금제 데이터는 몇 GB야?',
+            '요고 30 요금제는 다 쓰면 속도가 어떻게 돼?',
+            '요고 30 요금제 통화는 무제한이야?',
+            '요고 30 요금제 할인 기간은?',
+            '요고 30 요금제 만 35세도 가입할 수 있어?',
+            '요고 30 요금제 테더링은 얼마나 돼?',
+        )
+        for question in information_questions:
+            with self.subTest(question=question):
+                self.assertIsNotNone(_plan_qa_context([Message(role='user', content=question)]))
+
+        followup = [
+            Message(role='user', content='요고 30 요금제 데이터는 몇 GB야?'),
+            Message(role='assistant', content='월 8GB입니다.'),
+            Message(role='user', content='그럼 다 쓰면 속도는?'),
+        ]
+        self.assertIsNotNone(_plan_qa_context(followup))
+        for question in (
+            '요고 30보다 데이터 많은 요금제 추천해줘',
+            '요고 30과 다른 요금제를 비교해줘',
+            '요고 30 대신 더 좋은 대안을 찾아줘',
+        ):
+            with self.subTest(question=question):
+                self.assertIsNone(_plan_qa_context([Message(role='user', content=question)]))
+
     def test_unrelated_questions_stay_in_chat_without_llm(self):
         for question in ('손흥민 알아?', '52-4는 뭐야?', '한국의 수도가 어디야?', '나 너 좋아해'):
             with self.subTest(question=question), patch('backend.main.graph.invoke') as invoke:
@@ -506,6 +626,52 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(_quick_chat_response([
             Message(role='user', content='게임 추천해줘'),
         ])['conversationKind'], 'off_topic')
+
+    def test_price_answers_distinguish_promo_regular_payback_and_contract(self):
+        from backend.main import _plan_price_answer
+
+        promo = _plan_price_answer({
+            'plan_name': '음성기본 4.5GB+', 'monthly_fee': 16390,
+            'discounted_fee': 10, 'discount_type': '신규 프로모션 할인',
+            'discount_period_months': 6, 'billing_price_known': True,
+        })
+        regular = _plan_price_answer({
+            'plan_name': '일반 요금제', 'monthly_fee': 20000,
+            'discounted_fee': 20000, 'discount_type': '', 'billing_price_known': True,
+        })
+        contract = _plan_price_answer({
+            'plan_name': '선택 요금제', 'monthly_fee': 110000,
+            'discounted_fee': 82500, 'discount_type': '선택약정 25% 할인',
+            'discount_period_months': None, 'billing_price_known': True,
+        })
+        payback = _plan_price_answer({
+            'plan_name': '페이백 요금제', 'monthly_fee': 49000,
+            'discounted_fee': 49000, 'discount_type': '페이백',
+            'billing_price_known': True, 'payback_included_fee': 7000,
+            'payback_schedule': '34000x6 | 8000x12',
+        })
+
+        self.assertIn('6개월간 월 10원', promo)
+        self.assertIn('종료 후 정상가는 월 16,390원', promo)
+        self.assertEqual(regular, '일반 요금제의 정상 월 요금은 20,000원입니다.')
+        self.assertIn('선택약정 25% 적용 기준 월 82,500원', contract)
+        self.assertIn('정상가는 월 110,000원', contract)
+        self.assertIn('실제 청구 월 요금과는 다릅니다', payback)
+        self.assertIn('34,000원×6개월 + 8,000원×12개월', payback)
+
+    def test_direct_plan_price_question_uses_price_rules_without_llm(self):
+        row = next(plan for plan in self.rows if plan['plan_name'] == '음성기본 4.5GB+')
+        with patch('backend.main.get_llm') as llm:
+            response = self.client.post('/api/ask', json={
+                'planId': row['plan_id'],
+                'question': '이 요금제 월 요금은 얼마야?',
+                'history': [],
+            })
+        self.assertEqual(response.status_code, 200)
+        llm.assert_not_called()
+        answer = response.json()['answer']
+        self.assertIn('6개월간 월 10원', answer)
+        self.assertIn('종료 후 정상가는 월 16,390원', answer)
 
     def test_plan_information_question_confirms_scope_then_answers(self):
         with patch('backend.main.graph.invoke') as invoke:
@@ -884,6 +1050,19 @@ class ServiceProcessTests(unittest.TestCase):
             ['price'])
         # 조건만 말한 발화는 정렬 요구가 아니다(_drop_inferred_priorities 와 같은 기준).
         self.assertEqual(_repair_latest_priority(profile, asked).priorities, ['price'])
+
+    def test_qos_priority_does_not_activate_data_amount(self):
+        """'데이터 소진 후 속도'에서 데이터는 제공량 축이 아니라 QoS 용어의 일부다."""
+        from agent.agents.profiling import _axes_in_priority_clauses, _repair_latest_priority
+
+        text = '월 40,000원 이하 조건은 그대로 두고, 데이터 소진 후 속도를 가장 중요하게 봐서 다시 추천해줘.'
+        self.assertEqual(_axes_in_priority_clauses(text), ['qos'])
+        repaired = _repair_latest_priority(UserProfile(priorities=['data']), text)
+        self.assertEqual(repaired.priorities, ['qos'])
+
+        # 사용자가 두 축을 실제로 따로 말한 경우에는 둘 다 유지한다.
+        both = '데이터 제공량과 소진 후 속도를 가장 중요하게 봐줘'
+        self.assertEqual(_axes_in_priority_clauses(both), ['data', 'qos'])
 
     def test_weight_robustness_is_measured_not_claimed(self):
         """'가중치를 흔들어도 결론이 같다'는 발표 문장을 코드가 매번 다시 잰다.
@@ -1277,6 +1456,23 @@ class ServiceProcessTests(unittest.TestCase):
         self.assertEqual(_reference_verdict(current, [promo])['status'], 'keep')
         self.assertEqual(_apply_comparison([promo], current, ['cheaper']), [])
         self.assertEqual(_reference_verdict(current, [dict(promo, discount_period_months=None)])['status'], 'undetermined')
+
+    def test_selected_contract_price_is_comparable_without_promo_period(self):
+        reference = {
+            'discounted_fee': 82500,
+            'monthly_fee': 110000,
+            'discount_type': '선택약정 25% 할인',
+            'discount_period_months': None,
+            'data_unlimited': True,
+        }
+        candidate = {
+            'discounted_fee': 70000,
+            'monthly_fee': 70000,
+            'data_unlimited': True,
+        }
+        verdict = _reference_verdict(reference, [candidate], ['cheaper'])
+        self.assertNotEqual(verdict['status'], 'undetermined')
+        self.assertNotIn('할인 기간을 포함한 요금', verdict['missing'])
 
     def test_false_unlimited_is_not_known_allowance(self):
         incomplete = {'discounted_fee': 20000, 'data_unlimited': False, 'data_gb': None}

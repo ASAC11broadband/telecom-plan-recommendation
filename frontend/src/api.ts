@@ -69,9 +69,9 @@ export function fetchPlan(planId: string) {
   return call<PlanItem>(`/api/plans/${encodeURIComponent(planId)}`);
 }
 
-export function ask(planId: string, question: string) {
+export function ask(planId: string, question: string, history: ChatMessage[] = []) {
   return call<{ answer: string }>('/api/ask', {
     method: 'POST',
-    body: JSON.stringify({ planId, question }),
+    body: JSON.stringify({ planId, question, history: history.slice(-10) }),
   });
 }

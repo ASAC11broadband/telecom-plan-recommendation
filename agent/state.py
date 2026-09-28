@@ -68,8 +68,8 @@ load_dotenv()
 # 과거 MODEL 환경변수는 호환성을 위해 역할별 모델의 공통 override 로 남긴다.
 # 새 설정에서는 PROFILE_MODEL / REPORT_MODEL 을 각각 지정하는 것을 권장한다.
 LEGACY_MODEL = os.getenv("MODEL")
-PROFILE_MODEL = os.getenv("PROFILE_MODEL", LEGACY_MODEL or "gpt-4o")
-REPORT_MODEL = os.getenv("REPORT_MODEL", LEGACY_MODEL or "gpt-5.6-terra")
+PROFILE_MODEL = os.getenv("PROFILE_MODEL", LEGACY_MODEL or "gpt-4o-mini")
+REPORT_MODEL = os.getenv("REPORT_MODEL", LEGACY_MODEL or "gpt-4o-mini")
 EVAL_MODEL = os.getenv("EVAL_MODEL", "gpt-4o")
 TEMPERATURE = 0.0
 # max_retries: 배치 실행 시 TPM 초과(429)가 잦아 SDK 지수 백오프에 맡긴다
@@ -88,8 +88,12 @@ def get_profile_llm(config: RunnableConfig | None = None) -> BaseChatModel:
 
 def get_report_llm(config: RunnableConfig | None = None) -> BaseChatModel:
     """추천 이유·최종 리포트·현재 요금제 비교 설명 전용."""
-    # GPT-5.6 계열은 모델 기본 reasoning 설정을 사용하도록 temperature를 강제하지 않는다.
-    return ChatOpenAI(model=REPORT_MODEL, max_retries=MAX_RETRIES, timeout=40)
+    return ChatOpenAI(
+        model=REPORT_MODEL,
+        temperature=TEMPERATURE,
+        max_retries=MAX_RETRIES,
+        timeout=40,
+    )
 
 
 def get_llm(config: RunnableConfig | None = None) -> BaseChatModel:
