@@ -354,7 +354,7 @@ export function ResultScreen({
   const visibleConditions = conditionCells(result).filter(({ value, k }) => value !== '미지정' && k !== '후보군').slice(0, 5);
   const verdict = result.referenceVerdict;
   const verdictTitle = verdict?.status === 'keep'
-    ? '현재 요금제보다 확실히 나은 후보는 확인되지 않았어요'
+    ? '기준 요금제보다 확실히 나은 후보는 확인되지 않았어요'
     : verdict?.status === 'switch'
       ? '현재보다 유리한 전환 후보가 있어요'
       : verdict?.status === 'tradeoff'
@@ -401,7 +401,7 @@ export function ResultScreen({
             <div className="comparison-verdict-head">
               <span className="comparison-verdict-icon" aria-hidden="true">{verdictIcon}</span>
               <div>
-                <span className="comparison-verdict-eyebrow">현재 요금제 비교 결과</span>
+                <span className="comparison-verdict-eyebrow">기준 요금제 비교 결과</span>
                 <h3>{verdictTitle}</h3>
               </div>
               <span className="comparison-verdict-badge">{verdictBadge}</span>

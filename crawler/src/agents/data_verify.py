@@ -59,7 +59,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 REVIEW_DIR = BASE_DIR / "data" / "review"
-MODEL = "gpt-5"
+MODEL = "gpt-4o-mini"
 
 # 대조할 필드. 파싱 난이도가 높고 추천에 직접 쓰이는 것만 고른다.
 VERIFY_FIELDS = ("monthly_fee", "data_unlimited", "data_gb",

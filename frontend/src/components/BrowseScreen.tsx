@@ -8,11 +8,11 @@ import { fetchStats, listPlans } from '../api';
 const PRICE_OPTIONS: [string, string][] = [['lt10k','1만원 미만'],['10to20k','1~2만원'],['20to30k','2~3만원'],['30to50k','3~5만원'],['50to70k','5~7만원'],['gte70k','7만원 이상']];
 const TIER_OPTIONS: [string, string][] = [
   ['unlimited_full', '기본량 무제한'],
-  ['qos_hd', '5Mbps'],
+  ['qos_hd', '5Mbps 이상'],
   ['qos_sd', '3Mbps'],
   ['qos_lite', '1Mbps'],
-  ['qos_text', '400Kbps'],
-  ['capped', 'QoS 없음'],
+  ['qos_text', '400Kbps 이하'],
+  ['capped', 'QoS 없음·미확인'],
 ];
 const TIER_LABELS = Object.fromEntries(TIER_OPTIONS);
 const GROUPS: { group: keyof BrowseFilters; label: string; options: [string, string][] }[] = [

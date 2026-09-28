@@ -77,6 +77,25 @@ def _plan_name_stem(value: object) -> str:
     return normalize_plan_name(base)
 
 
+def _one_edit_apart(left: str, right: str) -> bool:
+    """짧은 요금제명의 한 글자 오타만 안전하게 허용한다."""
+    if left == right or abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) > len(right):
+        left, right = right, left
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) == 1
+    index = errors = 0
+    for char in right:
+        if index < len(left) and left[index] == char:
+            index += 1
+        else:
+            errors += 1
+            if errors > 1:
+                return False
+    return True
+
+
 BENEFIT_CATEGORY_ALIASES = {
     "ott": "영상/OTT",
     "영상": "영상/OTT",
@@ -224,11 +243,11 @@ UNLIMITED_QOS_MBPS = 10.0
 
 DATA_TIERS = {
     "unlimited_full": "기본량 무제한",
-    "qos_hd": "5Mbps",
+    "qos_hd": "5Mbps 이상",
     "qos_sd": "3Mbps",
     "qos_lite": "1Mbps",
-    "qos_text": "400Kbps",
-    "capped": "QoS 없음",
+    "qos_text": "400Kbps 이하",
+    "capped": "QoS 없음·미확인",
 }
 
 
@@ -1023,6 +1042,18 @@ def find_plans_by_name(plan_name_query: str) -> list[dict]:
     normalized_exact = _plans[(name_keys == query_key) | (stem_keys == query_key)]
     if not normalized_exact.empty:
         return [_row_summary(row) for _, row in normalized_exact.iterrows()]
+
+    # '요교 30'처럼 한 글자만 틀린 경우. 여러 상품명이 같은 거리로 잡히면 추측하지 않는다.
+    # 숫자만 있는 짧은 이름과 일반 문장을 상품명으로 오인하지 않도록 네 글자 이상만 본다.
+    if len(query_key) >= 4:
+        close_keys = {
+            key for key in set(name_keys).union(stem_keys)
+            if key and _one_edit_apart(query_key, key)
+        }
+        if len(close_keys) == 1:
+            close_key = next(iter(close_keys))
+            typo_match = _plans[(name_keys == close_key) | (stem_keys == close_key)]
+            return [_row_summary(row) for _, row in typo_match.iterrows()]
 
     raw_contains = names.str.contains(plan_name_query.strip(), case=False, na=False, regex=False)
     normalized_contains = name_keys.str.contains(query_key, regex=False) | stem_keys.str.contains(

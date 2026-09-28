@@ -12,7 +12,7 @@ from ..data import (
     find_plans_mentioned_in_text,
     normalize_benefit_category,
 )
-from ..schemas import UserProfile
+from ..schemas import AppUsage, UserProfile
 from ..state import PipelineState, feedback_block, get_profile_llm, user_query
 from ..usage import estimate_monthly_data_gb, required_qos_mbps
 
@@ -381,6 +381,15 @@ def _axes_in_priority_clauses(utterance: str) -> list[str]:
             continue
         for name, pattern in _PRIORITY_AXIS_PATTERNS:
             match = pattern.search(clause)
+            # "데이터 소진 후 속도"의 '데이터'는 제공량 축이 아니라 QoS 용어의
+            # 일부다. 이를 data와 qos 두 축으로 잡으면 화면은 첫 값인 데이터 버튼을
+            # 켜고 실제 가중치도 데이터에 더 많이 주게 된다.
+            if (
+                name == "data"
+                and match
+                and re.match(r"\s*소진\s*후", clause[match.end():], re.IGNORECASE)
+            ):
+                continue
             if match and name not in axes:
                 axes.append((match.start(), name))
     ordered = sorted(axes, key=lambda item: item[0])
@@ -1051,6 +1060,111 @@ def _repair_gift_pair_request(profile: UserProfile, query: str) -> UserProfile:
     })
 
 
+# 앱별 이용 시간은 후속 요청 때도 같아야 한다. LLM이 이전의 "유튜브 1시간"을
+# "일반 영상 1시간"으로 다시 분류하면 GB/시간 계수가 달라져 예상량이 흔들린다.
+_EXPLICIT_USAGE_ALIASES: tuple[tuple[str, str], ...] = (
+    (r"인스타그램\s*릴스|인스타\s*릴스|릴스", "instagram_reels"),
+    (r"디즈니\s*(?:플러스|\+)", "disney_plus"),
+    (r"포켓몬\s*(?:고|go)", "pokemongo_game"),
+    (r"리그\s*오브\s*레전드|롤", "league_of_legend_game"),
+    (r"배틀그라운드|배그", "battleground_game"),
+    (r"클래시\s*로얄", "clashroyale_game"),
+    (r"콜\s*오브\s*듀티", "callofduty_game"),
+    (r"브롤\s*스타즈", "brawlstars_game"),
+    (r"스타듀\s*밸리", "stardewvalley_game"),
+    (r"유튜브|youtube", "youtube"),
+    (r"넷플릭스|netflix", "netflix"),
+    (r"틱톡|tiktok", "tiktok"),
+    (r"인스타그램|인스타", "instagram"),
+    (r"스포티파이|spotify", "spotify"),
+    (r"구글\s*지도|내비게이션|네비게이션", "google_maps"),
+    (r"줌|zoom", "zoom"),
+    (r"왓츠앱|whatsapp", "whatsapp"),
+    (r"포트나이트", "fortnite_game"),
+    (r"게임", "mobile_game"),
+)
+_USAGE_TIME_TOKEN = r"(?:\d+(?:\.\d+)?|한|두|세|반)"
+_USAGE_REMOVE_RE = re.compile(r"빼|제외|안\s*(?:해|봐|보|쓰|사용)|하지\s*않", re.IGNORECASE)
+
+
+def _usage_hours(amount: str, unit: str) -> float:
+    values = {"한": 1.0, "두": 2.0, "세": 3.0, "반": 0.5}
+    value = values.get(amount, float(amount) if re.fullmatch(r"\d+(?:\.\d+)?", amount) else 0.0)
+    return value / 60 if unit.startswith("분") else value
+
+
+def _explicit_app_usages(query: str) -> dict[str, float]:
+    """시간순으로 앱 사용량을 읽는다. 같은 앱은 최신 언급이 덮고 이후 제외 요청은 지운다."""
+    found: dict[str, float] = {}
+    for utterance in re.split(r"[\n.!?]+", query or ""):
+        for alias, service in _EXPLICIT_USAGE_ALIASES:
+            for mention in re.finditer(alias, utterance, re.IGNORECASE):
+                nearby = utterance[max(0, mention.start() - 28):mention.end() + 28]
+                if _USAGE_REMOVE_RE.search(nearby):
+                    found.pop(service, None)
+                    continue
+                after = utterance[mention.end():mention.end() + 28]
+                before = utterance[max(0, mention.start() - 28):mention.start()]
+                pattern = rf"(?:하루(?:에)?\s*)?(?:약\s*)?(?P<n>{_USAGE_TIME_TOKEN})\s*(?P<u>시간|분)(?:씩)?"
+                match = re.search(pattern, after)
+                if match is None:
+                    matches = list(re.finditer(pattern, before))
+                    match = matches[-1] if matches else None
+                if match is not None:
+                    hours = _usage_hours(match.group("n"), match.group("u"))
+                    if hours > 0:
+                        found[service] = hours
+    return found
+
+
+def _explicitly_removed_app_usages(query: str) -> set[str]:
+    """앱별 마지막 지시가 제외 요청인 항목을 반환한다."""
+    removed: set[str] = set()
+    for utterance in re.split(r"[\n.!?]+", query or ""):
+        for alias, service in _EXPLICIT_USAGE_ALIASES:
+            for mention in re.finditer(alias, utterance, re.IGNORECASE):
+                nearby = utterance[max(0, mention.start() - 28):mention.end() + 28]
+                if _USAGE_REMOVE_RE.search(nearby):
+                    removed.add(service)
+                elif re.search(rf"{_USAGE_TIME_TOKEN}\s*(?:시간|분)", nearby):
+                    removed.discard(service)
+    return removed
+
+
+def _repair_explicit_app_usages(profile: UserProfile, query: str) -> UserProfile:
+    """명시된 앱·시간을 LLM 재해석보다 우선하고, 앱 미지정 범주와의 중복을 제거한다."""
+    explicit = _explicit_app_usages(query)
+    removed = _explicitly_removed_app_usages(query)
+    if not explicit and not removed:
+        return profile
+
+    existing = {
+        usage.service: usage for usage in profile.app_usages
+        if usage.service not in removed
+    }
+    for service, hours in explicit.items():
+        previous = existing.get(service)
+        existing[service] = AppUsage(
+            service=service,
+            daily_hours=hours,
+            mode=previous.mode if previous else None,
+        )
+
+    usages = list(existing.values())
+    updates: dict[str, object] = {"app_usages": usages}
+    if {"youtube", "netflix", "disney_plus"}.intersection(explicit):
+        updates["daily_video_hours"] = None
+        updates["smartchoice_usage_pattern"] = None
+        usages = [usage for usage in usages if usage.service != "generic_video"]
+    if {"tiktok", "instagram", "instagram_reels"}.intersection(explicit):
+        updates["daily_shortform_hours"] = None
+        usages = [usage for usage in usages if usage.service != "generic_shortform"]
+    if any(service.endswith("_game") for service in explicit):
+        updates["daily_game_hours"] = None
+    updates["app_usages"] = usages
+    return profile.model_copy(update=updates)
+
+
 def _normalize_profile(profile: UserProfile) -> UserProfile:
     """스키마 값으로 Hard Constraint와 재질문 상태를 결정한다."""
     profile = _normalize_benefit_requests(profile)
@@ -1306,6 +1420,7 @@ _REPAIRS = (
     _apply_usage_based_qos,
     _apply_explicit_qos_min,
     _apply_explicit_data_max,
+    _repair_explicit_app_usages,
     _apply_smartchoice_usage_rule,
     _repair_general_comparison,
     _repair_reference_plan_name,

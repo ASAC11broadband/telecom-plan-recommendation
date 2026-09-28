@@ -23,7 +23,9 @@ from fastapi import FastAPI, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from agent.data import all_plans, get_plan, normalize_benefit_category, UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS
+from agent.data import (all_plans, find_plans_by_name, find_plans_mentioned_in_text,
+                        get_plan, normalize_benefit_category, normalize_plan_name,
+                        UNLIMITED_MIN_GB, UNLIMITED_QOS_MBPS)
 from agent.graph import graph
 from agent.state import get_llm
 from .plans import (
@@ -61,6 +63,8 @@ class RecommendRequest(BaseModel):
 class AskRequest(BaseModel):
     planId: str
     question: str = Field(..., min_length=1, max_length=2000)
+    # 상세 화면이 현재 탭에서 기억하는 최근 대화만 받는다. 서버·DB에는 저장하지 않는다.
+    history: list[Message] = Field(default_factory=list, max_length=10)
 
 
 class AnalysisQuestion(BaseModel):
@@ -93,11 +97,23 @@ def _guard_llm_budget() -> None:
         _llm_calls.append(now)
 
 
-_RECOMMENDATION_ACTION_RE = re.compile(r"추천|골라\s*줘|비교해\s*줘|찾아\s*줘", re.IGNORECASE)
+_RECOMMENDATION_ACTION_RE = re.compile(
+    r"추천|골라\s*줘|비교|찾아\s*줘|더\s*좋은|대안|바꿀|갈아\s*타", re.IGNORECASE
+)
 _PLAN_INFORMATION_RE = re.compile(
     r"(?:가장|제일)\s*(?:싼|저렴한|비싼)\s*(?:요금제|상품|플랜)"
     r"|(?:최저가|최고가)\s*(?:요금제|상품|플랜)?"
     r"|(?:5\s*g|lte)\s*(?:요금제|상품|플랜)\s*(?:뭐|무엇|어떤|있|알려)",
+    re.IGNORECASE,
+)
+_SPECIFIC_PLAN_BENEFIT_RE = re.compile(r"혜택|부가\s*서비스|포함\s*(?:내용|서비스)", re.IGNORECASE)
+_PLAN_NAME_BEFORE_MARKER_RE = re.compile(
+    r"(?P<name>[0-9A-Za-z가-힣+._ -]{2,50}?)\s*요금제", re.IGNORECASE
+)
+_PLAN_QA_SIGNAL_RE = re.compile(
+    r"혜택|부가\s*서비스|포함|데이터|기가|gb|속도|qos|mbps|요금|가격|납부|얼마|"
+    r"할인|프로모션|가입|나이|연령|통화|문자|테더링|유심|로밍|보험|총액|총비용|"
+    r"개월|\d+\s*년|이후|끝나|제공|조건|장점|단점|어떤\s*요금제|괜찮",
     re.IGNORECASE,
 )
 _TELECOM_SIGNAL_RE = re.compile(
@@ -155,6 +171,95 @@ _OFF_TOPIC_MESSAGE = (
     "모모플랜은 휴대폰 요금제 비교를 도와드려요. "
     "요금제와 관련되지 않은 질문에는 답할 수 없습니다."
 )
+
+_DIRECT_PRICE_QUESTION_RE = re.compile(r"월\s*요금|가격|납부액|얼마", re.IGNORECASE)
+_PRICE_CALCULATION_RE = re.compile(r"총액|총비용|\d+\s*(?:년|개월)(?:이면|동안|치)", re.IGNORECASE)
+PRICE_RESPONSE_RULES = (
+    "가격을 설명할 때 다음 순서를 반드시 지켜라. "
+    "프로모션이 있으면 프로모션 적용 월 요금, 적용 기간, 종료 후 정상가를 모두 말한다. "
+    "할인이 없으면 정상 월 요금을 말한다. "
+    "페이백 상품은 실제 청구 월 요금과 페이백 반영 체감가를 분리하고, 둘을 같은 가격처럼 말하지 않는다. "
+    "선택약정은 '선택약정 25% 적용 기준'임을 명시하고 정가와 구분한다. "
+)
+
+
+def _won(value: object) -> str:
+    return f"{int(float(value)):,}원"
+
+
+def _payback_schedule_text(value: object) -> str:
+    parts = []
+    for item in str(value or "").split("|"):
+        match = re.fullmatch(r"\s*(\d+)\s*[xX×]\s*(\d+)\s*", item)
+        if match:
+            parts.append(f"{int(match.group(1)):,}원×{int(match.group(2))}개월")
+    return " + ".join(parts)
+
+
+def _plan_price_answer(plan: dict) -> str:
+    """가격 필드의 의미를 섞지 않고 가입가·정상가·페이백을 정해진 순서로 설명한다."""
+    name = str(plan.get("plan_name") or "해당 요금제")
+    regular = plan.get("monthly_fee")
+    charged = plan.get("discounted_fee")
+    discount_type = str(plan.get("discount_type") or "").strip()
+    period = plan.get("discount_period_months")
+    billing_known = plan.get("billing_price_known") is not False
+    is_payback = "페이백" in discount_type
+    is_contract = "선택약정" in discount_type
+
+    if is_payback and not billing_known:
+        displayed = charged if charged is not None else regular
+        return (
+            f"{name}은 페이백 상품이며 현재 자료에서 실제 청구 월 요금이 확인되지 않습니다. "
+            + (f"표시된 {_won(displayed)}은 페이백 반영 가격일 수 있어 청구액으로 단정할 수 없습니다." if displayed is not None else "가입 전 청구액과 페이백 지급 조건을 확인해 주세요.")
+        )
+
+    if is_contract and charged is not None:
+        answer = f"{name}은 선택약정 25% 적용 기준 월 {_won(charged)}입니다."
+        if regular is not None and regular != charged:
+            answer += f" 선택약정을 적용하지 않은 정상가는 월 {_won(regular)}입니다."
+    elif charged is not None and regular is not None and charged != regular:
+        if period is not None:
+            answer = (
+                f"{name}은 프로모션 적용 시 {int(period)}개월간 월 {_won(charged)}이며, "
+                f"프로모션 종료 후 정상가는 월 {_won(regular)}입니다."
+            )
+        else:
+            condition = f"({discount_type}) " if discount_type else ""
+            answer = (
+                f"{name}은 {condition}할인 적용 기준 월 {_won(charged)}이며, "
+                f"정상가는 월 {_won(regular)}입니다. 할인 적용 기간은 현재 자료에서 확인되지 않습니다."
+            )
+    else:
+        price = regular if regular is not None else charged
+        answer = f"{name}의 정상 월 요금은 {_won(price)}입니다." if price is not None else f"{name}의 월 요금은 현재 자료에서 확인되지 않습니다."
+
+    if is_payback:
+        effective = plan.get("payback_included_fee")
+        schedule = _payback_schedule_text(plan.get("payback_schedule"))
+        if effective is not None:
+            answer += f" 페이백 반영 체감가는 월 {_won(effective)}로 표시되지만 실제 청구 월 요금과는 다릅니다."
+        if schedule:
+            answer += f" 페이백 지급 조건은 {schedule}입니다."
+    return answer
+
+
+def _direct_price_answer(question: str, plans: list[dict]) -> str | None:
+    if not _DIRECT_PRICE_QUESTION_RE.search(question or "") or _PRICE_CALCULATION_RE.search(question or ""):
+        return None
+    if not plans:
+        return None
+    price_keys = {
+        (
+            row.get("monthly_fee"), row.get("discounted_fee"), row.get("discount_type"),
+            row.get("discount_period_months"), row.get("billing_price_known"),
+            row.get("payback_included_fee"), row.get("payback_schedule"),
+        )
+        for row in plans
+    }
+    if len(price_keys) != 1:
+        return None
+    return _plan_price_answer(plans[0])
 
 
 def _conversation_only_response(kind: Literal["off_topic", "plan_info"], message: str) -> dict:
@@ -221,12 +326,116 @@ def _plan_information_answer(intent: str, scope: str, metric: str) -> str:
     )
 
 
+def _specific_plan_benefit_answer(text: str) -> str | None:
+    """추천이 아니라 특정 상품의 혜택을 묻는 질문은 DB에서 바로 답한다."""
+    if not _SPECIFIC_PLAN_BENEFIT_RE.search(text) or "요금제" not in text:
+        return None
+
+    matched = find_plans_mentioned_in_text(text)
+    requested_name = ""
+    if not matched:
+        name_match = _PLAN_NAME_BEFORE_MARKER_RE.search(text)
+        if not name_match:
+            return None
+        requested_name = re.sub(
+            r"^(?:현재|지금|제가|나는|내가)\s*", "", name_match.group("name").strip()
+        )
+        matched = find_plans_by_name(requested_name)
+    if not matched:
+        return None
+
+    plan_names = list(dict.fromkeys(str(row.get("plan_name") or "").strip() for row in matched))
+    benefits = list(dict.fromkeys(
+        str(benefit).strip()
+        for row in matched
+        for benefit in (row.get("included_benefits") or [])
+        if str(benefit).strip()
+    ))
+    display_name = plan_names[0] if len(plan_names) == 1 else "·".join(plan_names[:3])
+    corrected = (
+        f"입력하신 '{requested_name}'은 '{display_name}'으로 확인했습니다. "
+        if requested_name and normalize_plan_name(requested_name) != normalize_plan_name(display_name)
+        else ""
+    )
+    if not benefits:
+        return corrected + f"'{display_name}'에서 현재 수집된 별도 혜택은 확인되지 않습니다."
+    return corrected + f"'{display_name}'에서 확인되는 혜택은 " + ", ".join(benefits) + "입니다."
+
+
+def _plans_named_in_message(text: str) -> list[dict]:
+    matched = find_plans_mentioned_in_text(text)
+    if matched:
+        return matched
+    name_match = _PLAN_NAME_BEFORE_MARKER_RE.search(text)
+    if not name_match:
+        return []
+    requested_name = re.sub(
+        r"^(?:현재|지금|제가|나는|내가)\s*", "", name_match.group("name").strip()
+    )
+    return find_plans_by_name(requested_name)
+
+
+def _plan_qa_context(messages: list[Message]) -> tuple[list[dict], str] | None:
+    """특정 상품 정보 질문과 그 후속 질문을 추천 그래프에서 분리한다."""
+    users = [message.content.strip() for message in messages if message.role == "user"]
+    if not users:
+        return None
+    latest = users[-1]
+    if _RECOMMENDATION_ACTION_RE.search(latest):
+        return None
+
+    plans = _plans_named_in_message(latest)
+    if plans and _PLAN_QA_SIGNAL_RE.search(latest):
+        return plans, latest
+
+    # 상품명이 생략된 후속 질문은 이전 사용자 발화에서 가장 최근 상품을 이어받는다.
+    if _PLAN_QA_SIGNAL_RE.search(latest):
+        for previous in reversed(users[:-1]):
+            plans = _plans_named_in_message(previous)
+            if plans:
+                return plans, latest
+    return None
+
+
+def _answer_plan_qa(messages: list[Message], plans: list[dict]) -> str:
+    """현재 DB 사실을 최우선으로 특정 요금제 자유 질문에 답한다."""
+    latest = next((message.content for message in reversed(messages) if message.role == "user"), "")
+    direct_price = _direct_price_answer(latest, plans)
+    if direct_price is not None:
+        return direct_price
+    prompt = (
+        "휴대폰 요금제 정보 상담이다. 아래 DB 데이터만 사실 근거로 사용해 2~4문장으로 답하라. "
+        "대화 이력은 '그럼 2년이면?' 같은 문맥 해석에만 사용하고, 이전 assistant 답변과 DB가 "
+        "충돌하면 DB를 우선하라. 동일 이름 행이 여러 개면 출처 중복인지 가격·연령·제공량이 다른 "
+        "실제 변형인지 구분해 설명하고, 하나로 확정할 수 없을 때만 필요한 조건을 질문하라. "
+        "데이터에 없는 내용은 확인되지 않는다고 말하고 추측하지 마라. 추천이나 다른 상품 비교를 "
+        "새로 수행하지 마라. " + PRICE_RESPONSE_RULES + "\n\n[요금제 DB]\n"
+        + json.dumps(plans[:10], ensure_ascii=False, default=str)
+    )
+    history = [
+        HumanMessage(content=message.content)
+        if message.role == "user"
+        else AIMessage(content=message.content)
+        for message in messages[-10:]
+    ]
+    try:
+        return get_llm().invoke([SystemMessage(content=prompt), *history]).content
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="AI 답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        ) from exc
+
+
 def _quick_chat_response(messages: list[Message]) -> dict | None:
     """명백한 정보·무관 질문에는 추천 LLM을 호출하지 않는다."""
     users = [message.content.strip() for message in messages if message.role == "user"]
     if not users:
         return None
     latest = users[-1]
+    specific_benefit_answer = _specific_plan_benefit_answer(latest)
+    if specific_benefit_answer:
+        return _conversation_only_response("plan_info", specific_benefit_answer)
     previous_assistant = next(
         (message.content for message in reversed(messages[:-1]) if message.role == "assistant"), ""
     )
@@ -316,6 +525,11 @@ def _inferred_relaxed_fields(messages: list[Message]) -> list[str]:
 @app.post("/api/recommend")
 def recommend(req: RecommendRequest) -> dict:
     """LLM 4단계 파이프라인. 20~60초 걸린다."""
+    plan_qa = _plan_qa_context(req.messages)
+    if plan_qa is not None:
+        _guard_llm_budget()
+        plans, _ = plan_qa
+        return _conversation_only_response("plan_info", _answer_plan_qa(req.messages, plans))
     quick_response = _quick_chat_response(req.messages)
     if quick_response is not None:
         return quick_response
@@ -477,21 +691,36 @@ def plan_detail(plan_id: str) -> dict:
 
 @app.post("/api/ask")
 def ask(req: AskRequest) -> dict:
-    """특정 요금제에 대한 단발 질문. 대화 이력 없음."""
+    """특정 요금제 질문. 현재 화면의 최근 대화를 받아 문맥만 이어 간다."""
     row = get_plan(req.planId)
     if row is None:
         raise HTTPException(status_code=404, detail="요금제를 찾을 수 없습니다.")
     _guard_llm_budget()
+    direct_price = _direct_price_answer(req.question, [row])
+    if direct_price is not None:
+        return {"answer": direct_price}
     prompt = (
         "아래 요금제 데이터만 근거로 사용자 질문에 2~3문장으로 답하라. "
         "데이터에 없는 내용은 '제공된 자료로는 확인되지 않습니다'라고 답하고 추측하지 마라.\n\n"
+        "대화 이력은 '그럼 2년이면?' 같은 후속 질문의 문맥을 이해하는 용도로만 사용하라. "
+        "이전 assistant 답변과 현재 요금제 데이터가 다르면 현재 요금제 데이터를 우선하고, "
+        "이전 답변의 오류를 그대로 반복하지 마라.\n\n"
         "혜택 환산액을 납부액 할인으로 단정하지 마라. 데이터 속도 미확인은 무제한 속도 보장이 아니다."
         "billing_price_known이 false이면 discounted_fee는 페이백 반영 표시가이며 실제 청구액이 아니다. "
-        "이 경우 총 납부액·절약액을 계산하거나 페이백을 다시 차감하지 말고 청구액 확인이 필요하다고 안내해라."
+        "이 경우 총 납부액·절약액을 계산하거나 페이백을 다시 차감하지 말고 청구액 확인이 필요하다고 안내해라. "
+        + PRICE_RESPONSE_RULES +
         f"[요금제]\n{json.dumps(row, ensure_ascii=False)}"
     )
+    history = [
+        HumanMessage(content=message.content)
+        if message.role == "user"
+        else AIMessage(content=message.content)
+        for message in req.history[-10:]
+    ]
     try:
-        answer = get_llm().invoke([SystemMessage(content=prompt), HumanMessage(content=req.question)]).content
+        answer = get_llm().invoke(
+            [SystemMessage(content=prompt), *history, HumanMessage(content=req.question)]
+        ).content
     except Exception as exc:
         raise HTTPException(status_code=502, detail="AI 답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.") from exc
     return {"answer": answer}

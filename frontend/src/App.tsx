@@ -9,7 +9,7 @@ import { ReportScreen } from './components/ReportScreen';
 import { BrowseScreen } from './components/BrowseScreen';
 import { CompareScreen } from './components/CompareScreen';
 import { RecommendationChat } from './components/RecommendationChat';
-import { PlanDetailScreen } from './components/PlanDetailScreen';
+import { DETAIL_CHAT_KEY, PlanDetailScreen } from './components/PlanDetailScreen';
 import { CompareBar } from './components/CompareBar';
 import { categoryFilters } from './categories';
 
@@ -224,6 +224,7 @@ export default function App() {
     requestVersion.current++;
     setMessages([]); setResult(null); setPrevPlans([]); setHistory([]); setRelaxedFields([]); setError(null);
     setLoading(false); setReportPlanId(null); setDraft('');
+    try { sessionStorage.removeItem(DETAIL_CHAT_KEY); } catch { /* 화면 상태 초기화는 계속한다. */ }
   };
 
   const chat = <RecommendationChat messages={messages} result={result} loading={loading} error={error} draft={draft} onDraft={setDraft}
