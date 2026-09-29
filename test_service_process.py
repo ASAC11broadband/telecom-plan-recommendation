@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END
 from agent.data import (all_plans, benefit_requests_match, filter_candidates,
                         diagnose_empty, PLANS_CSV, CONSTRAINT_LABELS)
@@ -19,6 +19,7 @@ from agent.agents.recommend import (recommend_node, _apply_comparison, _referenc
                                     _same_or_equivalent_to_reference, TOP_N)
 from agent.agents.evaluation import _ranking_errors, evaluation_node, profile_check_node
 from agent.agents.profiling import (BENEFIT_PREFERENCE_QUESTION, benefit_preference_missing,
+                                    _apply_pending_benefit_reply,
                                     _apply_daily_allowance, _apply_explicit_qos_min, _apply_relaxed_fields,
                                     _apply_usage_based_qos,
                                     _apply_user_age, _drop_reference_name_data_constraint,
@@ -379,6 +380,34 @@ class ServiceProcessTests(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(invoke.call_args.args[0]['relaxed_fields'], ['wanted_benefit_categories'])
+
+    def test_short_benefit_reply_is_saved_and_clears_followup(self):
+        """직전 혜택 질문에 대한 카테고리 답은 LLM 추출에 의존하지 않는다."""
+        for reply in ('도서·콘텐츠', '도서,콘텐츠', '도서/콘텐츠'):
+            with self.subTest(reply=reply):
+                profile = UserProfile(
+                    budget_max_won=60_000,
+                    needs_user_input=True,
+                    followup_question='어떤 종류의 부가혜택을 원하시나요?',
+                    ambiguous=['benefit_preference'],
+                    comparison_goals=['better'],
+                )
+                updated = _apply_pending_benefit_reply(profile, [
+                    HumanMessage(content='부가혜택을 선호해. 월 예산은 6만원 이하였으면 좋겠어.'),
+                    AIMessage(content=BENEFIT_PREFERENCE_QUESTION),
+                    HumanMessage(content=reply),
+                ])
+                self.assertEqual(updated.wanted_benefit_categories, ['도서/콘텐츠'])
+                self.assertFalse(updated.needs_user_input)
+                self.assertIsNone(updated.followup_question)
+                self.assertNotIn('benefit_preference', updated.ambiguous)
+                self.assertIsNone(updated.comparison_goals)
+
+        unrelated = _apply_pending_benefit_reply(
+            UserProfile(),
+            [AIMessage(content='월 예산을 알려주세요.'), HumanMessage(content='도서·콘텐츠')],
+        )
+        self.assertIsNone(unrelated.wanted_benefit_categories)
 
     def test_specific_benefit_categories_do_not_collapse_to_gifts(self):
         from agent.data import get_plan, normalize_benefit_category
@@ -1063,6 +1092,65 @@ class ServiceProcessTests(unittest.TestCase):
         # 사용자가 두 축을 실제로 따로 말한 경우에는 둘 다 유지한다.
         both = '데이터 제공량과 소진 후 속도를 가장 중요하게 봐줘'
         self.assertEqual(_axes_in_priority_clauses(both), ['data', 'qos'])
+
+    def test_preference_conjugations_and_supported_axes_are_deterministic(self):
+        """선호 활용형을 놓치지 않고 통화·문자는 가중치 축으로 만들지 않는다."""
+        from agent.agents.profiling import (
+            _apply_benefit_preference_question,
+            _drop_inferred_priorities,
+            _repair_latest_priority,
+        )
+
+        cases = {
+            '가격을 선호하고 3만원 이하로 추천해줘': ['price'],
+            '데이터를 선호하고 3만원 이하로 추천해줘': ['data'],
+            '부가혜택을 선호하고 예산은 2만원으로': ['benefit'],
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                repaired = _repair_latest_priority(UserProfile(), text)
+                self.assertEqual(repaired.priorities, expected)
+                self.assertFalse(repaired.priorities_ordered)
+
+        for text in ('테더링을 선호해', '통화를 선호해', '문자를 중요하게 봐'):
+            with self.subTest(text=text):
+                cleaned = _drop_inferred_priorities(
+                    UserProfile(priorities=['data']), text
+                )
+                self.assertIsNone(cleaned.priorities)
+
+        vague = _apply_benefit_preference_question(
+            UserProfile(budget_max_won=20_000, priorities=['benefit']),
+            '부가혜택을 선호하고 예산은 2만원으로',
+        )
+        self.assertTrue(vague.needs_user_input)
+        self.assertEqual(vague.followup_question, BENEFIT_PREFERENCE_QUESTION)
+
+    def test_multiple_preferences_are_equal_unless_order_is_explicit(self):
+        from agent.agents.profiling import _repair_latest_priority
+        from agent.mcda import _weight_samples, CRITERIA
+
+        equal = _repair_latest_priority(
+            UserProfile(), '가격과 데이터를 선호해'
+        )
+        self.assertEqual(equal.priorities, ['price', 'data'])
+        self.assertFalse(equal.priorities_ordered)
+
+        ordered = _repair_latest_priority(
+            UserProfile(), '1순위는 가격, 2순위는 데이터로 추천해줘'
+        )
+        self.assertEqual(ordered.priorities, ['price', 'data'])
+        self.assertTrue(ordered.priorities_ordered)
+        equal_weights = _weight_samples(equal.priorities, [], equal.priorities_ordered)[0]
+        reversed_equal_weights = _weight_samples(
+            list(reversed(equal.priorities or [])), [], equal.priorities_ordered
+        )[0]
+        ordered_weights = _weight_samples(
+            ordered.priorities or [], [], ordered.priorities_ordered
+        )[0]
+        price_index, data_index = CRITERIA.index('price'), CRITERIA.index('data')
+        self.assertEqual(equal_weights, reversed_equal_weights)
+        self.assertGreater(ordered_weights[price_index], equal_weights[price_index])
 
     def test_weight_robustness_is_measured_not_claimed(self):
         """'가중치를 흔들어도 결론이 같다'는 발표 문장을 코드가 매번 다시 잰다.

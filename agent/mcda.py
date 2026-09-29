@@ -298,12 +298,21 @@ def _utility_rows(
 _GOAL_CRITERIA = {"cheaper": "price", "more_data": "data", "faster_qos": "qos"}
 
 
-def _boosted(vector: list[float], priorities: list[str], comparison_goals: list[str]) -> list[float]:
+def _boosted(
+    vector: list[float],
+    priorities: list[str],
+    comparison_goals: list[str],
+    priorities_ordered: bool = False,
+) -> list[float]:
     """실측 가중치 하나에 사용자 우선순위/비교 목표를 가산하고 재정규화한다."""
     boosted = list(vector)
     priority_position = {name: i for i, name in enumerate(priorities) if name in CRITERIA}
     for name, position in priority_position.items():
-        extra = max(0, len(priorities) - position) * _PRIORITY_UNIT
+        extra = (
+            max(0, len(priorities) - position) * _PRIORITY_UNIT
+            if priorities_ordered
+            else _PRIORITY_UNIT
+        )
         boosted[CRITERIA.index(name)] += extra
 
     for goal in comparison_goals:
@@ -327,10 +336,17 @@ def _boosted(vector: list[float], priorities: list[str], comparison_goals: list[
     return normalized
 
 
-def _weight_samples(priorities: list[str], comparison_goals: list[str]) -> list[list[float]]:
+def _weight_samples(
+    priorities: list[str],
+    comparison_goals: list[str],
+    priorities_ordered: bool = False,
+) -> list[list[float]]:
     if not priorities and not comparison_goals:
         return [list(vector) for vector in _BASE_WEIGHTS]
-    return [_boosted(vector, priorities, comparison_goals) for vector in _BASE_WEIGHTS]
+    return [
+        _boosted(vector, priorities, comparison_goals, priorities_ordered)
+        for vector in _BASE_WEIGHTS
+    ]
 
 
 def _discriminating(utilities: list[list[float]]) -> set[str]:
@@ -355,6 +371,7 @@ def evaluate_mcda(
     *,
     comparison_goals: list[str] | None = None,
     profile: object | dict | None = None,
+    priorities_ordered: bool = False,
 ) -> list[MCDAResult]:
     """가중치 표본(실측 부트스트랩 300세트)별 순위를 집계해 SMAA-2 지표를 계산한다."""
     if not candidates:
@@ -371,6 +388,7 @@ def evaluate_mcda(
             for goal in (comparison_goals or [])
             if _GOAL_CRITERIA.get(goal, "price") in usable
         ],
+        priorities_ordered,
     )
     samples = len(weights)
     n = len(candidates)
