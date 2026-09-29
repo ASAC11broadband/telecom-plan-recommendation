@@ -85,8 +85,10 @@ export function describeProfile(p: Profile | null | undefined): Condition[] {
       tethering: '테더링',
     };
     rows.push({
-      k: '우선순위',
-      value: p.priorities.map((key) => labels[key] ?? key).join(' > '),
+      k: p.priorities_ordered ? '우선순위' : '선호 항목',
+      value: p.priorities
+        .map((key) => labels[key] ?? key)
+        .join(p.priorities_ordered ? ' > ' : ' · '),
       kind: '요청',
     });
   }

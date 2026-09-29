@@ -126,6 +126,7 @@ export interface Profile {
   age_condition?: string;
   user_age?: number;
   priorities?: string[];
+  priorities_ordered?: boolean;
   host_mno?: string;
   carrier_type?: string;
   mvno_brand?: string;

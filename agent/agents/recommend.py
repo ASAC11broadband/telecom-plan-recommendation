@@ -608,6 +608,7 @@ def recommend_node(state: PipelineState, config: RunnableConfig) -> dict:
         profile.priorities,
         comparison_goals=profile.comparison_goals,
         profile=ranking_profile,
+        priorities_ordered=profile.priorities_ordered,
     )
     ordered = _prefer_network_generation(
         rank_smaa2(decisions), by_id, profile.network_preference

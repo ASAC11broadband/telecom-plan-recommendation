@@ -167,10 +167,17 @@ class UserProfile(BaseModel):
         list[Literal["cheaper", "more_data", "faster_qos", "similar", "better"]]
     ] = Field(None, description="기준 요금제 대비 사용자가 원하는 개선·비교 방향")
     priorities: Optional[
-        list[Literal["price", "data", "qos", "benefit", "voice", "tethering"]]
+        list[Literal["price", "data", "qos", "benefit"]]
     ] = Field(
         None,
         description="사용자가 직접 말한 추천 우선순위를 중요도 순으로 저장. 언급 없으면 null",
+    )
+    priorities_ordered: bool = Field(
+        False,
+        description=(
+            "1순위·2순위·그다음처럼 사용자가 선호 순서를 명시했을 때만 true. "
+            "여러 항목을 단순히 함께 선호하면 false"
+        ),
     )
     hard_constraints: list[str] = Field(
         default_factory=list,
