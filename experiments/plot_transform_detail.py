@@ -19,9 +19,8 @@ import matplotlib
 import numpy as np
 import pandas as pd
 
-from experiments.plot_linear_spec import BLUE, GRAY, OUT as _OUT, VERM, ridge
+from experiments.plot_linear_spec import BLUE, GRAY, OUT as _OUT, VERM, build_xy, ridge
 from experiments.plot_regression_steps import steps
-from experiments.plot_linear_spec import build_xy
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402

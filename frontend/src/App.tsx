@@ -100,7 +100,7 @@ export default function App() {
   });
   const [askPlan, setAskPlan] = useState<PlanItem | null>(null);
   const [detailError, setDetailError] = useState('');
-  // 처음부터를 누른 뒤 늦게 도착한 이전 응답이 화면을 덮지 않게 한다.
+  // 대화 초기화를 누른 뒤 늦게 도착한 이전 응답이 화면을 덮지 않게 한다.
   const requestVersion = useRef(0);
 
   useEffect(() => {
@@ -257,7 +257,6 @@ export default function App() {
           chat={chat}
           result={result}
           prevPlans={prevPlans}
-          messages={messages}
           loading={loading}
           error={error}
           onFollowup={runRecommend}

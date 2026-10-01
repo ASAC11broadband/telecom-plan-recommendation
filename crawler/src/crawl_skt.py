@@ -242,8 +242,8 @@ def _age_benefits(prod_id: str, plan_name: str) -> list[dict]:
     """요금제의 연령 혜택 목록. 없으면 빈 리스트.
 
     각 항목의 키
-      age_condition       : "청년(만 34세 이하)" / "청소년(만 18세 이하)" /
-                            "청년(만 19세~34세)" / "시니어(만 65세 이상)"
+      age_condition       : "만 34세 이하" / "만 18세 이하" / "만 65세 이상"
+                            (_AGE_LABELS로 통일한 값)
       extra_data_gb       : 기본 데이터 추가 제공량(GB)
       extra_tethering_gb  : 공유/테더링 한도 증가분(GB)
       voice_unlimited     : 음성 무제한으로 전환되면 True

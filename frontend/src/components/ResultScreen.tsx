@@ -1,7 +1,7 @@
 import { BrandLogo } from './BrandLogo';
 import { RecommendationTrace } from './RecommendationTrace';
 import { ReactNode } from 'react';
-import { Blocker, ChatMessage, PlanItem, Profile, RecommendResponse, ScreenType } from '../types';
+import { Blocker, PlanItem, Profile, RecommendResponse, ScreenType } from '../types';
 import { ConditionKind, dataCondition } from '../profileText';
 
 /** 직전 결과 대비 변동. 백엔드는 매 호출을 독립으로 처리하므로 여기서 계산한다. */
@@ -49,7 +49,6 @@ function conditionCells(result: RecommendResponse) {
       value: p.age_condition || (p.user_age ? `만 ${p.user_age}세 기준` : '전용 상품 제외'),
       kind: (p.age_condition || p.user_age ? '요청' : '기본') as ConditionKind,
     },
-    { k: '후보군', value: `${result.candidateCount.toLocaleString()}건`, kind: '' as ConditionKind },
   ];
 }
 
@@ -307,7 +306,6 @@ export function ResultScreen({
   chat,
   result,
   prevPlans,
-  messages,
   loading,
   error,
   onFollowup,
@@ -323,7 +321,6 @@ export function ResultScreen({
   onToggleCompare: (plan: PlanItem) => void;
   result: RecommendResponse | null;
   prevPlans: PlanItem[];
-  messages: ChatMessage[];
   loading: boolean;
   error: string | null;
   onFollowup: (text: string) => void;
@@ -351,8 +348,8 @@ export function ResultScreen({
     </section>
   );
 
-  const isUpdate = prevPlans.length > 0 && !result.needsMoreInput;
-  const visibleConditions = conditionCells(result).filter(({ value, k }) => value !== '미지정' && k !== '후보군').slice(0, 5);
+  const isUpdate = prevPlans.length > 0;
+  const visibleConditions = conditionCells(result).filter(({ value }) => value !== '미지정').slice(0, 5);
   const verdict = result.referenceVerdict;
   const verdictTitle = verdict?.status === 'keep'
     ? '기준 요금제보다 확실히 나은 후보는 확인되지 않았어요'
@@ -436,7 +433,7 @@ export function ResultScreen({
           </section>
         )}
         {result.plans.length === 0 ? (
-          !result.needsMoreInput && <fieldset disabled={loading} className="plain-fieldset"><EmptyResult blockers={result.blockers} onRelaxCondition={onRelaxCondition} /></fieldset>
+          <fieldset disabled={loading} className="plain-fieldset"><EmptyResult blockers={result.blockers} onRelaxCondition={onRelaxCondition} /></fieldset>
         ) : (
           <div className="recommendation-showcase">
             <div className="recommendation-intro">

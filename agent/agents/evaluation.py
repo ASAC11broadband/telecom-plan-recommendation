@@ -101,7 +101,7 @@ def _matches_requested_benefits(profile: UserProfile, plan: dict) -> bool:
 
 
 # UserProfile 의 hard_constraints 필드명 → 후보 dict 검증식.
-# data.py 의 filter_candidates 와 짝이지만 판정은 한 단계 느슨하게 둔다(오탐이 재시도를 태우므로).
+# data.py 의 filter_candidates 와 짝이지만 판정은 한 단계 느슨하게 둔다(오탐이 로그를 흐리므로).
 CONSTRAINT_CHECKS = {
     "budget_min_won": lambda plan, v: plan["discounted_fee"] >= v,
     "budget_max_won": lambda plan, v: plan["discounted_fee"] <= v,
@@ -178,7 +178,7 @@ def _ranking_errors(profile: UserProfile | None, ranked: list, rows: list[dict])
         errors.append(f"같은 요금제가 여러 순위를 차지함: {', '.join(duplicated)}")
 
     # 다기준 순위는 한 축의 최솟값/최댓값과 다를 수 있다. SMAA-2 결과를
-    # 단일 가격/데이터 축으로 다시 판정하면 정상 결과도 무한 재추천하게 된다.
+    # 단일 가격/데이터 축으로 다시 판정하면 정상 결과도 위반으로 잡힌다.
     ranks = [plan.expected_rank for plan in ranked]
     if all(value is not None for value in ranks) and any(a > b for a, b in zip(ranks, ranks[1:])):
         errors.append("SMAA-2 기대순위와 출력 순서가 어긋남")

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """단계 사이를 오가는 데이터 계약.
 
-여기를 바꾸면 Profiling/Recommend 프롬프트도 같이 손봐야 한다.
+여기를 바꾸면 Profiling 프롬프트도 같이 손봐야 한다.
 """
 
 from __future__ import annotations
@@ -258,8 +258,7 @@ class Evaluation(BaseModel):
     retry_target: Literal["profiling", "recommend", "report", "none"] = Field(
         "none",
         description=(
-            "재시도할 단계. 조건 추출 자체가 틀렸으면 profiling, "
-            "후보·랭킹이 문제면 recommend, 추천은 맞는데 리포트 서술만 문제면 report, "
-            "합격이거나 재시도로 고칠 수 없으면 none"
+            "재시도할 단계. 카드 문장이 설명 검증에 걸려 다시 쓰게 하면 report, "
+            "합격이거나 재시도로 고칠 수 없으면 none. profiling/recommend 로는 되돌리지 않는다"
         ),
     )

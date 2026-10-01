@@ -474,7 +474,7 @@ def _opt_text(value) -> str:
 
 # 페이백·사은품은 일시금이라 월 단위 비교에 그대로 더하면 과대평가된다.
 # 비교 구간으로 나눠 월 환산한다. 구간은 agent.mcda.COMPARE_MONTHS 하나로 통일돼 있다
-# (추천 가격 효용·화면 총비용·혜택 월 환산이 같은 기간을 써야 서로 비교된다).
+# (갈아타기 판단·화면 총비용·혜택 월 환산이 같은 기간을 써야 서로 비교된다).
 BENEFIT_AMORTIZE_MONTHS = COMPARE_MONTHS
 _ONE_OFF_CATEGORIES = {"페이백", "포인트/적립", "상품권/사은품", "쿠폰/할인", "유심/배송비"}
 # 현금으로 돌려받는 혜택. 사용자가 그 서비스를 쓰는지와 무관하게 납부 총액이 줄어든다.
@@ -1167,51 +1167,6 @@ def _row_summary(r) -> dict:
     }
 
 
-# LLM 에게 보여줄 필드. 필터용 파생 숫자(data_gb/qos_mbps/voice_minutes 등)는
-# 사람이 읽는 data/voice 와 같은 사실의 중복 표현이라 판정을 헷갈리게 해서 뺀다.
-#
-# 다만 사람이 읽는 대응 필드가 아예 없는 사실(테더링·문자·사업자 유형·망 세대 등)까지
-# 빼면 안 된다. Report Agent 는 후보 원본 전체를 받아 쓰는데 Evaluation Agent 는 이
-# 목록만 받으므로, 여기 없는 사실을 리포트가 인용하면 평가가 "데이터에 없는 기능을
-# 단정했다"고 오판한다. 실제로 테더링 40GB 를 적은 멀쩡한 리포트가 재시도 2회를
-# 태우고도 미통과로 끝났다. 두 에이전트가 보는 사실의 범위를 같게 맞춘다.
-SLIM_FIELDS = (
-    "plan_id",
-    "plan_name",
-    "carrier",
-    "carrier_type",
-    "network_gen",
-    "data",
-    "data_tier_label",
-    "daily_data_gb",
-    "tethering_gb",
-    "voice",
-    "sms_unlimited",
-    # 문자 건수는 voice 처럼 사람이 읽는 대응 필드가 없다. 빼 두면 리포트가 적은
-    # '문자 300건'을 평가가 "데이터에 없는 기능"으로 잡는다(실측: 재시도 1회 소모).
-    "sms_count",
-    "is_online_only",
-    "plan_category",
-    "monthly_fee",
-    "discounted_fee",
-    "discount_type",
-    "discount_period_months",
-    "ott_options",
-    "included_benefits",
-    "benefit_categories",
-    "benefit_details",
-    "benefit_value_won",
-    "age_condition",
-    "signup_notice",
-    "qos_source_suspect",
-)
-
-
-def slim(rows: list[dict]) -> list[dict]:
-    """프롬프트에 넣을 필드만 남긴다."""
-    return [{field: row.get(field) for field in SLIM_FIELDS} for row in rows]
-
-
 if __name__ == "__main__":
     assert normalize_plan_name("SKT 초이스 90 요금제") == normalize_plan_name("초이스90")
     assert normalize_plan_name("베스트 99") == normalize_plan_name("베스트99")
@@ -1238,8 +1193,6 @@ if __name__ == "__main__":
         not x["data_unlimited"] and (x.get("data_gb") or 0) <= 100
         for x in capped
     )
-
-    assert "data_gb" not in slim(c)[0] and slim(c)[0]["plan_name"] == c[0]["plan_name"]
 
     # 사용자 어투의 수식어가 붙어도 같은 요금제를 찾아야 한다
     assert normalize_benefit("유튜브 프리미엄 포함") == "유튜브 프리미엄"
@@ -1349,7 +1302,6 @@ if __name__ == "__main__":
     assert any(row["age_condition"] == "만 34세 이하" for row in youth)
     assert not any(row["age_condition"] == "만 12세 이하" for row in youth)
 
-    # 혜택 가치: 택1은 그룹당 하나, 일시금은 월 환산, 값 없는 혜택은 0 원 취급하지 않는다
     # 0건일 때 어느 조건이 막았는지 짚어 준다 (넷플릭스 혜택 요금제는 최저 59,000원이다)
     # 넷플릭스 혜택은 통신 3사 상품에만 있다. 병목 진단 자체를 보는 검사라 범위를 넓혀 둔다.
     impossible = {"budget_max_won": 30000, "wanted_benefits": ["넷플릭스"], "user_age": 28, "include_mno": True}
@@ -1361,6 +1313,7 @@ if __name__ == "__main__":
     assert budget_blocker["minimum_fee"] > 30000
     assert diagnose_empty({"budget_max_won": 30000}) == []  # 후보가 있으면 병목도 없다
 
+    # 혜택 가치: 택1은 그룹당 하나, 일시금은 월 환산, 값 없는 혜택은 0 원 취급하지 않는다
     assert BENEFIT_AMORTIZE_MONTHS == COMPARE_MONTHS == 12
     assert monthly_benefit_value([{"name": "A", "value_won": 12000, "categories": ["멤버십"]}]) == 12000
     assert monthly_benefit_value([{"name": "A", "value_won": None, "categories": []}]) == 0

@@ -1,4 +1,4 @@
-import { PlanItem, RecommendResponse } from '../types';
+import { RecommendResponse } from '../types';
 
 const PRIORITY_LABELS: Record<string, string> = {
   price: '월 요금',
@@ -10,7 +10,7 @@ const PRIORITY_LABELS: Record<string, string> = {
 };
 
 /** 내부 점수표 대신 사용자가 추천 흐름을 이해할 수 있는 말로 설명한다. */
-export function RecommendationTrace({ result }: { result: RecommendResponse; plan?: PlanItem }) {
+export function RecommendationTrace({ result }: { result: RecommendResponse }) {
   const trace = result.trace;
   if (!trace?.rankedCount) return null;
 

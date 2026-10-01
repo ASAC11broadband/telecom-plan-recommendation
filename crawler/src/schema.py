@@ -29,8 +29,6 @@ PROJECT_DIR = BASE_DIR.parent
 DATA_DIR = BASE_DIR / "data"
 RAW_CACHE_DIR = DATA_DIR / "raw_cache"   # 사이트 원본 HTML/JSON
 INTERIM_DIR = DATA_DIR / "interim"       # 사이트별 중간 CSV
-# 캐시/중간 결과는 crawler/data에 두되, 검증을 통과한 최종본은 애플리케이션이
-# 실제로 읽는 프로젝트 루트의 data/에 바로 반영한다.
 # 크롤러가 만든 최종 CSV. **추천 서비스가 읽는 루트 data/ 와 다른 곳이다.**
 # 예전에는 이 값이 PROJECT_DIR/"data" 라서 수집 파이프라인이 추천 모델의 입력을
 # 직접 덮어썼다. 수집 결과가 흔들리면 추천 결과도 같이 흔들려 비교가 불가능해진다.

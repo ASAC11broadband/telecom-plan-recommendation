@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """CSV 요금제 행(agent.data._row_summary 결과)을 화면이 쓰는 PlanItem 으로 옮긴다.
 
-여기서만 하는 일: 비교 구간 총비용 계산, 표시 문자열 조립, 해시태그 규칙.
-필터링·랭킹은 agent 쪽 담당.
+여기서만 하는 일: 비교 구간 총비용 계산, 표시 문자열 조립, 해시태그 규칙, 탐색 화면 필터·정렬.
+추천 후보 필터링·랭킹은 agent 쪽 담당.
 """
 
 from __future__ import annotations
@@ -35,8 +35,9 @@ def monthly_fee_schedule(row: dict, months: int = COMPARE_MONTHS) -> list[int]:
 def total_cost(row: dict, months: int = COMPARE_MONTHS) -> int:
     """비교 구간 총 납부액.
 
-    구간은 agent.mcda.COMPARE_MONTHS 하나뿐이다. 추천의 가격 평가와 화면의 총비용이
-    같은 기간을 써야 "순위는 A가 위인데 총비용은 B가 싸다"는 설명이 성립한다.
+    구간은 agent.mcda.COMPARE_MONTHS 하나뿐이다. 총비용·혜택 월 환산·갈아타기 판단이
+    같은 기간을 써야 같은 상품의 총비용이 화면마다 달라 보이지 않는다.
+    순위의 가격 축은 이 값이 아니라 지금 내는 월 요금이다(agent.mcda._PRICE_HORIZON_MONTHS).
     """
     return sum(monthly_fee_schedule(row, months))
 
@@ -86,7 +87,7 @@ def _data_label(row: dict) -> str:
 
 
 def _qos_label(row: dict) -> str:
-    """소진 후 속도. 값이 없는 것은 '없음'이 아니라 '미수집'이다(822건).
+    """소진 후 속도. 값이 없는 것은 '없음'이 아니라 '미수집'이다.
 
     자료에 없는 것을 '속도 제어 없음'으로 단정하면 사용자는 종량 과금이 없다고 읽는다.
     """
@@ -97,7 +98,7 @@ def _qos_label(row: dict) -> str:
 
 
 def _tethering_label(row: dict) -> str:
-    """테더링. 전체의 72%(1,981건)가 미수집이라 '미제공'으로 단정할 수 없다."""
+    """테더링. 대부분이 미수집이라 '미제공'으로 단정할 수 없다."""
     gb = row.get("tethering_gb")
     return f"{gb:g}GB" if gb is not None else "확인 필요"
 
@@ -395,7 +396,7 @@ def _in_data_bucket(row: dict, bucket: str) -> bool:
         return 10 <= gb < 20
     if bucket == "gte20":
         return gb >= 20
-    # 카드형 탐색 화면(fron)이 쓰는 구간. 위 구간과 함께 둔다.
+    # 카드형 탐색 화면이 쓰는 구간. 위 구간과 함께 둔다.
     ranges = {"lt10": (0, 10), "10to30": (10, 30), "30to50": (30, 50), "50to100": (50, 100), "gte100": (100, float("inf"))}
     if bucket in ranges:
         lo, hi = ranges[bucket]
