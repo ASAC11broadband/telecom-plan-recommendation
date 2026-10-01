@@ -350,6 +350,5 @@ python -m experiments.weight_scale_check
 
 - [`experiments/README.md`](experiments/README.md): 실험·평가 스크립트 설명
 - [`evaluation/README.md`](evaluation/README.md): 추천 방식 비교 채점 결과와 재현 방법
-- [`HANDOFF.md`](HANDOFF.md): 현재 정책값과 구현 결정 이력
 - [`outputs/분석노트/`](outputs/분석노트/): 추천 방식과 전처리 근거
 - [최종 발표 자료](https://www.canva.com/design/DAHVOQJsDFw/r9zDLZfINRgZP4tsivcnjw/view?utm_content=DAHVOQJsDFw&utm_campaign=designshare&utm_medium=link2&utm_source=uniquelinks&utlId=h0c9ea10961)
