@@ -23,7 +23,7 @@
 
 ## 서비스 시연
 
-최종 발표 29페이지에 사용한 약 1분 49초 분량의 웹 서비스 시연 영상입니다.
+웹 서비스 시연 영상입니다.
 
 <p align="center">
   <a href="./docs/assets/demo/momoplan-demo.mp4">
