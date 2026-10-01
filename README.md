@@ -190,7 +190,7 @@ profiling → profile_check → recommend → report → evaluation
 
 ## 실행 방법
 
-이 프로젝트는 Colab이나 Jupyter Notebook이 아니라 로컬에서 백엔드와 프런트엔드를 각각 실행하는 웹 애플리케이션입니다.
+이 프로젝트는 로컬에서 백엔드와 프런트엔드를 각각 실행하는 웹 애플리케이션입니다.
 
 ### 1. 실행 환경
 
