@@ -1598,7 +1598,7 @@ if __name__ == "__main__":
         UserProfile(budget_min_won=30000, budget_max_won=39999), "월 데이터 20GB 이상, 요금 3만원 이하로 추천해줘"
     )
     assert both.budget_min_won is None and both.budget_max_won == 30000, both
-    # 사용자가 직접 말한 하한은 지운다
+    # 사용자가 직접 말한 하한은 지킨다
     kept_min = _repair_budget_bounds(
         UserProfile(budget_min_won=20000, budget_max_won=30000), "2만원 이상 3만원 이하로"
     )

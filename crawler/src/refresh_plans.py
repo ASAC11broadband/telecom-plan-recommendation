@@ -21,7 +21,7 @@
 "볼 게 있는지"를 알 수 있고, 있으면 changes CSV의 source_url로 라이브 페이지를
 직접 확인할 수 있다.
 
-⑨ 원문 대조(data_verify)는 LLM 판정이라 오탐이 난다(docs/수정이력.md 15번).
+⑨ 원문 대조(data_verify)는 LLM 판정이라 오탐이 난다.
 개수 기반인 check_guards()와 성격이 달라 **최종 CSV 반영을 막지 않는다.**
 불일치는 data/review/verify_*.md에 리포트로만 남는다.
 """
@@ -205,7 +205,7 @@ def check_guards(prev: list[dict], new: list[dict], benefits: list[dict],
 
     # 전체 행 수만 보면 **한 사이트가 통째로 망가져도 안 걸린다.** 모요가 전체의
     # 8할이라, KT가 259행 -> 29행(-89%)이 됐는데도 전체로는 -8%뿐이라 위 가드를
-    # 통과했다(docs/수정이력.md 35번). 그래서 수집 단위별로 따로 본다.
+    # 통과했다. 그래서 수집 단위별로 따로 본다.
     # host_mno는 망 제공사라 알뜰폰도 KT/SKT/LGU+로 찍힌다. "누가 수집했나"로
     # 세야 하므로 carrier_type으로 MNO만 걸러 세고 MVNO(모요)는 따로 센다.
     def _by_source(rows):
@@ -379,7 +379,7 @@ def main() -> int:
 def run_data_verify() -> None:
     """방금 반영된 신규/변경 표본을 원문과 LLM으로 대조한다.
 
-    실패해도(키 없음, 예외) 갱신을 막지 않는다 - 모듈 docstring ⑩ 참고.
+    실패해도(키 없음, 예외) 갱신을 막지 않는다 - 모듈 docstring ⑨ 참고.
     """
     print("\n=== 원문 대조 (data_verify) ===")
     try:

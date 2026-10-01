@@ -91,7 +91,7 @@ def fetch_combined_html(item_code: str) -> str:
 
     # 2026-08 개편으로 연령별 요금표(tableHTML)가 페이지 <script>에서 외부 JS
     # 파일로 빠졌다. 안 받아오면 그 상품의 요금제가 통째로 0건이 된다(초이스 등
-    # 4개가 이렇게 사라졌었다. docs/수정이력.md 35번). 파일명이 상품마다 다르므로
+    # 4개가 이렇게 사라졌었다). 파일명이 상품마다 다르므로
     # `js/data/*.js` 경로 패턴으로 찾는다. **앞서 붙인 조각까지 포함한**
     # combined_html에서 찾아야 한다 - 이 script 태그가 htmlUploadType 조각 안에
     # 들어있는 경우가 있다.
@@ -563,7 +563,7 @@ def dedupe_plan_id(plan: dict, benefits: list[dict], seen: dict) -> None:
 
 
 def age_variant_rows(item_code: str, tab_name: str, rows_by_age: dict,
-                     seen_ids: dict | None = None) -> list[dict]:
+                     seen_ids: dict | None = None) -> tuple[list[dict], list[dict]]:
     """KT는 나이대별 별도 요금제가 아니라 같은 요금제에 "덤" 혜택이 얹히는 방식이다.
 
     캐시 전수 대조 결과 "덤" 컬럼 값은 전부 "추가되는 양"이고 base에 더하면 총

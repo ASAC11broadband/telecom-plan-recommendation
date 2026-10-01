@@ -36,7 +36,7 @@ class PipelineState(TypedDict, total=False):
     blockers: list[dict]                # 후보 0건일 때 어느 조건이 막았는지
     recommendation_trace: dict         # 실제 후보 수·평가 기준. 발표 및 결과 설명용
     clarification_question: Optional[str]  # 진행 전 사용자에게 확인할 질문
-    ranked: list[ScoredPlan]            # 2단계(b) LLM 랭킹 결과
+    ranked: list[ScoredPlan]            # 2단계(b) SMAA-2 랭킹 결과
     report: str                         # 3단계가 write
     evaluation: Optional[Evaluation]    # 4단계가 write
 

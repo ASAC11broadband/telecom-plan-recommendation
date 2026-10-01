@@ -51,7 +51,7 @@ def route_after_evaluation(state: PipelineState, config: RunnableConfig) -> str:
     if ev is None or ev.passed:
         return END
     if state.get("attempt", 0) > MAX_REVISIONS:
-        return END  # 재시도 예산 소진 — evaluation 이 다음 시도에서 문장을 빼고 통과시킨다
+        return END  # 안전장치. 예산을 넘긴 evaluation 은 문장을 빼고 통과시켜 보통 여기 오지 않는다
     return "report" if ev.retry_target == "report" else END
 
 

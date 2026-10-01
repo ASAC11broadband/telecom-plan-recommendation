@@ -3,7 +3,7 @@
 **읽는 법:** "현재 상태"만 읽으면 지금 코드가 어떤 상태인지 안다. 그 아래 "이력"은 결정이 내려진 당시의
 기록을 최신순으로 그대로 둔 것이라, 뒤 항목의 수치·경로는 그 시점 기준이다.
 
-## 현재 상태 (2026-09-21, 브랜치 `fix/plan`)
+## 현재 상태 (2026-10-01, 프로젝트 종료 시점)
 
 ### 폴더
 
@@ -13,8 +13,10 @@ backend/      FastAPI            frontend/   React + Vite
 crawler/      통신 3사·모요 수집·일일 갱신 (결과는 crawler/data/, git 제외)
 data/         서비스가 읽는 CSV(고정) · baseline/(기준 유도용 고정본) · eval/(평가용 입력·결과) · synthetic_original/(합성 가입이력)
 experiments/  실험·평가 스크립트. 서비스는 import 하지 않는다 → experiments/README.md
+evaluation/   시나리오 100문항 방식 비교 (LLM 블라인드 채점 답지·추가지표·규칙 답지 평가) → evaluation/README.md
 notebooks/    가중치 학습·EDA 노트북
-outputs/      분석노트/ · 지표표_방법별비교.json  (발표 자료는 저장소에 올리지 않는다)
+outputs/      분석노트/ · 지표표_방법별비교.json
+발표자료/     슬라이드·차트·시연 영상·덱 빌드 스크립트 (git 제외, 저장소에 올리지 않는다)
 ```
 
 ### 지금 적용 중인 정책값 — 바꿀 곳은 각각 한 줄이다
@@ -26,7 +28,7 @@ outputs/      분석노트/ · 지표표_방법별비교.json  (발표 자료는
 | 순위의 가격 축 | 지금 내는 월 요금(할인가). "갈아탈 가치" 비교만 12개월 평균 | `agent/mcda.py` `_PRICE_HORIZON_MONTHS`, `_switching_monthly_fee` |
 | 효용 눈금 | 요구를 말한 축은 요구 기준(예산 대비·요구량 대비), 나머지는 **카탈로그 고정 범위**(속도 0~10Mbps · 데이터 log 0~300GB · 요금 √0~10만원 · 테더링 0~200GB). 후보 집합 min-max 는 쓰지 않는다 | `agent/mcda.py` `_*_RANGE_*` (점검: `experiments.weight_scale_check`) |
 | 추천 대상 | **알뜰폰**(모요의 통신 3사 직판 브랜드 제외). 통신 3사는 `include_mno`·`carrier_type=MNO`·브랜드 지정일 때만 후보. 탐색·비교함·'현재 요금제' 비교에는 전체가 쓰인다 | `agent/data.py` `filter_candidates` / `wants_big3` / `BIG3_DIRECT_BRANDS` |
-| 추천 노출 개수 | 5 | `agent/agents/recommend.py` `TOP_N` |
+| 추천 노출 개수 | 화면 3. 오프라인 평가는 상위 5개 | `agent/agents/recommend.py` `TOP_N` |
 | 페이백 상품 | 청구액이 확인된 81건만 추천·총비용에 포함, 미확인 3건 제외 | `data/페이백_청구액_검증.csv` → `agent/data.py` `_apply_verified_billing` |
 | 서비스 입력 CSV | 루트 `data/` 는 **일부러 고정**. 크롤러 결과를 복사하지 않는다 | — |
 

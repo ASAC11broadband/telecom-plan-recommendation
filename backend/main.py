@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""FastAPI 진입점. 화면이 부르는 4개 엔드포인트만 둔다.
+"""FastAPI 진입점.
 
     uvicorn backend.main:app --reload --port 8000
 
@@ -33,7 +33,6 @@ from .plans import (
     SORTS,
     apply_filters,
     facet_counts,
-    total_cost,
     to_plan_item,
     to_plan_items,
 )
@@ -287,8 +286,8 @@ def _conversation_only_response(kind: Literal["off_topic", "plan_info"], message
     }
 
 
-def _plan_information_answer(intent: str, scope: str, metric: str) -> str:
-    """표시 가격이 아니라 청구액이 확인된 상품만 정보 답변에 쓴다."""
+def _plan_information_answer(intent: str, scope: str) -> str:
+    """표시 가격이 아니라 청구액이 확인된 상품만 정보 답변에 쓴다. 기준은 초기 월 요금이다."""
     rows = [
         row for row in _rows()
         if row.get("billing_price_known")
@@ -298,9 +297,8 @@ def _plan_information_answer(intent: str, scope: str, metric: str) -> str:
     if not rows:
         return f"{scope} 범위에서 청구액이 확인된 요금제를 찾지 못했습니다."
 
-    value = (lambda row: total_cost(row) / COMPARE_MONTHS) if metric == "12개월 평균 비용" else (
-        lambda row: float(row["discounted_fee"])
-    )
+    metric = "초기 월 요금"
+    value = lambda row: float(row["discounted_fee"])
     reverse = intent == "expensive"
     ordered = sorted(rows, key=lambda row: (value(row), str(row.get("plan_name", ""))), reverse=reverse)
     if intent in ("5g", "lte"):
@@ -461,7 +459,7 @@ def _quick_chat_response(messages: list[Message]) -> dict | None:
         if not scope:
             return _conversation_only_response("plan_info", _PLAN_INFO_SCOPE_QUESTION)
         return _conversation_only_response(
-            "plan_info", _plan_information_answer(intent, scope, "초기 월 요금")
+            "plan_info", _plan_information_answer(intent, scope)
         )
 
     # 요금제 단서가 없는 평서문도 서비스 밖이다. 다만 요금제 추가 질문에 대한
@@ -574,7 +572,7 @@ def recommend(req: RecommendRequest) -> dict:
 
     return {
         "plans": plans,
-        # 데이터·요금을 둘 다 못 잡아 추천 전에 멈춘 경우. 화면은 결과 대신 질문을 띄운다.
+        # 데이터·요금 신호나 혜택 기준이 없거나 현재 요금제를 특정하지 못해 추천 전에 멈춘 경우. 화면은 결과 대신 질문을 띄운다.
         "needsMoreInput": not plans and bool(followup),
         "candidateCount": len(candidates),
         # 후보가 0건인 이유. 어느 조건을 풀면 몇 건이 살아나는지까지 담는다.
@@ -584,7 +582,7 @@ def recommend(req: RecommendRequest) -> dict:
         # 선택한 추천 상품과 현재 요금제를 화면에서 직접 비교할 수 있도록 원본 기준 상품도 전달한다.
         "referencePlan": to_plan_item(reference) if reference and reference.get("plan_id") else None,
         "referenceFacts": reference,
-        # 현재 요금제 유지/전환/판단불가. LLM 판정이 아니라 코드 판정이다.
+        # 현재 요금제 유지/전환/맞교환/판단불가. LLM 판정이 아니라 코드 판정이다.
         "referenceVerdict": state.get("reference_verdict"),
         "trace": {**state.get("recommendation_trace", {}),
                   "elapsedSeconds": round(time.monotonic() - started, 2),
@@ -629,8 +627,8 @@ def stats() -> dict:
 def _data_as_of() -> str:
     """추천에 쓰는 CSV 가 어느 날짜 수집분인지.
 
-    화면에 날짜를 하드코딩해 두면 데이터를 갈아끼울 때마다 어긋난다. 루트 CSV 는 고정본이라
-    파일 수정 시각이 수집일과 다르므로, 같은 내용의 크롤러 스냅샷을 찾아 그 날짜를 쓴다.
+    화면에 날짜를 하드코딩해 두면 데이터를 갈아끼울 때마다 어긋난다. 파일 수정 시각은
+    수집일과 다를 수 있어 행의 crawled_at 을 쓴다. 날짜가 여럿이면 범위로 보여준다.
     """
     dates = sorted({str(row.get("crawled_at") or "")[:10] for row in _rows()} - {""})
     return (dates[0] if dates[0] == dates[-1] else f"{dates[0]} ~ {dates[-1]}") if dates else "수집일 미확인"

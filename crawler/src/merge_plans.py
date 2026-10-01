@@ -198,7 +198,7 @@ def fill_undiscounted_fee(plans: list[dict]) -> int:
     할인이 아예 없는 온라인 전용(KT 요고 13 · LGU+ 너겟 46 · SKT 다이렉트 31)은
     이 값이 비어 있어서 "할인 없음"이 "가격 모름"과 같은 모양이었다. 가격 결측을
     거르면 3사 최저가 라인 90개가 통째로 사라진다. 할인 여부는 discount_type과
-    monthly_fee == discounted_fee로 여전히 구분된다. docs/수정이력.md 38번.
+    monthly_fee == discounted_fee로 여전히 구분된다.
     """
     filled = 0
     for p in plans:

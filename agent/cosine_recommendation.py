@@ -111,7 +111,7 @@ def prepare_plan_catalog(rows: list[dict] | None = None) -> pd.DataFrame:
 
 
 def _profile_values(profile: pd.Series | dict[str, Any]) -> dict[str, Any]:
-    get = profile.get if isinstance(profile, dict) else profile.get
+    get = profile.get
     raw_ott_want = get("ott_want", "")
     ott_want = "" if pd.isna(raw_ott_want) else str(raw_ott_want).strip()
     return {

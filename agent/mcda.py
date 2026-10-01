@@ -36,9 +36,9 @@ _WEIGHT_DATA_PATH = Path(__file__).resolve().parent / "weight_bootstrap.json"
 COMPARE_MONTHS = 12
 
 # 순위의 가격 축은 "지금 내는 월 요금"(discounted_fee)이다. 1 이면 _effective_monthly_fee 가
-# 할인가를 그대로 돌려준다. 12개월 평균으로 바꿔도 Top-5 가 같아서(질의 7종), 카드에 보이는
-# 금액과 순위가 쓰는 금액을 맞췄다. 할인 종료 후 정가는 순위가 아니라 근거·유의사항에서
-# 금액과 시점으로 밝힌다(priceRisesAfter / priceRisesLater / monthly_fee_schedule).
+# 할인가를 그대로 돌려준다. 카드에 보이는 금액과 순위가 쓰는 금액을 맞추려고 고른 값이다
+# (12개월 평균으로 바꾸면 Top-5 가 달라지는 질의가 많다). 할인 종료 후 정가는 순위가 아니라
+# 근거·유의사항에서 금액과 시점으로 밝힌다(priceRisesAfter / priceRisesLater / monthly_fee_schedule).
 _PRICE_HORIZON_MONTHS = 1
 _DATA_OVERSUPPLY_FLOOR = 0.8
 
@@ -197,7 +197,7 @@ def _benefit_fit(plan: dict, profile: object | dict | None) -> float:
     matched = matched_names + matched_categories
     if _profile_value(profile, "benefit_match_mode") == "any":
         return 1.0 if matched else 0.0
-    if matched == requested and requested > 1 and _profile_value(profile, "benefit_match_mode") != "any":
+    if matched == requested and requested > 1:
         if not benefit_requests_match(plan, wanted_names, wanted_categories, "all"):
             matched -= 1  # 택1 선택지를 '모두 제공'으로 만점 처리하지 않는다.
     return matched / requested
@@ -214,7 +214,7 @@ def _utility_rows(
             for fee in fees
         ]
     else:
-        # 예산이 없을 때도 단기 프로모션에 끌리지 않도록 12개월 평균요금을 사용한다.
+        # 예산이 없으면 가격도 카탈로그 고정 눈금(_FEE_RANGE_WON)으로 본다.
         price_utility = [1.0 - _fixed_scale(math.sqrt(max(0.0, fee)), math.sqrt(_FEE_RANGE_WON)) for fee in fees]
 
     explicit_min_data = _profile_value(profile, "min_data_gb")
@@ -414,7 +414,7 @@ def evaluate_mcda(
             recommendation_fit=max(0.0, min(100.0, 100 * fit_sums[i] / samples)),
             top3_acceptability=top3_acceptabilities[i],
         )
-        for i, candidate in enumerate(candidates)
+        for i in range(n)
     ]
 
 

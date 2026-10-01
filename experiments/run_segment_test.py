@@ -29,7 +29,6 @@ from agent.segmentation import (
 
 OUTPUT_DIR = ROOT / "data" / "synthetic_original"
 DEFAULT_OUTPUT = OUTPUT_DIR / "segment_recommendation_comparison.xlsx"
-DEFAULT_JSONL = OUTPUT_DIR / "segment_recommendation_comparison.jsonl"
 
 
 def _result_rows(

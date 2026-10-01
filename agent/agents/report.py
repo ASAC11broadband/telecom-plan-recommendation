@@ -458,7 +458,7 @@ def _ensure_promo_notices(report: str, recommendations: list[dict[str, Any]]) ->
     """요금 조건은 LLM의 문장 생략 여부에 맡기지 않고 원본 값으로 붙인다.
 
     상품 설명을 차별점·주의사항 중심으로 짧게 쓰게 하면서 금액을 본문에서 빼면,
-    코드 검증(_report_errors 의 '할인가 누락')에 걸려 리포트 단계가 통째로 재시도된다.
+    코드 검증(_report_errors 의 '할인가 누락')에 걸린다.
     할인 중이 아닌 상품에도 같은 줄을 붙여 금액은 항상 확정 값으로 남긴다.
     """
     by_rank = {int(plan['rank']): plan for plan in recommendations}

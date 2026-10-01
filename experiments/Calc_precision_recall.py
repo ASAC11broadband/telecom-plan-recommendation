@@ -1,5 +1,5 @@
 """
-정답지(test_cases_정답지.xlsx)와 챗봇 결과(chatbot_results_gemini.xlsx)를 비교해서
+정답지(test_cases_정답지.xlsx)와 챗봇 결과(recommend_results.xlsx, run_testset 이 만든다)를 비교해서
 문항별 Precision/Recall을 계산하고, 레벨별·전체 평균으로 집계하는 스크립트.
 
 계산 방식:
@@ -18,7 +18,7 @@
     - 콘솔에도 요약 표 출력
 
 사용법:
-    python calc_precision_recall.py
+    python -m experiments.Calc_precision_recall
 """
 
 import sys
