@@ -200,12 +200,19 @@ PROFILING_PROMPT = """휴대폰 요금제 상담 요청을 UserProfile로 구조
 - 1년 넘게 할인 → min_discount_period_months=13
 
 [우선순위·Hard Constraint]
-- priorities에는 사용자가 말한 정렬 기준 중 price/data/qos/benefit/voice/tethering만 저장한다.
+- priorities에는 사용자가 말한 정렬 기준 중 price/data/qos/benefit만 저장한다.
   없으면 null이며 시스템 기본값을 넣지 않는다.
+- '선호해/선호하고/선호하며/중요하게/우선/위주'는 정렬 선호다.
+  여러 축을 '데이터와 테더링을 선호해'처럼 함께 말하면 priorities_ordered=false,
+  '1순위는 데이터, 그다음은 테더링'처럼 순서를 밝히면 true다.
 - 예산·데이터량 같은 조건 문장은 정렬 기준이 아니다. '3만원 이하로 추천해줘'는 budget_max_won만
   채우고 priorities에 price를 넣지 않는다. '제일 싼 걸로', '가격을 최우선으로'처럼 순서를
   직접 요구할 때만 priorities에 넣는다.
-- sms와 carrier는 점수 우선순위가 아니다. '문자가 중요하다'만으로 sms_unlimited를 추측하지 말고,
+- tethering·voice·sms·carrier는 사용자 선호 가중치 축이 아니다. '테더링/통화/문자가 중요하다'만으로
+  voice_unlimited·sms_unlimited를 추측하지 말고, '통화 무제한이 필수', '문자 무제한만'처럼
+  구체적으로 요구한 경우에만 필터 조건으로 저장한다. '테더링 20GB 이상'도
+  min_tethering_gb 필터로는 계속 지원한다.
+  선호 통신사 이름 없이 '통신사가 중요하다'고만 하면 carrier 조건도 추측하지 않는다.
   선호 통신사 이름 없이 '통신사가 중요하다'고만 하면 carrier 조건도 추측하지 않는다.
 - 구체적인 금액·사용량·통신사·혜택 등 필터 조건은 기본적으로 Hard Constraint다.
 - 다만 말투가 희망이면 Hard Constraint가 아니다. 값은 해당 필드에 그대로 저장하되
@@ -320,7 +327,9 @@ def _repair_budget_bounds(profile: UserProfile, query: str) -> UserProfile:
 _PRIORITY_PHRASE_RE = re.compile(
     r"(?:제일|가장|최대한|무조건)\s*(?:싼|저렴|많|빠른|좋)"
     r"|(?:싼|저렴한|비싼|많은|빠른|좋은)\s*(?:것|거|순|순서|쪽)"
-    r"|순으로|순서대로|우선|최우선|중요(?:해|하|시)|중심으로|위주로|따지"
+    r"|순으로|순서대로|(?:1|2|3)\s*순위|첫째|둘째|셋째"
+    r"|우선|최우선|중요(?:해|하|시)|중심으로|위주로|따지"
+    r"|선호(?:해|하고|하며|해서|하는|하는데|하지만|합니다|한다|함)"
     r"|가성비",
     re.IGNORECASE,
 )
@@ -354,9 +363,9 @@ def _drop_inferred_priorities(profile: UserProfile, query: str) -> UserProfile:
     """
     if not profile.priorities:
         return profile
-    if _PRIORITY_PHRASE_RE.search(query or ""):
+    if any(_axes_in_priority_clauses(line) for line in (query or "").splitlines()):
         return profile
-    return profile.model_copy(update={"priorities": None})
+    return profile.model_copy(update={"priorities": None, "priorities_ordered": False})
 
 
 # 우선순위 표현이 가리키는 축. UserProfile.priorities 의 Literal 과 1:1 이다.
@@ -365,9 +374,44 @@ _PRIORITY_AXIS_PATTERNS = (
     ("data", re.compile(r"데이터|제공량|용량")),
     ("qos", re.compile(r"속도|qos|소진\s*후", re.IGNORECASE)),
     ("benefit", re.compile(r"혜택|사은품|페이백|ott", re.IGNORECASE)),
-    ("voice", re.compile(r"통화|음성")),
-    ("tethering", re.compile(r"테더링|핫스팟")),
 )
+
+def _first_priority_axis(text: str) -> tuple[int, str] | None:
+    found = [
+        (match.start(), name)
+        for name, pattern in _PRIORITY_AXIS_PATTERNS
+        if (match := pattern.search(text)) is not None
+    ]
+    return min(found, default=None)
+
+
+def _explicit_priority_axes(utterance: str) -> list[str]:
+    """1순위·2순위 또는 '그다음' 표현에서 순서가 확실한 축만 반환한다."""
+    ranked: list[tuple[int, str]] = []
+    ordinal_matches = list(
+        re.finditer(r"(?P<rank>[123])\s*순위|첫째|둘째|셋째", utterance)
+    )
+    word_ranks = {"첫째": 1, "둘째": 2, "셋째": 3}
+    for index, marker in enumerate(ordinal_matches):
+        end = ordinal_matches[index + 1].start() if index + 1 < len(ordinal_matches) else len(utterance)
+        axis = _first_priority_axis(utterance[marker.end():end])
+        if axis:
+            rank = int(marker.group("rank")) if marker.group("rank") else word_ranks[marker.group(0)]
+            ranked.append((rank, axis[1]))
+    if ranked:
+        return list(dict.fromkeys(name for _, name in sorted(ranked)))
+
+    next_marker = re.search(r"그다음|다음으로", utterance)
+    if next_marker:
+        before = [
+            (match.start(), name)
+            for name, pattern in _PRIORITY_AXIS_PATTERNS
+            for match in pattern.finditer(utterance[:next_marker.start()])
+        ]
+        after = _first_priority_axis(utterance[next_marker.end():])
+        if before and after:
+            return list(dict.fromkeys([max(before)[1], after[1]]))
+    return []
 
 # 한 발화 안에서도 우선순위를 말한 절만 본다. "3만원 이하, 데이터 20GB 이상 조건은
 # 그대로 두고, 가격을 가장 중요하게" 에서 앞 절의 '데이터'까지 축으로 세면 순서가 뒤집힌다.
@@ -407,9 +451,15 @@ def _repair_latest_priority(profile: UserProfile, query: str) -> UserProfile:
     필수 조건(예산 상한·최소 데이터량)은 건드리지 않는다. 바뀌는 것은 정렬 축뿐이다.
     """
     for utterance in reversed((query or "").splitlines()):
-        axes = _axes_in_priority_clauses(utterance)
+        explicit_axes = _explicit_priority_axes(utterance)
+        axes = explicit_axes or _axes_in_priority_clauses(utterance)
         if axes:
-            return profile if profile.priorities == axes else profile.model_copy(update={"priorities": axes})
+            ordered = len(axes) > 1 and bool(explicit_axes)
+            if profile.priorities == axes and profile.priorities_ordered == ordered:
+                return profile
+            return profile.model_copy(
+                update={"priorities": axes, "priorities_ordered": ordered}
+            )
     return profile
 
 
@@ -695,7 +745,8 @@ BENEFIT_PREFERENCE_QUESTION = (
 _VAGUE_BENEFIT_PREFERENCE_RE = re.compile(
     r"(?:부가\s*)?혜택\s*(?:이|은|을|도)?\s*(?:현재보다\s*)?(?:더\s*)?"
     r"(?:(?:가장|제일|특히)\s*)?(?:좋(?:은|아|고|게)|괜찮(?:은|아|고)|나은|우선|중요|중심|"
-    r"많(?:은|아|고|게)|다양(?:한|해|하고)|풍부(?:한|해)|선호(?:해|하는|합니다|한다|함))",
+    r"많(?:은|아|고|게)|다양(?:한|해|하고)|풍부(?:한|해)|"
+    r"선호(?:해|하고|하며|해서|하는|하는데|하지만|합니다|한다|함))",
     re.IGNORECASE,
 )
 _BENEFIT_PREFERENCE_MARKER = "benefit_preference"
@@ -983,6 +1034,65 @@ _BENEFIT_FOLLOWUP_RE = re.compile(
     r"(?:어떤|무슨).{0,12}혜택|혜택.{0,16}(?:포함|좋(?:을|은)|원하|찾)",
     re.IGNORECASE,
 )
+
+
+def _apply_pending_benefit_reply(
+    profile: UserProfile,
+    messages: list[object],
+) -> UserProfile:
+    """직전 혜택 질문에 대한 짧은 답을 혜택 카테고리로 확정한다.
+
+    프로필 LLM은 HumanMessage만 받으므로 ``도서·콘텐츠`` 같은 답이
+    직전의 "어떤 혜택?" 질문에 대한 선택임을 놓칠 수 있다. 실제
+    대화 메시지를 확인해 이 연결만 결정적으로 보정한다.
+    """
+    latest_human_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[index], HumanMessage)
+        ),
+        None,
+    )
+    if latest_human_index is None:
+        return profile
+
+    latest_reply = str(messages[latest_human_index].content).strip()
+    category = normalize_benefit_category(latest_reply)
+    if category is None:
+        return profile
+
+    previous_assistant = next(
+        (
+            message
+            for message in reversed(messages[:latest_human_index])
+            if isinstance(message, AIMessage)
+        ),
+        None,
+    )
+    if previous_assistant is None or not _BENEFIT_FOLLOWUP_RE.search(
+        str(previous_assistant.content)
+    ):
+        return profile
+
+    categories = list(profile.wanted_benefit_categories or [])
+    if category not in categories:
+        categories.append(category)
+    return profile.model_copy(
+        update={
+            "wanted_benefit_categories": categories,
+            "needs_user_input": False,
+            "followup_question": None,
+            "ambiguous": [
+                item
+                for item in profile.ambiguous
+                if item != _BENEFIT_PREFERENCE_MARKER
+            ],
+            "comparison_goals": [
+                goal for goal in (profile.comparison_goals or []) if goal != "better"
+            ] or None,
+        }
+    )
 
 
 def _drop_unrequested_benefit_followup(profile: UserProfile, query: str) -> UserProfile:
@@ -1371,7 +1481,9 @@ def _apply_soft_data_preference(profile: UserProfile, query: str) -> UserProfile
     priorities = list(profile.priorities or [])
     if "data" in priorities:
         return profile
-    return profile.model_copy(update={"priorities": [*priorities, "data"]})
+    return profile.model_copy(
+        update={"priorities": [*priorities, "data"], "priorities_ordered": False}
+    )
 
 
 # 결과 화면의 선택 문장은 LLM이 LTE/5G를 필수 조건으로 오해하지 않도록 코드로 확정한다.
@@ -1480,6 +1592,7 @@ def profiling_node(state: PipelineState, config: RunnableConfig) -> dict:
     query = user_query(state)
 
     profile = llm.invoke([SystemMessage(content=prompt), *messages])
+    profile = _apply_pending_benefit_reply(profile, state.get("messages", []))
     for repair in _REPAIRS:
         profile = repair(profile, query)
     profile = _normalize_profile(profile)

@@ -235,7 +235,8 @@ function PreferenceSwitch({ profile, loading, onFollowup }: {
       <div className="ranking-control-copy">
         <strong>가장 중요한 항목</strong>
         <p>{current.length
-          ? `${current.map((key) => PRIORITY_CHOICES.find((c) => c.key === key)?.label ?? key).join(' → ')} 기준으로 순위를 계산 중입니다.`
+          ? `${current.map((key) => PRIORITY_CHOICES.find((c) => c.key === key)?.label ?? key)
+              .join(profile?.priorities_ordered ? ' → ' : ' · ')} 기준으로 순위를 계산 중입니다.`
           : '가격·데이터·소진 후 속도·혜택을 함께 반영하고 있습니다.'}</p>
       </div>
       <fieldset disabled={loading} className="plain-fieldset">
