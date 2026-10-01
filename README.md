@@ -103,11 +103,11 @@ Mentor: 채진영
 profiling → profile_check → recommend → report → evaluation
 ```
 
-- `profiling`: 자연어 대화에서 사용자 조건 추출
-- `profile_check`: 추출한 조건을 실제 사용자 발화와 대조
-- `recommend`: 하드 필터링과 SMAA-2로 후보 평가
-- `report`: 추천 이유와 현재 요금제 대비 변화 생성
-- `evaluation`: 결과 문장의 금액·방향·과장 표현 검증
+- `profiling`: 자연어 대화에서 예산, 데이터 사용량, 필수 혜택 등의 조건 추출
+- `profile_check`: 추출된 조건이 사용자의 실제 요청과 일치하는지 검증
+- `recommend`: 필수 조건으로 후보를 선별하고 SMAA-2로 추천 순위 계산
+- `report`: 추천 이유와 현재 요금제 대비 비용·데이터 차이 설명
+- `evaluation`: 추천 설명의 요금·절감액을 다시 계산하고, 실제 결과와 반대되거나 확인할 수 없는 표현이 있는지 검증
 
 ## 추천 알고리즘
 
