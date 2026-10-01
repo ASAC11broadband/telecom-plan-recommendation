@@ -6,7 +6,7 @@
 
 자연어로 말한 사용량과 예산, 원하는 혜택을 실제 통신 요금제 데이터와 연결해 맞춤 요금제를 추천하는 웹 서비스입니다. 통신 3사와 알뜰폰 요금제를 한곳에서 탐색·비교할 수 있으며, 추천 결과는 요금제 Top 3와 선택 근거, 현재 요금제 대비 12개월 비용 변화로 제공합니다.
 
-> ASAC 빅데이터 분석가 11기 브로드밴드 최종 프로젝트 · 2026.08–2026.09<br>
+> ASAC 빅데이터 분석가 11기 브로드밴드 최종 프로젝트 · 2026.07–2026.09<br>
 > [최종 발표 자료](https://www.canva.com/design/DAHVOQJsDFw/r9zDLZfINRgZP4tsivcnjw/view?utm_content=DAHVOQJsDFw&utm_campaign=designshare&utm_medium=link2&utm_source=uniquelinks&utlId=h0c9ea10961)
 
 ## 프로젝트 개요
