@@ -153,7 +153,7 @@ profiling → profile_check → recommend → report → evaluation
 | 지식 기반: SMAA-2 무작위 가중치 | 51.6% | 56.0% | 10.3% | 62.3% |
 | **지식 기반: SMAA-2 + 회귀계수** | **47.4%** | **68.0%** | **10.1%** | **62.9%** |
 
-최종 방식은 상위 5개 전체 적중률보다 사용자가 먼저 보는 1순위의 정확도를 우선해 선택했습니다. 채점 기준·후보 풀·채점 원본과 집계 스크립트는 [`evaluation/`](evaluation/README.md)에 있습니다. `data/eval/test_cases_정답지.xlsx`를 사용하는 규칙 기반 Precision/Recall 평가는 이 발표 평가와 별개의 과거 평가입니다.
+최종 방식은 상위 5개 전체 적중률보다 사용자가 먼저 보는 1순위의 정확도를 우선해 선택했습니다. `data/eval/test_cases_정답지.xlsx`를 사용하는 규칙 기반 Precision/Recall 평가는 이 발표 평가와 별개의 과거 평가입니다.
 
 ## 기술 스택
 
@@ -181,7 +181,6 @@ profiling → profile_check → recommend → report → evaluation
 ├── crawler/src/           # 통신 3사·모요 수집 및 검증
 ├── data/                  # 서비스용 CSV, 기준 데이터, 평가 데이터
 ├── experiments/           # 추천 방식 비교와 평가 스크립트
-├── evaluation/            # 추천 방식 비교 LLM 블라인드 채점 결과와 추가 지표
 ├── notebooks/             # EDA와 회귀 가중치 분석
 ├── outputs/               # 분석 노트와 비교 지표
 ├── requirements.txt
@@ -345,10 +344,3 @@ python -m experiments.weight_scale_check
 - 서비스 배포 후 추천 클릭, 상세 조회, 비교함 추가와 전환 데이터를 수집해 가중치를 다시 추정할 필요가 있습니다.
 - 통신 3사 데이터는 온라인 전용 요금제 중심이라 일부 오프라인 요금제를 이름으로 찾지 못할 수 있습니다.
 - 통신사 웹페이지 구조가 바뀌면 크롤러 파서와 스키마 검증 규칙을 함께 갱신해야 합니다.
-
-## 참고 문서
-
-- [`experiments/README.md`](experiments/README.md): 실험·평가 스크립트 설명
-- [`evaluation/README.md`](evaluation/README.md): 추천 방식 비교 채점 결과와 재현 방법
-- [`outputs/분석노트/`](outputs/분석노트/): 추천 방식과 전처리 근거
-- [최종 발표 자료](https://www.canva.com/design/DAHVOQJsDFw/r9zDLZfINRgZP4tsivcnjw/view?utm_content=DAHVOQJsDFw&utm_campaign=designshare&utm_medium=link2&utm_source=uniquelinks&utlId=h0c9ea10961)
