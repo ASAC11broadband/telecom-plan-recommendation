@@ -153,7 +153,7 @@ profiling → profile_check → recommend → report → evaluation
 | 지식 기반: SMAA-2 무작위 가중치 | 51.6% | 56.0% | 10.3% | 62.3% |
 | **지식 기반: SMAA-2 + 회귀계수** | **47.4%** | **68.0%** | **10.1%** | **62.9%** |
 
-최종 방식은 상위 5개 전체 적중률보다 사용자가 먼저 보는 1순위의 정확도를 우선해 선택했습니다. `data/eval/test_cases_정답지.xlsx`를 사용하는 규칙 기반 Precision/Recall 평가는 이 발표 평가와 별개의 과거 평가입니다.
+최종 방식은 상위 5개 전체 적중률보다 사용자가 먼저 보는 1순위의 정확도를 우선해 선택했습니다. 채점 기준·후보 풀·채점 원본과 집계 스크립트는 [`evaluation/`](evaluation/README.md)에 있습니다. `data/eval/test_cases_정답지.xlsx`를 사용하는 규칙 기반 Precision/Recall 평가는 이 발표 평가와 별개의 과거 평가입니다.
 
 ## 기술 스택
 
@@ -181,6 +181,7 @@ profiling → profile_check → recommend → report → evaluation
 ├── crawler/src/           # 통신 3사·모요 수집 및 검증
 ├── data/                  # 서비스용 CSV, 기준 데이터, 평가 데이터
 ├── experiments/           # 추천 방식 비교와 평가 스크립트
+├── evaluation/            # 추천 방식 비교 LLM 블라인드 채점 결과와 추가 지표
 ├── notebooks/             # EDA와 회귀 가중치 분석
 ├── outputs/               # 분석 노트와 비교 지표
 ├── requirements.txt
