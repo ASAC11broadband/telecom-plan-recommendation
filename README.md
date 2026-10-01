@@ -116,9 +116,9 @@ profiling → profile_check → recommend → report → evaluation
 
 | 방식 | 구현 | 설명 | 적용 위치 |
 |---|---|---|---|
-| 협업 필터링 | `agent/segmentation.py` | 합성 가입 이력을 KMeans 세그먼트로 나누고 세그먼트별 인기 요금제를 추천 | 비교 실험 |
-| 콘텐츠 기반 | `agent/cosine_recommendation.py` | 사용자 요구 벡터와 요금제 속성 벡터의 코사인 유사도 계산 | 비교 실험 |
-| 지식 기반 | `agent/data.py`, `agent/mcda.py` | 필수 조건으로 후보를 거른 뒤 SMAA-2로 다기준 순위 계산 | 실제 서비스 |
+| 협업 필터링 | `agent/segmentation.py` | 합성 가입 이력을 KMeans 세그먼트로 나누고 세그먼트별 인기 요금제를 추천 | 
+| 콘텐츠 기반 | `agent/cosine_recommendation.py` | 사용자 요구 벡터와 요금제 속성 벡터의 코사인 유사도 계산 |
+| 지식 기반 | `agent/data.py`, `agent/mcda.py` | 필수 조건으로 후보를 거른 뒤 SMAA-2로 다기준 순위 계산 | 
 
 ### 서비스에 적용한 지식 기반 추천
 
