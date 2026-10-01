@@ -26,14 +26,14 @@
 최종 발표 29페이지에 사용한 약 1분 49초 분량의 웹 서비스 시연 영상입니다.
 
 <p align="center">
-  <a href="./docs/assets/demo/momoplan-demo.mp4?raw=1">
+  <a href="./docs/assets/demo/momoplan-demo.mp4">
     <img src="docs/assets/demo/momoplan-demo-thumbnail.jpg" alt="모모플랜 서비스 시연 영상" width="900" />
   </a>
 </p>
 
 <p align="center">
   <strong>이미지를 클릭하면 시연 영상이 열립니다.</strong><br>
-  <a href="./docs/assets/demo/momoplan-demo.mp4?raw=1">시연 영상 직접 열기</a>
+  <a href="./docs/assets/demo/momoplan-demo.mp4">시연 영상 직접 열기</a>
 </p>
 
 ## 팀 구성 및 역할
@@ -88,25 +88,15 @@ Mentor: 채진영
 - 속도 보장이나 위약금처럼 데이터로 확인할 수 없는 표현 차단
 - 검증 실패 시 리포트를 한 번 수정하고 문제가 남으면 해당 문장 제거
 
-## 시스템 구성
+## 전체 아키텍처
 
-```mermaid
-flowchart LR
-    U[사용자] --> F[React + Vite]
-    F --> B[FastAPI]
-    B --> G[LangGraph 추천 파이프라인]
-    G --> P[조건 추출 및 검증]
-    P --> H[하드 필터링]
-    H --> M[SMAA-2 랭킹]
-    M --> R[추천 리포트]
-    R --> E[설명 검증]
-    E --> F
+최종 발표 자료 12페이지의 전체 시스템 아키텍처입니다.
 
-    C[KT·SKT·LG U+·모요 크롤러] --> V[스키마·변경 검증]
-    V --> D[서비스용 CSV]
-    D --> H
-    D --> F
-```
+<p align="center">
+  <img src="docs/assets/architecture/momoplan-overall-architecture.png" alt="모모플랜 전체 시스템 아키텍처" width="1000" />
+</p>
+
+### 추천 파이프라인
 
 추천 파이프라인은 다음 순서로 동작합니다.
 
