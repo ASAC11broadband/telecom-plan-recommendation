@@ -4,7 +4,9 @@
   <img src="frontend/public/images/hero-phone-character.png" alt="모모플랜 캐릭터" width="240" />
 </p>
 
-자연어로 말한 사용량과 예산, 원하는 혜택을 실제 통신 요금제 데이터와 연결해 맞춤 요금제를 추천하는 웹 서비스입니다. 통신 3사와 알뜰폰 요금제를 한곳에서 탐색·비교할 수 있으며, 추천 결과는 요금제 Top 3와 선택 근거, 현재 요금제 대비 12개월 비용 변화로 제공합니다.
+모모플랜은 원하는 월 요금, 데이터, 통신망과 혜택을 대화로 입력하면 조건에 맞는 요금제를 찾아주는 웹 서비스입니다.<br>
+SKT·KT·LG U+와 알뜰폰 요금제를 한곳에서 검색하고 비교할 수 있습니다.<br>
+가장 적합한 요금제 3개와 추천 이유, 현재 요금제 대비 12개월 예상 비용 차이를 함께 보여줍니다.
 
 > ASAC 빅데이터 분석가 11기 브로드밴드 최종 프로젝트 · 2026.07–2026.09<br>
 
@@ -256,12 +258,14 @@ profiling → profile_check → recommend → report → evaluation
 │   └── cosine_recommendation.py
 ├── backend/               # FastAPI 서버와 요금제 API
 ├── frontend/              # React + Vite 웹 화면
-├── crawler/src/           # 통신 3사·모요 수집 및 검증
-├── data/                  # 서비스용 CSV, 기준 데이터, 평가 데이터
+├── crawler/src/           # 통신 3사·모요 크롤러와 데이터 검증
+│   └── agents/            # 수집 결과 품질·스키마 변경 검증
+├── data/                  # 서비스용 요금제·혜택 CSV와 고정 기준 데이터
+├── evaluation/            # 답지 평가, 채점 결과와 추가 평가 지표
 ├── experiments/           # 추천 방식 비교와 평가 스크립트
-├── evaluation/            # 추천 방식 비교 LLM 블라인드 채점 결과와 추가 지표
 ├── notebooks/             # EDA와 회귀 가중치 분석
 ├── outputs/               # 분석 노트와 비교 지표
+├── docs/assets/           # README 아키텍처 이미지와 시연 영상
 ├── requirements.txt
 └── test_service_process.py
 ```
@@ -349,14 +353,6 @@ $env:API_TARGET="http://127.0.0.1:8001"
 npm run dev
 ```
 
-### 6. 프로덕션 빌드 확인
-
-```bash
-cd frontend
-npm run build
-npm run preview
-```
-
 ## 크롤러 실행
 
 크롤링은 웹 서비스 실행에 필수는 아닙니다. 저장된 데이터 대신 최신 데이터를 다시 수집하려는 경우에만 실행합니다.
@@ -382,39 +378,12 @@ python src/refresh_plans.py --promote
 |---|---|---|
 | GET | `/api/health` | 서버 상태 확인 |
 | GET | `/api/stats` | 전체 요금제 및 필터별 건수 |
-| GET | `/api/plans` | 검색·필터·정렬·페이지네이션 |
+| GET | `/api/plans` | 요금제 이름 검색, 조건 선택, 정렬 및 결과를 여러 페이지로 나눠 조회 |
 | GET | `/api/plans/{id}` | 요금제 상세 조회 |
 | POST | `/api/recommend` | 대화 기반 요금제 추천과 리포트 생성 |
 | POST | `/api/ask` | 특정 요금제에 대한 질문 |
 | GET | `/api/analysis` | 데이터 분석 요약 |
 | POST | `/api/analysis/ask` | 요금제 데이터 분석 질문 |
-
-## 테스트 및 자체 점검
-
-```bash
-# 백엔드·추천 서비스 회귀 테스트
-python -m unittest test_service_process
-
-# 주요 모듈 자체 점검
-python -m agent.data
-python -m agent.mcda
-python -m agent.agents.report
-python -m agent.agents.evaluation
-python -m backend.plans
-
-# 프런트엔드 타입 검사와 빌드
-cd frontend
-npm run build
-```
-
-추천 방식 비교 실험은 저장소 루트에서 실행합니다.
-
-```bash
-python -m experiments.run_segment_test
-python -m experiments.run_cosine_test
-python -m experiments.run_metric_table
-python -m experiments.weight_scale_check
-```
 
 ## 한계와 향후 과제
 
