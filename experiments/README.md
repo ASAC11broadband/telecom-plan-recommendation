@@ -2,7 +2,7 @@
 
 `experiments/`는 서비스 실행 코드가 아닌 추천 방식 비교, 가중치 분석, 평가용 스크립트를 모아둔 폴더입니다.
 
-서비스는 이 폴더를 import하지 않습니다. 모든 명령은 저장소 루트에서 `python -m experiments.<모듈명>` 형식으로 실행합니다.
+모든 명령은 저장소 루트에서 `python -m experiments.<모듈명>` 형식으로 실행합니다.
 
 ## 스크립트 한눈에 보기
 
@@ -31,17 +31,6 @@ python -m experiments.run_metric_table
 python -m experiments.make_synthetic_customers
 python -m experiments.weight_scale_check
 ```
-
-### 규칙 정답지 평가
-
-```powershell
-python -m experiments.run_testset
-python -m experiments.Calc_precision_recall
-```
-
-`run_testset`은 100개 시나리오를 추천 파이프라인에 입력하고, `Calc_precision_recall`은 결과를 정답지와 비교해 P/R 지표를 계산합니다. 기본 입력과 결과는 `data/eval/`에 있습니다.
-
-참고로 평가 화면은 최종적으로 Top 3를 보여주지만, 일부 비교 실험은 Top 5 기준으로 계산합니다(`run_testset`의 `MAX_RANK = 5`).
 
 ## 분석 그림 생성
 
