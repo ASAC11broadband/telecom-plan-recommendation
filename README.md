@@ -377,13 +377,13 @@ python src/refresh_plans.py --promote
 | 메서드 | 경로 | 설명 |
 |---|---|---|
 | GET | `/api/health` | 서버 상태 확인 |
-| GET | `/api/stats` | 전체 요금제 및 필터별 건수 |
-| GET | `/api/plans` | 요금제 이름 검색, 조건 선택, 정렬 및 결과를 여러 페이지로 나눠 조회 |
+| GET | `/api/stats` | 요금제 통계 조회 |
+| GET | `/api/plans` | 요금제 목록 조회 |
 | GET | `/api/plans/{id}` | 요금제 상세 조회 |
-| POST | `/api/recommend` | 대화 기반 요금제 추천과 리포트 생성 |
-| POST | `/api/ask` | 특정 요금제에 대한 질문 |
-| GET | `/api/analysis` | 데이터 분석 요약 |
-| POST | `/api/analysis/ask` | 요금제 데이터 분석 질문 |
+| POST | `/api/recommend` | 맞춤 요금제 추천 |
+| POST | `/api/ask` | 요금제 관련 질문 |
+| GET | `/api/analysis` | 요금제 분석 조회 |
+| POST | `/api/analysis/ask` | 요금제 분석 질문 |
 
 ## 한계와 향후 과제
 
