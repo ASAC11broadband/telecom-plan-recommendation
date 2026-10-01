@@ -1,85 +1,114 @@
-# evaluation
+# 추천 알고리즘 평가
 
-시나리오 100문항으로 추천 방식을 비교한 평가. 발표의 방식 비교표 수치가 여기서 나왔다.
+모모플랜의 추천 방식을 같은 질문 세트로 비교·검증하는 폴더입니다. 발표 자료의 추천 방식 비교표와 지표가 이 폴더의 결과에서 나왔습니다.
 
-- 문항: `data/eval/test_cases_정답지.xlsx` (레벨 1~4, 20·30·30·20문항)
-- 문항 조건: `testset_profiles.json`. git `904573c` 의 `data/eval/testset_profiles.json` 사본이다(LLM 이 문항에서 추출해 캐시한 것). 지금 `data/eval/` 에는 없다.
-- 카탈로그: 8/21 고정본 `data/baseline/2026-08-21/`. 답지평가의 `_latest` 결과만 그때의 현행 카탈로그다.
+> 이 폴더의 스크립트는 웹 서비스 실행에 필요하지 않습니다. 모든 명령은 저장소 루트에서 실행합니다.
 
-스크립트는 **저장소 루트에서** `python evaluation/<폴더>/<스크립트>.py` 로 돌린다. 루트로 이동해 `agent`·`experiments` 를 import 만 하고 고치지 않는다. LLM 은 부르지 않는다.
-환경 변수는 bash 기준(`CATALOG=baseline python ...`). PowerShell 은 `$env:CATALOG="baseline"; python ...`.
+## 평가 범위
 
-비교한 방식(6개 실행):
+- 시나리오: 총 100문항
+- 비교 방식: 협업 필터링, 콘텐츠 기반, 단순 SMAA-2, 회귀계수 기반 SMAA-2
+- 주요 평가: `nDCG@5`, `P@5`, `Hit@1`, 조건 위반률, 더 나은 대안 없음
+- 기본 카탈로그: 재현성을 위해 고정한 `data/baseline/2026-08-21/`
+- LLM 사용: 새답지의 블라인드 채점 단계에서만 사용
 
-| 이름 | 방식 | 후보 범위 |
+### 비교한 추천 방식
+
+| 방식 | 설명 | 서비스 적용 여부 |
 |---|---|---|
-| ① 세그먼트 분류(협업) | 합성 가입이력 세그먼트 인기 | 알뜰폰 유형 전체(통신 3사 직판 포함) |
-| ② 코사인 유사도(콘텐츠) | v1 코사인 | 알뜰폰 유형 전체(통신 3사 직판 포함) |
-| ③ 단순 SMAA-2 | 균등 난수 가중치 | 서비스와 같음(알뜰폰, 질문이 통신 3사를 찾으면 포함) |
-| ④ SMAA-2 + 회귀계수(채택) | 회귀계수(Ridge) 가중치 | 서비스와 같음 |
-| ③' · ④' | ③·④ 와 같음 | 통신 3사 항상 포함 |
+| 세그먼트 분류 | 합성 가입 이력을 세그먼트로 나누고 세그먼트별 인기 요금제 추천 | 비교 실험 |
+| 코사인 유사도 | 사용자 요구와 요금제 속성 벡터의 유사도 계산 | 비교 실험 |
+| 단순 SMAA-2 | 균등한 무작위 가중치로 다기준 순위 계산 | 비교 실험 |
+| SMAA-2 + 회귀계수 | 실제 가입 데이터에서 얻은 Ridge 가중치로 다기준 순위 계산 | 실제 서비스 |
 
-## 새답지 — LLM 블라인드 채점(0/1/2)
+## 현재 기준 평가: 새답지
 
-| 순서 | 실행 | 결과 |
-|---|---|---|
-| 1 | `CATALOG=baseline python evaluation/새답지/run_answer_key.py` | `answer_key_results_baseline.csv` (방식별 Top-5, `top5_ids` 는 `\|` 구분) |
-| 2 | `build_pool.py` | `pool_mapping.json` · `채점자용_문항/batch_01~10.md` |
-| 3 | LLM 채점 | `채점원본/grades_01~10.json` |
-| 4 | `addendum_pool.py` | 후보 33개 추가 → `채점자용_문항/addendum.md` → `채점원본/grades_addendum.json` |
-| 5 | LLM 재채점 | `채점자용_문항/recheck_A·B.md` → `채점원본/recheck_A·B.json` |
-| 6 | `python evaluation/새답지/score_new_key.py` | 아래 표 |
+새답지는 후보를 블라인드 처리한 뒤 LLM이 0~2점으로 평가하는 방식입니다. 추천 알고리즘 이름을 숨긴 상태에서 후보의 조건 적합도를 평가하므로 방식별 편향을 줄일 수 있습니다.
 
-- 후보 풀: 문항마다 6개 실행의 Top-5 합집합 + 조건을 만족하는 무작위 5개(통신 3사 포함). 4단계까지 합쳐 2,028개(문항당 10~27, 평균 20.3).
-- 블라인드: 후보 순서를 섞고 코드(C01…)를 새로 붙여 어느 방식이 골랐는지 숨겼다. `pool_mapping.json`(코드 → plan_id)은 채점자에게 주지 않았다.
-- 채점: 사람이 아니라 LLM(Claude)이 `rubric.md`(2026-09-24 고정) 기준으로 후보마다 0/1/2점과 근거 한 줄을 냈다. 0점은 필수 조건 위반, 1점은 조건은 맞지만 더 나은 대안·할인 종료 부담 등이 있음, 2점은 추천해도 좋음.
-- 재채점: 20문항 412개 후보를 코드 역순으로 다시 채점했다. 완전 일치 95.6%, 1점 이내 99.3%, 이차 가중 카파 0.955.
-- 사람 검수는 하지 않았다. `human_check_sheet.csv` 의 `사람_등급` 칸이 비어 있다.
-- `build_pool.py`·`addendum_pool.py` 는 기록용이다. 다시 돌리면 `pool_mapping.json` 과 `채점자용_문항/*.md` 를 덮어써 채점원본과 어긋난다. `addendum_pool.py` 가 읽는 `pool_mapping_v1.json`(덧붙이기 전 풀)은 남아 있지 않고, 재채점 문항을 만든 스크립트도 없다.
-- 1단계는 `answer_key_summary_baseline.json` 도 만드는데 여기에는 남기지 않았다.
+### 실행 흐름
 
-`score_new_key.py` 는 채점원본·`pool_mapping.json`·1단계 결과를 읽어 계산만 한다. 다시 돌려도 아래 파일이 그대로 나온다.
+PowerShell 기준입니다. 저장소 루트에서 실행하세요.
+
+```powershell
+$env:CATALOG="baseline"
+python evaluation/새답지/run_answer_key.py
+python evaluation/새답지/build_pool.py
+```
+
+이후 생성된 `evaluation/새답지/채점자용_문항/batch_01~10.md`를 기준으로 LLM 채점을 진행합니다. 추가 후보가 필요한 경우 다음 단계를 실행합니다.
+
+```powershell
+python evaluation/새답지/addendum_pool.py
+```
+
+채점 결과를 `evaluation/새답지/채점원본/`에 저장한 뒤 최종 지표를 계산합니다.
+
+```powershell
+python evaluation/새답지/score_new_key.py
+```
+
+`build_pool.py`와 `addendum_pool.py`는 당시 평가를 재현하기 위한 기록용 스크립트입니다. 다시 실행하면 후보 코드와 채점 문항이 바뀔 수 있으므로 기존 채점 결과와 함께 사용할 때는 주의해야 합니다.
+
+### 새답지 결과 파일
 
 | 파일 | 내용 |
 |---|---|
-| `new_key_summary.json` | 방식별 평균 · 레벨별 nDCG@5 · 쌍 비교(문항 부트스트랩 95% CI) · 등급 분포 · 재채점 일치율 |
-| `new_key_scores.csv` | 문항 × 방식별 지표 |
-| `new_answer_key.csv` | 사람이 읽는 답지(문항별 후보·등급·근거) |
-| `human_check_sheet.csv` | 무작위 10문항 검수 시트(비어 있음) |
+| `new_key_summary.json` | 방식별 평균, 레벨별 nDCG@5, 쌍 비교, 등급 분포, 재채점 일치율 |
+| `new_key_scores.csv` | 문항·추천 방식별 세부 지표 |
+| `new_answer_key.csv` | 문항별 후보, 등급, 평가 근거를 사람이 읽는 형태로 정리 |
+| `human_check_sheet.csv` | 사람 검수용 시트. 현재 사람 등급은 비어 있음 |
 
-지표: nDCG@5(이득 2^g−1, 이상적 순위는 그 문항 풀 전체) · P@5(1점 이상) · P@5(2점) · Hit@1(1순위가 2점) · 위반률(0점 비율) · 더 나은 대안 없음.
-마지막 '더 나은 대안 없음'은 채점이 아니라 `run_answer_key.py` 가 코드로 계산한 값이다(전체 카탈로그 7축 파레토 비지배 비율).
+### 블라인드 채점 기준
+
+- `0점`: 필수 조건을 위반한 후보
+- `1점`: 조건은 맞지만 더 나은 대안이나 할인 종료 부담이 있는 후보
+- `2점`: 해당 조건에서 추천해도 좋은 후보
+
+현재 저장된 재채점 결과는 완전 일치 95.6%, 1점 이내 일치 99.3%, 이차 가중 카파 0.955입니다. 사람 검수는 아직 수행하지 않았습니다.
+
+### 결과 요약
 
 | 방식 | nDCG@5 | P@5(2점) | Hit@1 | 위반률 |
-|---|---|---|---|---|
-| ① 세그먼트 분류 | 27.6 | 19.0 | 27.0 | 68.8 |
-| ② 코사인 유사도 | 29.1 | 18.0 | 19.0 | 61.0 |
-| ③ 단순 SMAA-2 | 61.6 | 42.8 | 45.0 | 12.4 |
-| ④ SMAA-2 + 회귀계수(채택) | 58.3 | 36.0 | 51.0 | 12.2 |
-| ③' 통신 3사 포함 | 77.3 | 51.6 | 56.0 | 10.3 |
-| ④' 통신 3사 포함 | 76.5 | 47.4 | 68.0 | 10.1 |
+|---|---:|---:|---:|---:|
+| 세그먼트 분류 | 27.6 | 19.0 | 27.0 | 68.8 |
+| 코사인 유사도 | 29.1 | 18.0 | 19.0 | 61.0 |
+| 단순 SMAA-2 | 61.6 | 42.8 | 45.0 | 12.4 |
+| **SMAA-2 + 회귀계수** | **58.3** | **36.0** | **51.0** | **12.2** |
+| 통신 3사 포함 단순 SMAA-2 | 77.3 | 51.6 | 56.0 | 10.3 |
+| 통신 3사 포함 SMAA-2 + 회귀계수 | 76.5 | 47.4 | 68.0 | 10.1 |
 
-## 추가지표 — 답지 없이 재는 지표
+`nDCG@5`는 순위와 등급을 함께 반영하는 지표이고, `Hit@1`은 첫 번째 추천이 2점을 받은 비율입니다. 위반률은 0점 후보의 비율로 낮을수록 좋습니다.
 
-`python evaluation/추가지표/extra_metrics.py` (4분 안팎) → `extra_metrics_by_question.csv` · `extra_metrics_summary.json`. 다시 돌려도 같은 파일이 나온다.
-입력은 `새답지/` 의 `testset_profiles.json` 과 `answer_key_results_baseline.csv`.
+## 추가 지표
 
-- A. 100문항: 6개 실행 + 기준선 2개(조건 내 최저가 5 · 12개월 최저가 5). 조건 충족 · 파레토 비지배(전체·조건 내) · 가격 위치 · 할인 종료 충격 · 소진 후 속도 누락 · 근사중복 · 브랜드 다양성 · 커버리지 · 개인화 · 인기 편향.
-- B. 24개 격자(필요 5·20·50·100GB × 예산 1·1.5·2·3·4·6만원, 알뜰폰만): 예산 단조성 · 예산 5% 흔들 때 Top-5 유지율 · 선호 반응.
+답지 없이 추천 결과의 안정성과 편향을 확인하는 지표입니다.
 
-발표 표의 '더 나은 대안 없음'은 여기의 `pareto_feas`(조건 내 파레토 비지배, 조건 밖 추천은 실패로 셈)다. LLM 채점이 아니라 코드로 계산했다.
+```powershell
+python evaluation/추가지표/extra_metrics.py
+```
 
-## 답지평가 — 규칙 정답지 기준(이전 평가)
+결과:
 
-정답지 엑셀의 이름+가격 정답(437개)과 Top-5 를 맞춰 본다. 새답지 이전의 평가다.
+- `extra_metrics_by_question.csv`
+- `extra_metrics_summary.json`
 
-| 실행 | 결과 |
-|---|---|
-| `python evaluation/답지평가/run_answer_key.py` | `answer_key_results_latest.csv` · `answer_key_summary_latest.json` |
-| `CATALOG=baseline python evaluation/답지평가/run_answer_key.py` | `_baseline` |
-| `CATALOG=baseline EXCLUDE_PAYBACK=1 python evaluation/답지평가/run_answer_key.py` | `_baseline_nopayback` (페이백 체감가로 뽑힌 정답 45개 제외) |
-| `python evaluation/답지평가/fill_answer_key.py` | `filled_answer_ids.json` · `filled_answer_key.csv` (뺀 45개를 같은 규칙에 실제 청구액으로 다시 채움) |
-| `CATALOG=baseline ANSWER_IDS=evaluation/답지평가/filled_answer_ids.json python evaluation/답지평가/run_answer_key.py` | `_baseline_filled` |
+조건 충족률, 파레토 비지배 후보 비율, 가격 위치, 할인 종료 충격, 소진 후 속도 누락, 중복 추천, 브랜드 다양성, 커버리지, 개인화 반응 등을 확인합니다. 24개 예산·데이터 조합에서는 예산 증가에 따른 순위 변화와 선호도 반응도 점검합니다.
 
-지표: P@5 정확(답지와 같은 요금제, 분모 5) · 맞힐 수 있는 정답 기준 P@5 · 같은 스펙 허용 P@5 · 조건 충족 · 더 나은 대안 없음.
-`_baseline`·`_latest` 결과는 `p5_matchable` 열이 생기기 전 버전으로 만들었다. `새답지/run_answer_key.py` 는 이 스크립트에 세그먼트 Top-5 보정(8/21 에 없는 요금제 거르기)과 `top5_ids` 열을 더한 것이다.
+## 이전 평가: 답지평가
+
+`evaluation/답지평가/`는 새답지 이전에 사용한 규칙 기반 정답지 평가입니다. 현재 대표 결과는 `새답지/`에 있으며, 답지평가는 과거 결과 재현이 필요할 때만 사용합니다.
+
+```powershell
+python evaluation/답지평가/run_answer_key.py
+$env:CATALOG="baseline"
+python evaluation/답지평가/run_answer_key.py
+```
+
+정답지 원본은 `data/eval/test_cases_정답지.xlsx`이며, 평가 당시의 정답과 현재 추천 결과가 얼마나 일치하는지 확인하는 용도입니다.
+
+## 재현 시 주의사항
+
+- 항상 저장소 루트에서 실행합니다.
+- `CATALOG=baseline`은 고정 기준 카탈로그를 사용하고, 설정하지 않으면 최신 서비스용 데이터를 사용할 수 있습니다.
+- 평가 결과는 사용한 카탈로그와 스크립트 버전에 따라 달라질 수 있습니다.
+- 이 평가는 실제 사용자 만족도나 가입 전환율을 측정한 결과가 아닙니다.
