@@ -90,7 +90,7 @@ Mentor: 채진영
 
 ## 전체 아키텍처
 
-최종 발표 자료 12페이지의 전체 시스템 아키텍처입니다.
+ 전체 시스템 아키텍처입니다.
 
 <p align="center">
   <img src="docs/assets/architecture/momoplan-overall-architecture.png" alt="모모플랜 전체 시스템 아키텍처" width="1000" />
