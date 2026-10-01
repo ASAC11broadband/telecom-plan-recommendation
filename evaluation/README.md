@@ -110,6 +110,8 @@ python evaluation/추가지표/extra_metrics.py
 
 ```powershell
 python evaluation/답지평가/run_answer_key.py
+```
+
 
 ## 재현 시 주의사항
 
